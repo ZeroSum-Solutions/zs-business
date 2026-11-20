@@ -92,6 +92,7 @@ const EXPECTED_ACTIONS: Record<string, Permission> = {
   "business.profile.update": "business",
   "tenant.template.apply": "business",
   "booking.page.set_published": "business",
+  "booking.page.update": "business",
   "enrichment.request": "enrich",
   "contact.enrichment.block": "customers",
   "contact.enrichment.unblock": "enrich",
@@ -469,6 +470,8 @@ function operations(session: Session, actorId: string = randomUUID()): Record<st
     getSetup: { permission: null, run: () => session.getSetup() },
     applyTemplate: { permission: "business", run: () => session.applyTemplate({ templateId: "agency", timeZone: "UTC" }) },
     setBookingPagePublished: { permission: "business", run: () => session.setBookingPagePublished(tenant.pageId, { published: true }, randomUUID()) },
+    // public-intake.md P-24: the owner edits a page's title and description.
+    updateBookingPage: { permission: "business", run: () => session.updateBookingPage(tenant.pageId, { changes: { description: randomUUID() } }, randomUUID()) },
     getFollowUpStatus: { permission: "inbox.drafts", run: () => session.getFollowUpStatus() },
     updateFollowUpSettings: { permission: "agents", run: async () => {
       const { settings, revision } = await sessionFor(tenant.ownerId).getFollowUpStatus();

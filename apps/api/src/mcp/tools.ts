@@ -181,7 +181,7 @@ export const TOOLS: readonly ToolDefinition[] = Object.freeze([
   read("home_results", "results:read", "Leads, bookings and won revenue by source, this week so far against the same span of last week, in an IANA zone.",
     resultsQuerySchema, async (query, { principal, reads }) => ({ ...(await reads.homeResults(principal, query)) })),
 
-  read("get_business", "business:read", "Read the business profile (name, contact details, address, currency, time zone).", nothing,
+  read("get_business", "business:read", "Read the business profile (name, description, services, contact details, address, currency, time zone).", nothing,
     async (_args, { principal, reads }) => ({ ...(await reads.getBusiness(principal)) })),
 
   connectionTool("list_connections", "List the business's connected apps (stores) that can be read: connectionId, app, label and status (active or reauthorize), at most 20.",

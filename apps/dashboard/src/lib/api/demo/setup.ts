@@ -16,6 +16,7 @@ import {
   industryTemplatePreview,
   isIndustryTemplateId,
   setBookingPagePublishedRequestSchema,
+  updateBookingPageRequestSchema,
   uuidSchema,
   type AppliedSetup,
   type ApplyTemplateResponse,
@@ -117,6 +118,7 @@ export function createDemoSetup(ctx: DemoSetupContext): SetupApi & DemoSetupCont
     ctx.bookingPages.push({
       id: bookingPageId,
       title: template.bookingPage.title,
+      description: template.bookingPage.description ?? null,
       // IT-4: the page starts off line; the owner takes it live with IT-11.
       published: false,
       disclosureVersion: ctx.now().toISOString().slice(0, 7),
@@ -191,6 +193,26 @@ export function createDemoSetup(ctx: DemoSetupContext): SetupApi & DemoSetupCont
         const changed = page.published !== request.published;
         page.published = request.published;
         return { pageId, published: page.published, changed };
+      });
+    },
+
+    async updateBookingPage(pageId, changes, options) {
+      // The `business` permission is checked before any replay, as on the API.
+      if (ctx.actor().role !== "owner") {
+        await ctx.wait();
+        throw demoError("Forbidden");
+      }
+      return ctx.idempotent("booking.page.update", { pageId, changes }, options, () => {
+        if (!uuidSchema.safeParse(pageId).success) throw demoError("NotFound");
+        const request = ctx.parse(updateBookingPageRequestSchema, { changes });
+        const page = ctx.bookingPages.find((item) => item.id === pageId);
+        if (!page) throw demoError("NotFound");
+        const title = request.changes.title ?? page.title;
+        const description = "description" in request.changes ? request.changes.description ?? null : page.description;
+        const changed = title !== page.title || description !== page.description;
+        page.title = title;
+        page.description = description;
+        return { pageId, title, description, changed };
       });
     },
 

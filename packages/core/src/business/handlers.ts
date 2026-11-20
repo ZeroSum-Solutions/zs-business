@@ -1,6 +1,6 @@
 // Business profile (docs/requirements/business-profile.md): the read (BP-5) and the one write
-// (BP-6, BP-7) through the shared dispatcher. The display name keeps tenants.name in step in the
-// same transaction (BP-9) through a trigger, so an older reader sees the same name.
+// (BP-6, BP-7, BP-13, BP-14) through the shared dispatcher. The display name keeps tenants.name in
+// step in the same transaction (BP-9) through a trigger, so an older reader sees the same name.
 import {
   BUSINESS_PROFILE_TARGET,
   Conflict,
@@ -27,15 +27,18 @@ interface ProfileRow {
   time_zone: string | null;
   currency: string;
   postal_address: BusinessProfile["postalAddress"];
+  description: string | null;
+  services: string[];
   revision: number;
   updated_at: Date;
 }
-const columns = "display_name,legal_name,phone_e164,time_zone,currency,postal_address,revision,updated_at";
+const columns = "display_name,legal_name,phone_e164,time_zone,currency,postal_address,description,services,revision,updated_at";
 
 function profileRecord(row: ProfileRow): BusinessProfile {
   return {
     displayName: row.display_name, legalName: row.legal_name, phoneE164: row.phone_e164, timeZone: row.time_zone,
-    currency: row.currency, postalAddress: row.postal_address, revision: row.revision, updatedAt: iso(row.updated_at),
+    currency: row.currency, postalAddress: row.postal_address,
+    description: row.description, services: row.services, revision: row.revision, updatedAt: iso(row.updated_at),
   };
 }
 
@@ -61,10 +64,18 @@ const FIELDS: readonly { key: keyof BusinessProfileChanges; column: string; cast
   { key: "timeZone", column: "time_zone", cast: "" },
   { key: "currency", column: "currency", cast: "" },
   { key: "postalAddress", column: "postal_address", cast: "::jsonb" },
+  { key: "description", column: "description", cast: "" },
+  { key: "services", column: "services", cast: "::jsonb" },
 ];
 
 export const updateBusinessHandler: ActionHandler = {
   resolveTarget: resolveProfile,
+  // BP-13, BP-14: a save stored before the two fields existed replays with them empty, not as an invalid result.
+  async upgradeStoredResult(_tx, result) {
+    return result !== null && typeof result === "object" && !Array.isArray(result)
+      ? { description: null, services: [], ...result }
+      : result;
+  },
   async handle({ tx, command, binding, now }) {
     await requireMember(tx, binding.tenantId, binding.actorId, "business");
     const { payload } = parseOrFail(updateBusinessProfileCommandSchema, command);

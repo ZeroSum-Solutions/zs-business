@@ -30,13 +30,22 @@ const profile = {
   postalAddress: { line1: "12 Mill Lane", city: "Leeds", country: "GB" }, revision: 2, updatedAt: "2026-10-23T10:00:00.000Z",
 };
 
+const withContent = { ...profile, description: "Fine jewelry since 1952.", services: ["Repairs", "Resizing"] };
+
 describe("http client: business profile", () => {
   it("reads GET /v1/business and drops keys it does not know", async () => {
-    const { api, calls } = client([json(200, { ...profile, taxId: "never shown" })]);
+    const { api, calls } = client([json(200, { ...withContent, taxId: "never shown" })]);
     const read = await api.getBusiness();
-    expect(read).toEqual(profile);
+    expect(read).toEqual(withContent);
     expect(calls[0]!.url.pathname).toBe("/api/v1/business");
     expect(calls[0]!.init.method).toBe("GET");
+  });
+
+  it("reads an older API's profile, which has no description or services (BP-10), as none", async () => {
+    const { api } = client([json(200, profile), json(200, { actionId: ACTION, result: profile })]);
+    expect(await api.getBusiness()).toEqual({ ...profile, description: null, services: [] });
+    expect(await api.updateBusiness({ expectedRevision: 1, changes: { currency: "EUR" } }, { idempotencyKey: "key-0" }))
+      .toEqual({ ...profile, description: null, services: [] });
   });
 
   it("reports an API without the route as not_found", async () => {
@@ -45,9 +54,9 @@ describe("http client: business profile", () => {
   });
 
   it("saves with PUT, the idempotency key and the expected revision, and returns the profile", async () => {
-    const { api, calls } = client([json(200, { actionId: ACTION, result: profile })]);
+    const { api, calls } = client([json(200, { actionId: ACTION, result: withContent })]);
     const saved = await api.updateBusiness({ expectedRevision: 1, changes: { currency: "EUR" } }, { idempotencyKey: "key-1" });
-    expect(saved).toEqual(profile);
+    expect(saved).toEqual(withContent);
     expect(calls[0]!.url.pathname).toBe("/api/v1/business");
     expect(calls[0]!.init.method).toBe("PUT");
     expect(headers(calls[0])["Idempotency-Key"]).toBe("key-1");

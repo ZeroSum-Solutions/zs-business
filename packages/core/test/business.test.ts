@@ -50,12 +50,12 @@ afterAll(async () => { await database?.close(); });
 
 describe("reading the profile (BP-1, BP-5)", () => {
   it("gives every member the profile that came with the tenant", async () => {
-    const expected = { displayName: "Tenant A", legalName: null, phoneE164: null, timeZone: null, currency: "USD", postalAddress: null, revision: 1 };
+    const expected = { displayName: "Tenant A", legalName: null, phoneE164: null, timeZone: null, currency: "USD", postalAddress: null, description: null, services: [], revision: 1 };
     expect(await sessionFor(owner).getBusiness()).toMatchObject(expected);
     expect(await sessionFor(staff).getBusiness()).toMatchObject(expected);
     // Nothing else about the tenant rides along.
     expect(Object.keys(await sessionFor(staff).getBusiness()).sort()).toEqual([
-      "currency", "displayName", "legalName", "phoneE164", "postalAddress", "revision", "timeZone", "updatedAt",
+      "currency", "description", "displayName", "legalName", "phoneE164", "postalAddress", "revision", "services", "timeZone", "updatedAt",
     ]);
   });
 });
@@ -71,6 +71,7 @@ describe("updating the profile (BP-6, BP-7, BP-9)", () => {
     expect(saved.result).toEqual({
       displayName: "Tenant A", legalName: "Halden & Rowe Ltd", phoneE164: "+442079460000", timeZone: "Europe/London", currency: "EUR",
       postalAddress: { line1: "1 High St", city: "London", postalCode: "N1 9GU", country: "GB" },
+      description: null, services: [],
       revision: 2, updatedAt: new Date(now).toISOString(),
     });
     expect(await sessionFor(staff).getBusiness()).toEqual(saved.result);
@@ -144,5 +145,85 @@ describe("who may write (BP-6) and tenancy (BP-12)", () => {
     expect(await rejection(sessionFor(owner, fixture.b.tenantId).updateBusiness({ expectedRevision: 1, changes: { currency: "GBP" } }, randomUUID())))
       .toMatchObject({ code: "TenantDenied" });
     expect(await sessionFor(ownerB, fixture.b.tenantId).getBusiness()).toEqual(b);
+  });
+});
+
+describe("description and services (BP-13, BP-14)", () => {
+  const actionRows = (type: string, tenant = tenantId) => rows<{ id: string; result: Record<string, unknown> }>(
+    "SELECT id, result FROM actions WHERE tenant_id=$1 AND action_type=$2", [tenant, type]);
+
+  it("saves both through the profile action, and the next read by any member returns them", async () => {
+    const before = await sessionFor(owner).getBusiness();
+    const saved = await sessionFor(owner).updateBusiness({
+      expectedRevision: before.revision,
+      changes: { description: "  Fine jewelry since 1952.  ", services: [" Repairs ", "Resizing", "Bridal consultation"] },
+    }, randomUUID());
+    expect(saved.result).toMatchObject({
+      description: "Fine jewelry since 1952.", services: ["Repairs", "Resizing", "Bridal consultation"], revision: before.revision + 1,
+    });
+    expect(await sessionFor(staff).getBusiness()).toEqual(saved.result);
+  });
+
+  it("writes the action and its outbox event in the same transaction, and a replay writes neither again", async () => {
+    const before = await sessionFor(owner).getBusiness();
+    const key = randomUUID();
+    const body = { expectedRevision: before.revision, changes: { description: "Second wording." } };
+    const first = await sessionFor(owner).updateBusiness(body, key);
+    const events = async () => rows<{ n: number }>(
+      "SELECT count(*)::int AS n FROM outbox o JOIN actions a ON a.tenant_id=o.tenant_id AND a.id=o.action_id WHERE o.tenant_id=$1 AND a.idempotency_key=$2",
+      [tenantId, key]);
+    expect(await events()).toEqual([{ n: 1 }]);
+    expect(await sessionFor(owner).updateBusiness(body, key)).toEqual(first);
+    expect(await events()).toEqual([{ n: 1 }]);
+    expect((await sessionFor(owner).getBusiness()).revision).toBe(before.revision + 1);
+  });
+
+  it("replays a save stored before the two fields existed with them empty, not as an invalid result", async () => {
+    const before = await sessionFor(owner).getBusiness();
+    const key = randomUUID();
+    const body = { expectedRevision: before.revision, changes: { legalName: "Old Wording Ltd" } };
+    const first = await sessionFor(owner).updateBusiness(body, key);
+    // What an older server stored: the result without description and services.
+    await fixture.service((tx) => tx.query(
+      "UPDATE actions SET result = result - 'description' - 'services' WHERE tenant_id=$1 AND idempotency_key=$2", [tenantId, key]));
+    const replay = await sessionFor(owner).updateBusiness(body, key);
+    expect(replay.actionId).toBe(first.actionId);
+    expect(replay.result).toMatchObject({ legalName: "Old Wording Ltd", revision: first.result.revision, description: null, services: [] });
+  });
+
+  it("clears the description with null and the services with [], and keeps what the change does not name", async () => {
+    const before = await sessionFor(owner).getBusiness();
+    const cleared = await sessionFor(owner).updateBusiness({ expectedRevision: before.revision, changes: { description: null } }, randomUUID());
+    expect(cleared.result).toMatchObject({ description: null, services: before.services });
+    const none = await sessionFor(owner).updateBusiness({ expectedRevision: before.revision + 1, changes: { services: [] } }, randomUUID());
+    expect(none.result).toMatchObject({ description: null, services: [] });
+  });
+
+  it("names the field for a duplicate service, too many services or a blank description, and writes nothing", async () => {
+    const before = await sessionFor(owner).getBusiness();
+    const refuse = (changes: Record<string, unknown>) => rejection(sessionFor(owner).updateBusiness(
+      { expectedRevision: before.revision, changes } as never, randomUUID()));
+    expect(await refuse({ services: ["Repairs", "repairs"] })).toMatchObject({ code: "ValidationFailed", details: { issues: [{ path: "changes.services" }] } });
+    expect(await refuse({ services: Array.from({ length: 21 }, (_, i) => `S${i}`) })).toMatchObject({ code: "ValidationFailed" });
+    expect(await refuse({ description: "   " })).toMatchObject({ code: "ValidationFailed", details: { issues: [{ path: "changes.description" }] } });
+    expect(await sessionFor(owner).getBusiness()).toEqual(before);
+  });
+
+  it("refuses staff, who still read the two fields", async () => {
+    const before = await sessionFor(staff).getBusiness();
+    expect(await rejection(sessionFor(staff).updateBusiness({ expectedRevision: before.revision, changes: { description: "Hijacked" } }, randomUUID())))
+      .toMatchObject({ code: "TenantDenied" });
+    expect(await sessionFor(staff).getBusiness()).toEqual(before);
+  });
+
+  it("keeps tenant B's description and services apart from tenant A's", async () => {
+    const a = await sessionFor(owner).getBusiness();
+    const b = await sessionFor(ownerB, fixture.b.tenantId).getBusiness();
+    expect(b).toMatchObject({ description: null, services: [], revision: 1 });
+    const saved = await sessionFor(ownerB, fixture.b.tenantId).updateBusiness(
+      { expectedRevision: 1, changes: { description: "Tenant B only.", services: ["Only B"] } }, randomUUID());
+    expect(saved.result).toMatchObject({ description: "Tenant B only.", services: ["Only B"] });
+    expect(await sessionFor(owner).getBusiness()).toEqual(a);
+    expect((await actionRows("business.profile.update", fixture.b.tenantId)).length).toBe(1);
   });
 });

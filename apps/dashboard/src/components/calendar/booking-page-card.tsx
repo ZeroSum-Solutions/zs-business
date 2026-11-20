@@ -1,14 +1,27 @@
 "use client";
 
-import { ArrowSquareOut, Copy, Globe } from "@phosphor-icons/react";
-import { useState } from "react";
+import { ArrowSquareOut, Copy, Globe, PencilSimple } from "@phosphor-icons/react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useState, type FormEvent } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tray, TrayHeader, TrayTitle } from "@/components/ui/card";
+import { Input, Label, Textarea } from "@/components/ui/input";
+import { ErrorNote } from "@/components/ui/states";
 import { Segmented } from "@/components/ui/segmented";
 import { useToast } from "@/components/ui/toast";
-import type { BookingPageSummary } from "@/lib/api";
-import { useBookingPages } from "@/lib/queries";
+import { isApiError, type BookingPageChanges, type BookingPageSummary } from "@/lib/api";
+import { useApi } from "@/lib/api/react";
+import {
+  BOOKING_PAGE_MESSAGES,
+  pageFieldFromIssuePath,
+  readBookingPageForm,
+  toBookingPageForm,
+  type BookingPageForm,
+  type BookingPageFormErrors,
+} from "@/lib/booking-page-form";
+import { useIntentKey } from "@/lib/intent-key";
+import { useBookingPages, useKeys } from "@/lib/queries";
 
 const EMBED_OPTIONS = [{ value: "embedScript", label: "Widget" }, { value: "embedIframe", label: "Plain iframe" }] as const;
 
@@ -21,7 +34,8 @@ type Snippet = "embedScript" | "embedIframe";
 export function BookingPageCard() {
   const pages = useBookingPages();
   // A business without pages, or an API without public booking, shows nothing here.
-  if (!pages.isSuccess || pages.data.length === 0) return null;
+  // Pages already read stay on screen while a refresh fails, so a draft open in an editor is not lost.
+  if (!pages.data || pages.data.length === 0) return null;
   return (
     <Tray className="mt-4" aria-labelledby="booking-pages-title">
       <TrayHeader>
@@ -38,6 +52,7 @@ export function BookingPageCard() {
 function PageRow({ page }: { page: BookingPageSummary }) {
   const toast = useToast();
   const [snippet, setSnippet] = useState<Snippet>("embedScript");
+  const [editing, setEditing] = useState(false);
   const copy = async (text: string, what: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -53,6 +68,18 @@ function PageRow({ page }: { page: BookingPageSummary }) {
         <p className="font-bold text-fg">{page.title}</p>
         <Badge tone={page.published ? "success" : "neutral"} live={page.published}>{page.published ? "Live" : "Not published"}</Badge>
       </div>
+      {editing ? (
+        <PageEditForm page={page} onDone={() => setEditing(false)} />
+      ) : (
+        <div className="mt-2">
+          {page.description ? (
+            <p data-testid="booking-page-description" className="whitespace-pre-line text-sm text-fg-2">{page.description}</p>
+          ) : (
+            <p className="text-sm text-meta">No description. Customers see only the title.</p>
+          )}
+          <Button variant="secondary" className="mt-2" onClick={() => setEditing(true)}><PencilSimple aria-hidden />Edit details</Button>
+        </div>
+      )}
       <div className="mt-3 flex flex-wrap gap-2">
         <Button asChild variant="secondary">
           <a href={page.bookingUrl} target="_blank" rel="noreferrer noopener">
@@ -79,5 +106,99 @@ function PageRow({ page }: { page: BookingPageSummary }) {
         <Button variant="secondary" className="mt-2" onClick={() => copy(page[snippet], "embed code")}><Copy aria-hidden />Copy embed code</Button>
       </div>
     </li>
+  );
+}
+
+/** P-24: the owner changes a page's title and description after it is created. */
+function PageEditForm({ page, onDone }: { page: BookingPageSummary; onDone: () => void }) {
+  const api = useApi();
+  const queryClient = useQueryClient();
+  const { keys } = useKeys();
+  const toast = useToast();
+  const intents = useIntentKey();
+  // What the page held when the editor opened. A list refresh while the owner types must not change what
+  // counts as an edit, or an untouched field could be sent with an older value over a newer one.
+  const [opened] = useState(page);
+  const [form, setForm] = useState<BookingPageForm>(() => toBookingPageForm(opened));
+  const [errors, setErrors] = useState<BookingPageFormErrors>({});
+  const idBase = `page-${page.id}`;
+
+  const save = useMutation({
+    mutationFn: (changes: BookingPageChanges) =>
+      api.updateBookingPage(page.id, changes, { idempotencyKey: intents.keyFor({ pageId: page.id, changes }) }),
+    onSettled: (_result, error, changes) => intents.settle({ pageId: page.id, changes }, error),
+    onSuccess: async () => {
+      // The list and the setup read both carry the page's title; read them again.
+      await Promise.allSettled([
+        queryClient.invalidateQueries({ queryKey: keys.bookingPages }),
+        queryClient.invalidateQueries({ queryKey: keys.setup }),
+      ]);
+      toast("Booking page saved.");
+      onDone();
+    },
+    onError: (error) => {
+      if (!isApiError(error, "validation")) return;
+      const issues = Array.isArray(error.details.issues) ? error.details.issues : [];
+      const next: BookingPageFormErrors = {};
+      for (const issue of issues) {
+        const path = (issue as { path?: unknown } | null)?.path;
+        const field = typeof path === "string" ? pageFieldFromIssuePath(path) : null;
+        if (field) next[field] = BOOKING_PAGE_MESSAGES[field];
+      }
+      setErrors(next);
+    },
+  });
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    const read = readBookingPageForm(opened, form);
+    if (!read.ok) {
+      setErrors(read.errors);
+      document.getElementById(read.errors.title ? `${idBase}-title` : `${idBase}-description`)?.focus();
+      return;
+    }
+    setErrors({});
+    if (Object.keys(read.changes).length === 0) {
+      onDone();
+      return;
+    }
+    save.mutate(read.changes);
+  };
+
+  const describedBy = (field: keyof BookingPageForm) => (errors[field] ? `${idBase}-${field}-error` : undefined);
+  return (
+    <form className="mt-3 space-y-3" onSubmit={submit} noValidate aria-label={`Edit ${page.title}`}>
+      <fieldset disabled={save.isPending} className="space-y-3">
+        <div>
+          <Label htmlFor={`${idBase}-title`}>Title</Label>
+          <Input
+            id={`${idBase}-title`}
+            value={form.title}
+            aria-invalid={errors.title ? true : undefined}
+            aria-describedby={describedBy("title")}
+            onChange={(event) => setForm({ ...form, title: event.target.value })}
+          />
+          {errors.title ? <p id={`${idBase}-title-error`} className="mt-1 text-xs text-danger">{errors.title}</p> : null}
+        </div>
+        <div>
+          <Label htmlFor={`${idBase}-description`}>Description</Label>
+          <Textarea
+            id={`${idBase}-description`}
+            rows={4}
+            value={form.description}
+            aria-invalid={errors.description ? true : undefined}
+            aria-describedby={describedBy("description")}
+            onChange={(event) => setForm({ ...form, description: event.target.value })}
+          />
+          {errors.description ? <p id={`${idBase}-description-error`} className="mt-1 text-xs text-danger">{errors.description}</p> : null}
+          <p className="mt-1 text-xs text-meta">Shown to customers on the booking page. Leave empty to show none.</p>
+        </div>
+      </fieldset>
+      {save.isError && !isApiError(save.error, "validation") ? <ErrorNote error={save.error} /> : null}
+      <div className="flex flex-wrap gap-2">
+        <Button type="submit" disabled={save.isPending} aria-busy={save.isPending}>Save details</Button>
+        <Button type="button" variant="secondary" disabled={save.isPending} onClick={onDone}>Cancel</Button>
+      </div>
+    </form>
   );
 }

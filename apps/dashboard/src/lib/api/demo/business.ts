@@ -37,7 +37,7 @@ export interface DemoBusinessInternals {
 export function createDemoBusiness(ctx: DemoBusinessContext): BusinessApi & DemoBusinessControls & DemoBusinessInternals {
   let profile: BusinessProfile = {
     displayName: DEMO_BUSINESS, legalName: null, phoneE164: null, timeZone: null, currency: "USD",
-    postalAddress: null, revision: 1, updatedAt: ctx.now().toISOString(),
+    postalAddress: null, description: null, services: [], revision: 1, updatedAt: ctx.now().toISOString(),
   };
 
   /** A key set to null clears it; an absent key stays as it was. */
@@ -49,6 +49,8 @@ export function createDemoBusiness(ctx: DemoBusinessContext): BusinessApi & Demo
     if (changes.timeZone !== undefined) next.timeZone = changes.timeZone;
     if (changes.currency !== undefined) next.currency = changes.currency;
     if (changes.postalAddress !== undefined) next.postalAddress = changes.postalAddress;
+    if (changes.description !== undefined) next.description = changes.description;
+    if (changes.services !== undefined) next.services = changes.services;
     profile = next;
   }
 

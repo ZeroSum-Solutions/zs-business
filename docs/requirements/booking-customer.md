@@ -10,7 +10,8 @@ or clear that link. A website booking keeps its customer from the intake review
 
 Out of scope: creating a contact from the booking dialog (the member picks an existing contact
 or adds one in Customers first), messaging the customer, linking several people to one booking,
-and changing `booking.create`.
+and changing `booking.create`. Editing a booking page's own title and description is a separate
+action (`public-intake.md` P-24); a booking's length stays the resource's `slotLengthMinutes`.
 
 ## Evidence and decisions
 

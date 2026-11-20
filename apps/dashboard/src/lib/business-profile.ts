@@ -1,6 +1,6 @@
 // The Settings form for the business profile (business-profile.md BP-2, BP-3, BP-6): what a person
 // types becomes the `changes` a save sends. Pure, so the rules are tested without a screen.
-import { COUNTRY_CODES, type BusinessProfile, type BusinessProfileChanges, type PostalAddress } from "@zs/contracts";
+import { BUSINESS_SERVICES_MAX, BUSINESS_SERVICE_NAME_MAX, COUNTRY_CODES, type BusinessProfile, type BusinessProfileChanges, type PostalAddress } from "@zs/contracts";
 import { normalizePhone } from "./api/types";
 
 export interface BusinessForm {
@@ -17,6 +17,10 @@ export interface BusinessForm {
   postalCode: string;
   /** "" is not set. */
   country: string;
+  /** BP-13: what the business is, in a few sentences. "" is not set. */
+  description: string;
+  /** BP-14: one service per line. "" is none. */
+  services: string;
 }
 export type BusinessField = keyof BusinessForm;
 export type BusinessFormErrors = Partial<Record<BusinessField, string>>;
@@ -25,6 +29,7 @@ export type BusinessRead = { ok: true; changes: BusinessProfileChanges } | { ok:
 const ADDRESS_FIELDS = ["line1", "line2", "city", "region", "postalCode", "country"] as const;
 const LINE_MAX = 120;
 const LEGAL_NAME_MAX = 200;
+const DESCRIPTION_MAX = 2000;
 
 export const BUSINESS_MESSAGES = {
   displayName: "Enter your business name, up to 120 characters.",
@@ -36,6 +41,8 @@ export const BUSINESS_MESSAGES = {
   city: "Enter the city.",
   country: "Choose the country.",
   tooLong: "Keep this under 120 characters.",
+  description: "A description can be up to 2000 characters.",
+  services: `List up to ${BUSINESS_SERVICES_MAX} services, one per line, each up to ${BUSINESS_SERVICE_NAME_MAX} characters, none twice.`,
 } as const;
 
 export function toBusinessForm(profile: BusinessProfile): BusinessForm {
@@ -52,7 +59,18 @@ export function toBusinessForm(profile: BusinessProfile): BusinessForm {
     region: address?.region ?? "",
     postalCode: address?.postalCode ?? "",
     country: address?.country ?? "",
+    description: profile.description ?? "",
+    services: profile.services.join("\n"),
   };
+}
+
+/** The service names a textarea holds: one per line, trimmed, blank lines dropped. */
+export const parseServices = (text: string): string[] => text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== "");
+
+function servicesValid(names: string[]): boolean {
+  return names.length <= BUSINESS_SERVICES_MAX
+    && names.every((name) => [...name].length <= BUSINESS_SERVICE_NAME_MAX)
+    && new Set(names.map((name) => name.toLowerCase())).size === names.length;
 }
 
 /** The address a form describes: null when every field is empty, else the fields filled in. */
@@ -102,6 +120,14 @@ export function readBusinessForm(profile: BusinessProfile, form: BusinessForm): 
   if (form.timeZone !== (profile.timeZone ?? "")) changes.timeZone = form.timeZone === "" ? null : form.timeZone;
   if (form.currency !== profile.currency) changes.currency = form.currency;
 
+  const description = form.description.trim();
+  if ([...description].length > DESCRIPTION_MAX) errors.description = BUSINESS_MESSAGES.description;
+  else if (description !== (profile.description ?? "")) changes.description = description === "" ? null : description;
+
+  const services = parseServices(form.services);
+  if (!servicesValid(services)) errors.services = BUSINESS_MESSAGES.services;
+  else if (services.join("\n") !== profile.services.join("\n")) changes.services = services;
+
   const { address, errors: addressErrors } = addressOf(form);
   Object.assign(errors, addressErrors);
   if (Object.keys(addressErrors).length === 0 && !sameAddress(address, profile.postalAddress)) changes.postalAddress = address;
@@ -120,6 +146,8 @@ export function serverFieldMessage(field: BusinessField): string {
     case "line1": return BUSINESS_MESSAGES.line1;
     case "city": return BUSINESS_MESSAGES.city;
     case "country": return BUSINESS_MESSAGES.country;
+    case "description": return BUSINESS_MESSAGES.description;
+    case "services": return BUSINESS_MESSAGES.services;
     default: return BUSINESS_MESSAGES.tooLong;
   }
 }
@@ -130,7 +158,7 @@ export function fieldFromIssuePath(path: string): BusinessField | null {
   if (root !== "changes" || !key) return null;
   if (key === "phoneE164") return "phone";
   if (key === "postalAddress") return (ADDRESS_FIELDS as readonly string[]).includes(inner ?? "") ? (inner as BusinessField) : "line1";
-  return key === "displayName" || key === "legalName" || key === "timeZone" || key === "currency" ? key : null;
+  return key === "displayName" || key === "legalName" || key === "timeZone" || key === "currency" || key === "description" || key === "services" ? key : null;
 }
 
 /** Whichever of two copies of the profile has the higher revision; a tie takes `incoming`. Revisions only grow, so the lower one is stale. */

@@ -167,6 +167,7 @@ const DEMO_DISCLOSURE_TEXT = "We may send you occasional updates. You can opt ou
 export const DEMO_BOOKING_PAGE: BookingPageSummary = {
   id: DEMO_PAGE_ID,
   title: "Book a Halden & Rowe appointment",
+  description: "Showroom visits and repair estimates at Halden & Rowe. Pick a time and we will see you then.",
   published: true,
   disclosureVersion: "2026-10",
   resourceIds: [SHOWROOM_ID, REPAIR_ID],

@@ -82,8 +82,12 @@ import type {
 import type {
   ApplyTemplateResponse,
   BookingPagePublished,
+  BookingPageChanges,
+  BookingPageUpdated,
   SetupRead,
 } from "@zs/contracts";
+
+export type { BookingPageChanges, BookingPageUpdated };
 
 export type {
   AgentKindStatus,
@@ -784,6 +788,12 @@ export interface SetupApi {
   applyTemplate(input: { templateId: string; timeZone: string }): Promise<ApplyTemplateResponse>;
   /** Owners only. `changed: false` when the page already had the value. Throws `not_found` for an unknown page. */
   setBookingPagePublished(pageId: string, published: boolean, options: WriteOptions): Promise<BookingPagePublished>;
+  /**
+   * Owners only (public-intake.md P-24). Sets the title and/or description of a booking page; a
+   * description of null clears it. `changed: false` when the page already had every value. Throws
+   * `not_found` for an unknown page and `validation` for an empty title or an over-long text.
+   */
+  updateBookingPage(pageId: string, changes: BookingPageChanges, options: WriteOptions): Promise<BookingPageUpdated>;
 }
 
 /**

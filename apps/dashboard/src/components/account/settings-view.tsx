@@ -5,7 +5,7 @@ import { useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { ACTIVE_CURRENCIES, currencyLabel, type BusinessProfile, type UpdateBusinessProfileRequest } from "@zs/contracts";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input, Label, Select } from "@/components/ui/input";
+import { Input, Label, Select, Textarea } from "@/components/ui/input";
 import { DisabledReason } from "@/components/ui/disabled-reason";
 import { ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import { Segmented } from "@/components/ui/segmented";
@@ -58,6 +58,8 @@ const FIELD_IDS: Record<BusinessField, string> = {
   region: "biz-region",
   postalCode: "biz-postal",
   country: "biz-country",
+  description: "biz-description",
+  services: "biz-services",
 };
 
 const sameForm = (a: BusinessForm, b: BusinessForm) => (Object.keys(a) as BusinessField[]).every((field) => a[field] === b[field]);
@@ -72,7 +74,8 @@ function serverErrors(error: unknown): BusinessFormErrors | null {
     const field = typeof path === "string" ? fieldFromIssuePath(path) : null;
     if (field) errors[field] = serverFieldMessage(field);
   }
-  return errors;
+  // Issues that name no field of this form (an older API refusing a new field) show as the general error.
+  return Object.keys(errors).length > 0 ? errors : null;
 }
 
 export function SettingsView() {
@@ -111,7 +114,7 @@ function BusinessCard() {
     // The currency is not known (empty), so the form says "Not available" rather than inventing one.
     const known: BusinessProfile = {
       displayName: identity?.businessName ?? "", legalName: null, phoneE164: null, timeZone: null, currency: "",
-      postalAddress: null, revision: 1, updatedAt: "",
+      postalAddress: null, description: null, services: [], revision: 1, updatedAt: "",
     };
     body = <BusinessFormBody profile={known} reload={async () => undefined} lockedReason={BUSINESS_NOT_AVAILABLE} />;
   } else if (profile.isError) {
@@ -237,6 +240,16 @@ function BusinessFormBody({ profile, reload, lockedReason }: {
       <fieldset disabled={locked || save.isPending} className="space-y-4">
         {text("displayName", "Business name", { hint: "Shown in the header and the account menu." })}
         {text("legalName", "Legal name", { hint: "The registered name, if it differs. Leave empty if not." })}
+        <div>
+          <Label htmlFor={FIELD_IDS.description}>Description</Label>
+          <Textarea {...props("description", true)} rows={4} value={form.description} onChange={(event) => edit({ description: event.target.value })} />
+          {note("description", "What the business does, in a few sentences. Leave empty if not.")}
+        </div>
+        <div>
+          <Label htmlFor={FIELD_IDS.services}>Services</Label>
+          <Textarea {...props("services", true)} rows={4} value={form.services} onChange={(event) => edit({ services: event.target.value })} />
+          {note("services", "One service per line, like Bridal consultation.")}
+        </div>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           {text("phone", "Business phone", { type: "tel", autoComplete: "tel", hint: "With country code, like +1 212 555 0142." })}
           <div>

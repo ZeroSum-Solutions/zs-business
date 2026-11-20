@@ -18,7 +18,7 @@ describe("demo adapter: business profile", () => {
     const profile = businessProfileSchema.parse(await adapter().getBusiness());
     expect(profile).toEqual({
       displayName: DEMO_BUSINESS, legalName: null, phoneE164: null, timeZone: null, currency: "USD", postalAddress: null,
-      revision: 1, updatedAt: NOW.toISOString(),
+      description: null, services: [], revision: 1, updatedAt: NOW.toISOString(),
     });
   });
 
@@ -34,6 +34,22 @@ describe("demo adapter: business profile", () => {
     await api.updateBusiness({ expectedRevision: 1, changes: { phoneE164: "+442079460000", legalName: "Halden & Rowe Ltd" } }, key());
     const cleared = await api.updateBusiness({ expectedRevision: 2, changes: { phoneE164: null } }, key());
     expect(cleared).toMatchObject({ phoneE164: null, legalName: "Halden & Rowe Ltd", revision: 3 });
+  });
+
+  it("saves a description and services, clears the description with null, and keeps what it does not name (BP-13, BP-14)", async () => {
+    const api = adapter();
+    const saved = await api.updateBusiness({ expectedRevision: 1, changes: { description: "Fine jewelry.", services: ["Repairs", "Resizing"] } }, key());
+    expect(saved).toMatchObject({ description: "Fine jewelry.", services: ["Repairs", "Resizing"], revision: 2 });
+    const cleared = await api.updateBusiness({ expectedRevision: 2, changes: { description: null } }, key());
+    expect(cleared).toMatchObject({ description: null, services: ["Repairs", "Resizing"], revision: 3 });
+    expect((await api.updateBusiness({ expectedRevision: 3, changes: { services: [] } }, key())).services).toEqual([]);
+  });
+
+  it("refuses a duplicate service, too many services and an over-long description", async () => {
+    const api = adapter();
+    for (const changes of [{ services: ["Repairs", "repairs"] }, { services: Array.from({ length: 21 }, (_, i) => `S${i}`) }, { description: "x".repeat(2001) }]) {
+      expect(await failure(api.updateBusiness({ expectedRevision: 1, changes }, key()))).toMatchObject({ kind: "validation" });
+    }
   });
 
   it("refuses a stale revision with the current one", async () => {
