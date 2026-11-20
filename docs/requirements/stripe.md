@@ -130,9 +130,11 @@ budget over 20 s, since Vercel stops its function at 30 s (the Node loop may run
 (optional `STRIPE_WEBHOOK_PREVIOUS_SECRET`), `STRIPE_LIVEMODE` (`true` or `false`),
 `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL`, optional `STRIPE_CURRENCY` (`usd`),
 `STRIPE_TOPUP_MIN` and `STRIPE_TOPUP_MAX` (minor units), `STRIPE_API_VERSION`,
-`STRIPE_BASE_URL`; none of them is set on the workers project. Billing function (workers
-project only): `BILLING_WORKER=on`, `CRON_SECRET`,
-`BILLING_DATABASE_URL` (a login that may `SET ROLE service_role`). In Stripe: a webhook
+`STRIPE_BASE_URL`; none of them is set on the workers project, except `STRIPE_LIVEMODE`
+(below). Billing function (workers project only): `BILLING_WORKER=on`, `CRON_SECRET`,
+`BILLING_DATABASE_URL` (a login that may `SET ROLE service_role`); when it holds
+`BILLING_STRIPE_KEY` it also needs `STRIPE_LIVEMODE` (`true` or `false`), and a start with a key
+and no valid `STRIPE_LIVEMODE`, or one that does not match the key's mode, fails (`plans.md` PL-13). In Stripe: a webhook
 endpoint at `https://<api host>/webhooks/stripe` for the events listed above and the plan events of
 `plans.md` PL-9. Plan variables: `plans.md` PL-13.
 

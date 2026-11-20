@@ -1,6 +1,6 @@
 # Hub plans: paid subscriptions through Stripe Billing and Shopify App Pricing
 
-Status: draft contract, revision 6 (2026-11-12: PL-25, the free-tier marker and the daily site publish limit). Revision 5
+Status: draft contract, revision 7 (2026-11-20: PL-10 `resolved_at` orders a late failure after a resolution; PL-13 the worker key-mode check always runs). Revision 6 (2026-11-12: PL-25, the free-tier marker and the daily site publish limit). Revision 5
 (2026-11-11: PL-21..PL-24, a plan an operator grants to one tenant, which wins over
 the provider subscription). Revision 4 (2026-11-10: PL-8 also lets a customer cancel their own booking, `booking.self_cancel`,
 booking-self-service.md BS-12). Revision 3 (2026-11-07: PL-15..PL-20, Shopify merchants pay through
@@ -203,8 +203,14 @@ back, so a retry starts from the same rows. Rules:
   plan; with none, the latest-started recognised one. `payment_failed_at` is the earliest failure
   among the effective subscription's `failed` invoices while Stripe says it is `past_due` (so an
   invoice Stripe voided or forgave never counts), else null. When a `past_due` or `unpaid`
-  subscription turns `trialing` or `active`, its `failed` invoices become `resolved`, so a later
-  failure starts a fresh grace; a new failure of a `resolved` invoice counts from its new time. `read_only_after` is
+  subscription turns `trialing` or `active`, its `failed` invoices become `resolved` and
+  `plan_invoices.resolved_at` takes the Stripe time of the event that showed it (`created` of a
+  `customer.subscription.*` or `invoice.paid` event, else the worker's clock), so a later failure
+  starts a fresh grace. A failure event created after `resolved_at` counts from its own time and
+  reopens the invoice. One created at or before it, or one with no `created`, is stale: it changes
+  nothing, so a delayed `invoice.payment_failed` never brings back an old `first_failed_at`.
+  `resolved_at` stays set when the invoice reopens, so a delayed copy of its first failure is
+  refused then too. `read_only_after` is
   `payment_failed_at + grace` (or null) while the effective subscription is in one of those three;
   otherwise it is the `status_since` of the latest subscription in `canceled`, `unpaid`,
   `incomplete_expired` or `paused`, or null when none ever ended. So an `incomplete` replacement
@@ -231,9 +237,11 @@ writes `tenant_plans`, `plan_subscriptions` or `plan_invoices`. The worker names
 every PL-2 lookup key to its `price_…` ID (all eleven, or the variable is refused);
 `STRIPE_PLAN_RETURN_URL` (https, the dashboard's plan page); optional `STRIPE_PLAN_TRIAL_DAYS`
 (0 to 30, default 14); optional `STRIPE_PORTAL_CONFIGURATION` (`bpc_…`). Plans are on only when
-the S-9 Stripe variables and these are set; none of them is set on the workers project. Billing
+the S-9 Stripe variables and these are set; none of these plan variables is set on the workers project. Billing
 function: `BILLING_STRIPE_KEY`, a restricted key that may only read subscriptions (`rk_…`, same
-mode as `STRIPE_LIVEMODE`); without it plan events wait and end `orphaned`. Optional
+mode as `STRIPE_LIVEMODE`); without it plan events wait and end `orphaned`. The mode check runs
+on every start that has a key: the worker also needs `STRIPE_LIVEMODE` (`true` or `false`), and
+a key with it unset or empty, with another value, or in the other mode fails the start. Optional
 `BILLING_STRIPE_BASE_URL` and `BILLING_PLAN_GRACE_DAYS` (1 to 30, default 7). Core reads none of them from
 the environment; the entry points parse them and pass them in, with the clock.
 

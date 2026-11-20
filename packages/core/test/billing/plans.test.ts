@@ -38,6 +38,9 @@ async function planSession(tenantId: string, options: { plans?: boolean; trialDa
     billing: { stripe: b.stripe.client, ...(options.plans === false ? {} : { plans: plansClient(fake.url, { trialDays: options.trialDays ?? 14 }) }) },
   }, { tenantId, actorId });
 }
+/** The injected clock keeps running between a test's readings: a resolution is dated at or after `since`, within a minute of it. */
+const resolvedWithin = (row: Record<string, any>, since: Date) =>
+  row.resolved_at instanceof Date && row.resolved_at.getTime() >= since.getTime() && row.resolved_at.getTime() < since.getTime() + 60_000;
 const worker = (reader = true) => createBillingWorker({
   service: b.h.service, clock: b.h.clock, generateId: randomUUID, config: { planGraceDays: 7, backoffBaseMs: 1 },
   ...(reader ? { subscriptions: createStripeSubscriptionReader({ config: { secretKey: READ_KEY, baseUrl: fake.url } }) } : {}),
@@ -260,6 +263,100 @@ describe("applying plan events (PL-10)", () => {
     await worker().runOnce();
     expect(await plan(tenantId)).toMatchObject({ status: "active", read_only_after: null, payment_failed_at: null });
     await expect(session.upsertContact({ displayName: "Ada Halden", email: "ada@haldenrowe.example" }, `c-${randomUUID()}`)).resolves.toBeDefined();
+  });
+
+  it("a delayed failure of an invoice that was resolved never reopens it with the old time (PL-10)", async () => {
+    const tenantId = await b.tenant();
+    const { sub } = await subscribe(tenantId);
+    const unix = (at: Date) => Math.floor(at.getTime() / 1000);
+    const invoice = async (invoiceId: string) =>
+      (await b.h.rows<Record<string, any>>("SELECT status, first_failed_at, resolved_at FROM plan_invoices WHERE tenant_id=$1 AND id=$2", [tenantId, invoiceId]))[0]!;
+    const late = (invoiceId: string, createdAt: Date) => ({ ...invoiceEvent("invoice.payment_failed", sub, invoiceId), created: unix(createdAt) });
+    const readOnlyAfter = async () => (await plan(tenantId))!.read_only_after?.getTime() ?? null;
+
+    // t0: the first invoice fails and Stripe puts the subscription past due.
+    const first = stripeId("in");
+    const t0 = b.h.clock.now();
+    fake.subscriptions.set(sub.id, { ...sub, status: "past_due" });
+    await b.deliver(invoiceEvent("invoice.payment_failed", sub, first));
+    await worker().runOnce();
+    expect(await readOnlyAfter()).toBe(unix(t0) * 1000 + 7 * DAY);
+    // t1: the subscription pays again, so the failed invoice is resolved at the time of the event that showed it.
+    b.h.clock.advance(DAY);
+    const t1 = b.h.clock.now();
+    fake.subscriptions.set(sub.id, { ...sub, status: "active" });
+    await b.deliver(subEvent("customer.subscription.updated", fake.subscriptions.get(sub.id)!));
+    await worker().runOnce();
+    expect(await invoice(first)).toMatchObject({ status: "resolved" });
+    expect(resolvedWithin(await invoice(first), t1)).toBe(true);
+    // t2: a second invoice fails; its failure alone dates the grace.
+    b.h.clock.advance(10 * DAY);
+    const t2 = b.h.clock.now();
+    fake.subscriptions.set(sub.id, { ...sub, status: "past_due" });
+    await b.deliver(invoiceEvent("invoice.payment_failed", sub, stripeId("in")));
+    await worker().runOnce();
+    expect(await readOnlyAfter()).toBe(unix(t2) * 1000 + 7 * DAY);
+
+    // The first failure, delivered late (created at t0): the resolved invoice stays resolved, the grace stays dated by t2.
+    await b.deliver(late(first, t0));
+    await worker().runOnce();
+    expect(await invoice(first)).toMatchObject({ status: "resolved", first_failed_at: new Date(unix(t0) * 1000) });
+    expect(resolvedWithin(await invoice(first), t1)).toBe(true);
+    expect(await readOnlyAfter()).toBe(unix(t2) * 1000 + 7 * DAY);
+    // A failure created in the same second as the resolution is not ordered after it either.
+    await b.deliver(late(first, t1));
+    await worker().runOnce();
+    expect(await invoice(first)).toMatchObject({ status: "resolved" });
+    expect(await readOnlyAfter()).toBe(unix(t2) * 1000 + 7 * DAY);
+    // An event with no creation time cannot be ordered, so it never reopens it.
+    const { created: _unused, ...undated } = late(first, t0);
+    await b.deliver({ ...undated, created: undefined });
+    expect((await worker().runOnce()).outcomes).toEqual({ plan_synced: 1 });
+    expect(await invoice(first)).toMatchObject({ status: "resolved", first_failed_at: new Date(unix(t0) * 1000) });
+    expect(await readOnlyAfter()).toBe(unix(t2) * 1000 + 7 * DAY);
+
+    // A new failure of that invoice, created after the resolution, does count from its own time ...
+    b.h.clock.advance(DAY);
+    const t3 = b.h.clock.now();
+    await b.deliver(invoiceEvent("invoice.payment_failed", sub, first));
+    await worker().runOnce();
+    expect(await invoice(first)).toMatchObject({ status: "failed", first_failed_at: new Date(unix(t3) * 1000) });
+    // ... and a late copy of the earlier failure still cannot pull it back to t0.
+    await b.deliver(late(first, t0));
+    await worker().runOnce();
+    expect(await invoice(first)).toMatchObject({ status: "failed", first_failed_at: new Date(unix(t3) * 1000) });
+    expect(await readOnlyAfter()).toBe(unix(t2) * 1000 + 7 * DAY);
+  });
+
+  it("an old failure that is read after the subscription recovered is resolved at the worker's time, not the old one (PL-10)", async () => {
+    const tenantId = await b.tenant();
+    const { sub } = await subscribe(tenantId);
+    const unix = (at: Date) => Math.floor(at.getTime() / 1000);
+    const invoice = async (invoiceId: string) =>
+      (await b.h.rows<Record<string, any>>("SELECT status, first_failed_at, resolved_at FROM plan_invoices WHERE tenant_id=$1 AND id=$2", [tenantId, invoiceId]))[0]!;
+    // The subscription went past due at t0 and a failure of invoice B was created then; its event sits in the queue.
+    const t0 = b.h.clock.now();
+    fake.subscriptions.set(sub.id, { ...sub, status: "past_due" });
+    await b.deliver(invoiceEvent("invoice.payment_failed", sub, stripeId("in")));
+    await worker().runOnce();
+    expect(await plan(tenantId)).toMatchObject({ status: "past_due" });
+    const second = stripeId("in");
+    const queued = { ...invoiceEvent("invoice.payment_failed", sub, second), created: unix(t0) };
+    // The worker only reads it after Stripe has already recovered the subscription.
+    b.h.clock.advance(3 * DAY);
+    const t3 = b.h.clock.now();
+    fake.subscriptions.set(sub.id, { ...sub, status: "active" });
+    await b.deliver(queued);
+    await worker().runOnce();
+    // The invoice is settled by that recovery, and the settlement is dated by the worker's clock (t3), not by the old event (t0).
+    expect(await invoice(second)).toMatchObject({ status: "resolved", first_failed_at: new Date(unix(t0) * 1000) });
+    expect(resolvedWithin(await invoice(second), t3)).toBe(true);
+    expect(await plan(tenantId)).toMatchObject({ status: "active", read_only_after: null });
+    // A failure created after t0 but before the worker saw the recovery (t3) is stale too: it cannot reopen the invoice.
+    await b.deliver({ ...invoiceEvent("invoice.payment_failed", sub, second), created: unix(t0) + DAY / 1000 });
+    await worker().runOnce();
+    expect(await invoice(second)).toMatchObject({ status: "resolved", first_failed_at: new Date(unix(t0) * 1000) });
+    expect(await plan(tenantId)).toMatchObject({ status: "active", read_only_after: null });
   });
 
   it("a failure Stripe forgave never dates a later grace (PL-10)", async () => {
