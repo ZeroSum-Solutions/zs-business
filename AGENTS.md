@@ -6,10 +6,19 @@ copy any outside code.
 ## Stack (decided 2026-10-17)
 TypeScript only, Node 24, pnpm workspaces. Postgres on Supabase (org
 `Zerosumsolutions-Projects`), Drizzle, Hono for the HTTP API. Tests with vitest.
-Layout: `packages/contracts` (zod request, response and error types), `packages/db`
-(schema, scoped access), `packages/core` (CRM, booking, actions), `packages/mcp` (thin
-adapter over core), `apps/api`, later `apps/dashboard` (Next.js, phone PWA), `supabase/`
-(migrations and isolation tests).
+Layout (pnpm workspaces are `packages/*` and `apps/*`):
+- `packages/contracts` (zod request, response and error types), `packages/db` (schema,
+  migration runner, scoped access, isolation tests), `packages/core` (the one action path and
+  every feature's handlers: CRM, booking, billing and plans, connections and the native
+  Shopify tier, delivery, outreach, sites and more), `packages/mcp` (thin adapter over core).
+- `apps/api` (Hono HTTP API and the Vercel cron workers), `apps/dashboard` (Next.js 16 phone
+  PWA, with Playwright e2e), `apps/site-worker` (Cloudflare Worker that serves published
+  tenant sites from R2). `apps/transcription-worker` holds a setup guide only: it has no
+  `package.json` and no code yet.
+- `services/browser-runner` (Python 3.12 or newer, standard library, tested with `unittest`; not a pnpm
+  package), `shopify/preview` and `shopify/production` (the `shopify.app.toml` of each Shopify
+  app), `supabase/` (migrations, hosted bootstrap and preflight), `scripts/`, `design/` and
+  `docs/` (requirements in `docs/requirements/`).
 
 ## Hard rules
 - Multi-tenant from the first table: every tenant table has `tenant_id`, RLS, and a

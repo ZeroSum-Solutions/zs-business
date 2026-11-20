@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Browser, Page, TestInfo } from "@playwright/test";
 import { findWebsiteBooking, mainNav, shot } from "../helpers";
 import { LIVE } from "./env";
-import { expect, ownerEmail, signInThroughPage, STAFF_EMAIL, test } from "./fixtures";
+import { expect, signInThroughPage, STAFF_EMAIL, test } from "./fixtures";
 
 const PREFIX = "live-";
 
@@ -142,11 +142,11 @@ test("a website booking shows in Calendar, Customers, Inbox and Home, and an own
   const mine = pane.locator("[data-entry=reply]").filter({ hasText: "emerald settings ready" });
   await expect(mine.getByTestId("reply-status")).toHaveText("Draft");
   await expect(mine).toContainText("Emerald settings");
-  await expect(mine).toContainText(`Drafted by ${ownerEmail()}`);
+  await expect(mine).toContainText("Drafted by you");
   await mine.getByRole("button", { name: "Approve and queue" }).click();
   await expect(page.getByRole("status").getByText("Approved. The reply is queued for delivery.")).toBeVisible();
   await expect(mine.getByTestId("reply-status")).toHaveText("Approved and queued");
-  await expect(mine).toContainText(`Approved by ${ownerEmail()}`);
+  await expect(mine).toContainText("Approved by you");
   await expect(pane.locator("header").getByText("Needs reply")).toHaveCount(0);
   // The staff draft still waits; the owner may discard it.
   const staffDraft = pane.locator("[data-entry=reply]").filter({ hasText: "front desk" });

@@ -1,7 +1,10 @@
 # Business profile
 
-Status: first slice built; revision 2 (2026-11-20) adds the description and services fields
-(BP-13 to BP-15). A change to a numbered rule needs a new revision of this file first.
+Status: built. First slice 2026-10-23 (PR #48: BP-1 to BP-12, migration
+`supabase/migrations/20261023100000_business_profiles.sql`, `packages/core/src/business/handlers.ts`,
+`apps/api/src/routes/business.ts`). Revision 2 (2026-11-20, ZSB-4) adds the description and services
+fields (BP-13 to BP-15). Code follows this file; a change to a numbered rule needs a new revision of
+this file first.
 
 Scope: one profile per tenant that says who the business is: the name customers see, the legal
 name, a phone number, a time zone, a default currency, a postal address, a short description of

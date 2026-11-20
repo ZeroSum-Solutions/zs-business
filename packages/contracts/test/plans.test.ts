@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { ALL_PLAN_PRICE_KEYS, billingPlanSchema, EXTRA_CONNECTION_PRICE, MAX_EXTRA_CONNECTIONS, PLAN_ADDON_LOOKUP_KEY, PLAN_CATALOG, planGrantSchema } from "../src/index.js";
+import {
+  ALL_PLAN_PRICE_KEYS, billingPlanSchema, EXTRA_CONNECTION_PRICE, MAX_EXTRA_CONNECTIONS, PLAN_ADDON_LOOKUP_KEY, PLAN_CATALOG, PLAN_FEATURES, planFeatures, planFeatureSchema,
+  planFeatureBlock,
+  planFeatureRunners,
+  planFeatureSwitch, planGrantSchema, type HubPlan,
+} from "../src/index.js";
 
 // plans.md PL-1: the one catalog the API, the worker and the dashboard read. Amounts are USD cents.
 describe("PLAN_CATALOG (plans.md PL-1)", () => {
@@ -73,5 +78,76 @@ describe("billingPlanSchema grant (plans.md PL-22)", () => {
       { ...grant, source: "stripe" }, { ...grant, plan: "enterprise" }, { ...grant, grantedUntil: "2027-01-31" },
       { ...grant, note: "retainer" }, { ...grant, grantedBy: "Dana" }, { source: "grant", plan: "pro" },
     ]) expect(billingPlanSchema.safeParse({ ...read, grant: bad }).success, JSON.stringify(bad)).toBe(false);
+  });
+});
+
+// plans.md PL-26: a plan names a feature as included only while its agent switch is on.
+describe("planFeatures (PL-26)", () => {
+  const allOn = { appointment_reminder: "on", review_request: "on", inquiry_followup: "on", missed_call_textback: "on" } as const;
+  const allOff = { appointment_reminder: "disabled", review_request: "disabled", inquiry_followup: "disabled", missed_call_textback: "disabled" } as const;
+
+  it("lists a switched-on feature as included and a switched-off one as off with its reason", () => {
+    const features = planFeatures(PLAN_CATALOG.studio.limits, { ...allOn, review_request: "disabled", inquiry_followup: "stopped", appointment_reminder: "paused" });
+    expect(features).toEqual([
+      { kind: "appointment_reminder", label: "Appointment reminders", state: "off", offReason: "paused" },
+      { kind: "review_request", label: "Review requests", state: "off", offReason: "disabled" },
+      { kind: "inquiry_followup", label: "Agents that draft with AI", state: "off", offReason: "stopped" },
+    ]);
+    expect(planFeatures(PLAN_CATALOG.studio.limits, allOn).every((feature) => feature.state === "included" && feature.offReason === null)).toBe(true);
+    expect(planFeatures(PLAN_CATALOG.studio.limits, allOff).some((feature) => feature.state === "included")).toBe(false);
+  });
+
+  it("lets a read-only plan override the switches", () => {
+    const readOnly = planFeatures(PLAN_CATALOG.studio.limits, { appointment_reminder: "read_only", review_request: "read_only", inquiry_followup: "read_only", missed_call_textback: "read_only" });
+    expect(readOnly.every((feature) => feature.state === "off" && feature.offReason === "read_only")).toBe(true);
+  });
+
+  it("names only what the plan's limits hold, from the same entitlements the catalog sells", () => {
+    const kinds = (plan: HubPlan) => planFeatures(PLAN_CATALOG[plan].limits, allOn).map((feature) => feature.kind);
+    expect(kinds("solo")).toEqual(["appointment_reminder", "review_request"]);
+    expect(kinds("studio")).toEqual(["appointment_reminder", "review_request", "inquiry_followup"]);
+    expect(kinds("pro")).toEqual(["appointment_reminder", "review_request", "inquiry_followup", "missed_call_textback"]);
+    // A comped tenant has no limits and holds every feature.
+    expect(planFeatures(null, allOn)).toHaveLength(PLAN_FEATURES.length);
+    // A change to the limits changes the copy: the AI line follows `modelAgents`, the voice line `voice`.
+    expect(planFeatures({ ...PLAN_CATALOG.pro.limits, voice: false }, allOn).map((feature) => feature.kind)).not.toContain("missed_call_textback");
+    expect(planFeatures({ ...PLAN_CATALOG.pro.limits, modelAgents: false }, allOn).map((feature) => feature.kind)).not.toContain("inquiry_followup");
+  });
+
+  const base = { readOnly: false, running: true, blockedBy: null, approved: true, equipped: true } as const;
+
+  it("orders the switch by what stops a run first: read-only, no runner, support's pause, the off setting, the kill switch, quiet hours, budget, approval", () => {
+    expect(planFeatureSwitch(base)).toBe("on");
+    const worst = { readOnly: true, running: false, blockedBy: "global_killed", approved: false, equipped: false } as const;
+    expect(planFeatureSwitch(worst)).toBe("read_only");
+    expect(planFeatureSwitch({ ...worst, readOnly: false })).toBe("not_running");
+    expect(planFeatureSwitch({ ...worst, readOnly: false, running: true })).toBe("paused");
+    expect(planFeatureSwitch({ ...base, blockedBy: "disabled", approved: false })).toBe("disabled");
+    expect(planFeatureSwitch({ ...base, blockedBy: "tenant_killed" })).toBe("stopped");
+    expect(planFeatureSwitch({ ...base, blockedBy: "quiet_hours", approved: false })).toBe("quiet_hours");
+    expect(planFeatureSwitch({ ...base, blockedBy: "cost_cap", approved: false })).toBe("no_budget");
+    expect(planFeatureSwitch({ ...base, approved: false, equipped: false })).toBe("not_approved");
+    // Approved wording with nothing to send it with (no sending number, no link) is the last stop before `on`.
+    expect(planFeatureSwitch({ ...base, equipped: false })).toBe("missing_setup");
+  });
+
+  it("reads the gate's stop reasons: a daily draft cap or a stalled run is no off switch", () => {
+    expect(planFeatureBlock("daily_cap")).toBeNull();
+    expect(planFeatureBlock("stalled")).toBeNull();
+    expect(planFeatureBlock(null)).toBeNull();
+    for (const reason of ["global_killed", "disabled", "tenant_killed", "quiet_hours", "cost_cap"] as const) expect(planFeatureBlock(reason)).toBe(reason);
+  });
+
+  it("names the runners a feature needs: follow-up, SMS text back, and a message kind's runs plus its channel's delivery", () => {
+    expect(planFeatureRunners("inquiry_followup", null)).toEqual(["followup"]);
+    expect(planFeatureRunners("missed_call_textback", null)).toEqual(["delivery_sms"]);
+    expect(planFeatureRunners("appointment_reminder", "email")).toEqual(["templated", "delivery_email"]);
+    expect(planFeatureRunners("review_request", "sms")).toEqual(["templated", "delivery_sms"]);
+    expect(planFeatureRunners("review_request", null)).toEqual(["templated"]);
+  });
+
+  it("accepts only the four feature kinds", () => {
+    expect(planFeatureSchema.safeParse({ kind: "missed_call_textback", label: "x", state: "off", offReason: "disabled" }).success).toBe(true);
+    expect(planFeatureSchema.safeParse({ kind: "document_intake", label: "x", state: "included", offReason: null }).success).toBe(false);
   });
 });

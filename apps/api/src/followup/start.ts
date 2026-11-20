@@ -15,6 +15,7 @@ import {
 } from "@zs/core";
 import { asService, assertRuntimeLogin, createRuntimePool, createScopedDatabase } from "@zs/db";
 import type { Pool } from "pg";
+import { createRunnerHeartbeats, followUpHeartbeatSeconds, serviceOnPool, withHeartbeats } from "../runner-heartbeat.js";
 import type { FollowUpRunnerEnv } from "./config.js";
 import { createScheduledFollowUps, type ScheduledFollowUps } from "./runner.js";
 
@@ -89,5 +90,12 @@ export async function startFollowUpRunner(env: FollowUpRunnerEnv, deps: {
     perTenantMs: env.maxCandidatesPerRun * env.modelTimeoutMs,
     report: (event) => console.error("Follow-up tenant run failed", event),
   });
-  return { runner, servicePool, close };
+  // PL-26: each finished run tells the plan page this deploy's runners are live (the API cannot read these flags).
+  const window = followUpHeartbeatSeconds(env.slotMinutes, env.intervalMs);
+  const beating = withHeartbeats(runner, {
+    job: "followup",
+    heartbeats: createRunnerHeartbeats({ service: serviceOnPool(servicePool), clock: deps.clock }),
+    beats: [{ runner: "followup", freshForSeconds: window }, ...(env.templated !== null ? [{ runner: "templated" as const, freshForSeconds: window }] : [])],
+  });
+  return { runner: beating, servicePool, close };
 }
