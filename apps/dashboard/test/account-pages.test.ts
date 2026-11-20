@@ -94,8 +94,10 @@ describe("plan", () => {
     // The choose-a-plan cards read the same switches per offer.
     const picker = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, { ...plan({ status: "none", plan: null, limits: null }),
       catalog: base.catalog.map((offer) => ({ ...offer, features: planFeatures(offer.limits, { appointment_reminder: "on", review_request: "disabled", inquiry_followup: "disabled", voice_receptionist: "on" }) })) }));
-    expect(picker).toMatch(/Voice and missed-call text back<\/li>/);
-    expect(picker).not.toContain("Voice and missed-call text back:");
+    // Voice has no runner yet: it reads as coming, never as included, even with its switch on.
+    expect(picker).toContain("Voice and missed-call text back: coming soon");
+    expect(picker).not.toMatch(/Voice and missed-call text back<\/li>/);
+    expect(featureLines(planFeatures(PLAN_CATALOG.studio.limits, { appointment_reminder: "read_only", review_request: "read_only", inquiry_followup: "read_only", voice_receptionist: "read_only" })).every((line) => !line.on)).toBe(true);
     expect(picker).toContain("Agents that draft with AI: off until you turn it on");
     expect(picker).not.toContain("Rule-based agents");
   });

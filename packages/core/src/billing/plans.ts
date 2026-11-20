@@ -35,7 +35,6 @@ import {
 import type { Transaction } from "@zs/db";
 import type { ActionHandler } from "../actions/dispatch.js";
 import { currentTenant } from "../booking/create.js";
-import { loadControls, readGlobalKilled } from "../agents/controls.js";
 import { parseOrFail } from "../crm/rows.js";
 import { activeGrant, isReadOnly, lockTenantPlan, planLimits } from "./plan-gate.js";
 import type { StripePlansClient } from "./plan-stripe.js";
@@ -242,15 +241,26 @@ const offer = (entry: PlanCatalogEntry, founding: boolean, switches: Readonly<Re
 
 /**
  * PL-26: where each plan-page feature's agent switch stands for the tenant. These are the rows and the
- * global switch the runners gate on (agents.md G-3), read in the same order: support's pause, then the
+ * global switch the runners gate on (agents.md G-3), applied in the same order: support's pause, then the
  * tenant's off setting, then its kill switch. Quiet hours and caps are not read: they end by themselves.
+ * One statement reads all of them, so the answer is one snapshot: two reads could straddle a pause and a
+ * settings write and name a switch that was never on.
  */
 export async function planFeatureSwitches(tx: Transaction, tenantId: string): Promise<Record<PlanFeatureKind, PlanFeatureSwitch>> {
-  const paused = await readGlobalKilled(tx, false);
+  const rows = (await tx.query<{ killed: boolean; agent_kind: PlanFeatureKind | null; enabled: boolean | null; killed_at: Date | null }>(
+    `SELECT g.killed, s.agent_kind, s.enabled, s.killed_at
+       FROM agent_global_switch g
+       LEFT JOIN agent_settings s ON s.tenant_id=$1 AND s.agent_kind = ANY($2::text[])
+      WHERE g.id`,
+    [tenantId, [...PLAN_FEATURE_KINDS]],
+  )).rows;
+  // A missing global row reads as paused: the migration always writes it, so this fails closed (as readGlobalKilled does).
+  const paused = rows[0]?.killed ?? true;
   const switches = {} as Record<PlanFeatureKind, PlanFeatureSwitch>;
   for (const kind of PLAN_FEATURE_KINDS) {
-    const controls = await loadControls(tx, tenantId, false, kind);
-    switches[kind] = planFeatureSwitch({ paused, enabled: controls.settings.enabled, killed: controls.killed !== null });
+    const row = rows.find((candidate) => candidate.agent_kind === kind);
+    // No row is the default: not enabled, not killed (controlsFromRow).
+    switches[kind] = planFeatureSwitch({ paused, enabled: row?.enabled ?? false, killed: row?.killed_at != null });
   }
   return switches;
 }
@@ -283,6 +293,9 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
   const granted = activeGrant(row, input.now);
   const limits = planLimits(row, input.now);
   const switches = await planFeatureSwitches(tx, tenantId);
+  // A read-only plan is refused every agent run by the dispatcher (PL-8), so what it holds is not live for this business.
+  const readOnly = isReadOnly(row, input.now);
+  const currentSwitches = readOnly ? (Object.fromEntries(PLAN_FEATURE_KINDS.map((kind) => [kind, "read_only"])) as Record<PlanFeatureKind, PlanFeatureSwitch>) : switches;
   return billingPlanSchema.parse({
     billingProvider: row?.billing_provider ?? "stripe",
     status: row?.status ?? "none",
@@ -299,9 +312,9 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
     trialDays: stripe && !(row?.trial_used ?? false) ? input.trialDays : 0,
     paymentFailedAt: iso(row?.payment_failed_at ?? null),
     readOnlyAfter: iso(row?.read_only_after ?? null),
-    readOnly: isReadOnly(row, input.now),
+    readOnly,
     limits,
-    features: planFeatures(limits, switches),
+    features: planFeatures(limits, currentSwitches),
     catalog: (Object.values(PLAN_CATALOG) as PlanCatalogEntry[]).map((entry) => offer(entry, invited, switches)),
     extraConnectionPrice: EXTRA_CONNECTION_PRICE,
     currency: "usd",

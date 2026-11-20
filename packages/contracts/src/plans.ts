@@ -64,8 +64,9 @@ export type PlanFeatureKind = z.infer<typeof planFeatureKindSchema>;
  * `paused` is support's global switch, `disabled` the tenant's own off setting (the default), `stopped`
  * the tenant's kill switch. Quiet hours and daily caps pass by themselves and are not an off switch.
  */
-export const PLAN_FEATURE_OFF_REASONS = ["paused", "disabled", "stopped"] as const;
-export type PlanFeatureSwitch = "on" | (typeof PLAN_FEATURE_OFF_REASONS)[number];
+export const PLAN_FEATURE_OFF_REASONS = ["paused", "disabled", "stopped", "read_only", "coming"] as const;
+/** `read_only`: the plan is read-only, so the dispatcher refuses agent runs (PL-8). `coming`: the agent kind has no runner yet. */
+export type PlanFeatureSwitch = "on" | Exclude<(typeof PLAN_FEATURE_OFF_REASONS)[number], "coming">;
 
 /** PL-26: one switch from its three inputs, in the runners' order (G-3): support's pause, the tenant's off setting, its kill switch. */
 export const planFeatureSwitch = (input: { readonly paused: boolean; readonly enabled: boolean; readonly killed: boolean }): PlanFeatureSwitch =>
@@ -75,14 +76,16 @@ export interface PlanFeatureDefinition {
   readonly kind: PlanFeatureKind;
   /** The name the plan page shows. */
   readonly label: string;
+  /** Whether a runner reads this kind's switch yet. Without one, the feature is `coming` whatever the switch says. */
+  readonly runner: boolean;
   /** Whether the plan's limits include the feature. A comped tenant (null limits) has every feature. */
   readonly entitled: (limits: PlanLimits) => boolean;
 }
 export const PLAN_FEATURES: readonly PlanFeatureDefinition[] = Object.freeze([
-  { kind: "appointment_reminder", label: "Appointment reminders", entitled: () => true },
-  { kind: "review_request", label: "Review requests", entitled: () => true },
-  { kind: "inquiry_followup", label: "Agents that draft with AI", entitled: (limits) => limits.modelAgents },
-  { kind: "voice_receptionist", label: "Voice and missed-call text back", entitled: (limits) => limits.voice },
+  { kind: "appointment_reminder", label: "Appointment reminders", runner: true, entitled: () => true },
+  { kind: "review_request", label: "Review requests", runner: true, entitled: () => true },
+  { kind: "inquiry_followup", label: "Agents that draft with AI", runner: true, entitled: (limits) => limits.modelAgents },
+  { kind: "voice_receptionist", label: "Voice and missed-call text back", runner: false, entitled: (limits) => limits.voice },
 ]);
 
 export const planFeatureSchema = z.strictObject({
@@ -101,7 +104,7 @@ export type PlanFeature = z.infer<typeof planFeatureSchema>;
  */
 export function planFeatures(limits: PlanLimits | null, switches: Readonly<Record<PlanFeatureKind, PlanFeatureSwitch>>): PlanFeature[] {
   return PLAN_FEATURES.filter((feature) => limits === null || feature.entitled(limits)).map((feature) => {
-    const state = switches[feature.kind];
+    const state = feature.runner ? switches[feature.kind] : "coming";
     return state === "on"
       ? { kind: feature.kind, label: feature.label, state: "included" as const, offReason: null }
       : { kind: feature.kind, label: feature.label, state: "off" as const, offReason: state };

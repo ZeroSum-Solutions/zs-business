@@ -864,7 +864,7 @@ describe("plan features follow the agent switches (PL-26)", () => {
     expect(before.features!.every((feature) => feature.state === "off")).toBe(true);
     // Studio holds no voice, so voice is not named at all; Pro names it, still off.
     expect(featureStates({ features: before.catalog.find((offer) => offer.plan === "pro")!.features })).toEqual({
-      appointment_reminder: "disabled", review_request: "disabled", inquiry_followup: "disabled", voice_receptionist: "disabled" });
+      appointment_reminder: "disabled", review_request: "disabled", inquiry_followup: "disabled", voice_receptionist: "coming" });
     expect(before.catalog.find((offer) => offer.plan === "solo")!.features!.map((feature) => feature.kind)).toEqual(["appointment_reminder", "review_request"]);
 
     await setAgent(tenantId, "appointment_reminder", { enabled: true });
@@ -884,6 +884,33 @@ describe("plan features follow the agent switches (PL-26)", () => {
     } finally {
       await b.h.service((tx) => tx.query("UPDATE agent_global_switch SET killed=false, note=NULL, updated_at=$1 WHERE id", [b.h.clock.now()]));
     }
+  });
+
+  it("never calls voice included while no runner reads its switch, even with the row enabled", async () => {
+    const tenantId = await b.tenant();
+    await subscribe(tenantId, { plan: "pro" });
+    await b.settle();
+    await worker().runOnce();
+    await setAgent(tenantId, "voice_receptionist", { enabled: true });
+    const view = await (await planSession(tenantId)).getBillingPlan();
+    expect(featureStates(view)).toMatchObject({ voice_receptionist: "coming" });
+    expect(featureStates({ features: view.catalog.find((offer) => offer.plan === "pro")!.features })).toMatchObject({ voice_receptionist: "coming" });
+  });
+
+  it("shows no feature as included once the plan is read-only, because the dispatcher refuses agent runs", async () => {
+    const tenantId = await b.tenant();
+    const { sub } = await subscribe(tenantId, { plan: "studio" });
+    await setAgent(tenantId, "appointment_reminder", { enabled: true });
+    expect(featureStates(await (await planSession(tenantId)).getBillingPlan())).toMatchObject({ appointment_reminder: "included" });
+    fake.subscriptions.set(sub.id, { ...sub, status: "past_due" });
+    await b.deliver(invoiceEvent("invoice.payment_failed", sub, stripeId("in")));
+    await worker().runOnce();
+    b.h.clock.advance(8 * DAY);
+    const view = await (await planSession(tenantId)).getBillingPlan();
+    expect(view.readOnly).toBe(true);
+    expect(view.features!.every((feature) => feature.state === "off" && feature.offReason === "read_only")).toBe(true);
+    // The offers describe a plan, not this business's standing: they still follow the switches.
+    expect(featureStates({ features: view.catalog.find((offer) => offer.plan === "studio")!.features })).toMatchObject({ appointment_reminder: "included" });
   });
 
   it("reads another tenant's switches never: one tenant's on switch does not show for a second", async () => {

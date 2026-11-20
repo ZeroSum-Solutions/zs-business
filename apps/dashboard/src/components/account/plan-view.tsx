@@ -74,7 +74,7 @@ function limitLines(limits: NonNullable<BillingPlan["limits"]>): string[] {
 }
 
 /** Why a feature in the plan is not running, in words (plans.md PL-26). */
-const OFF_WORDS = { disabled: "off until you turn it on", stopped: "stopped", paused: "paused by support" } as const;
+const OFF_WORDS = { disabled: "off until you turn it on", stopped: "stopped", paused: "paused by support", read_only: "paused until the plan is paid", coming: "coming soon" } as const;
 
 /**
  * PL-26: one line per feature the plan holds. The server derives them from the agent switches the runners

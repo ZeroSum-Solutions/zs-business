@@ -729,7 +729,8 @@ export function usePlan(options: { poll?: boolean | undefined; watchUntil?: numb
   const { keys, enabled } = useKeys();
   const { poll, watchUntil } = options;
   return useQuery({
-    enabled, queryKey: keys.plan, queryFn: ({ signal }) => api.getBillingPlan({ signal }),
+    // staleTime 0 (PL-26): the plan names features by their agent switches, so opening the page reads them again instead of reusing a cached "included".
+    enabled, queryKey: keys.plan, queryFn: ({ signal }) => api.getBillingPlan({ signal }), staleTime: 0,
     ...(poll || watchUntil !== undefined ? { refetchInterval: (query: { state: { data?: BillingPlan | undefined } }) =>
       planRefetchInterval(query.state.data, { poll, watchUntil }, Date.now()) } : {}),
   });

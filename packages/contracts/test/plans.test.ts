@@ -95,6 +95,13 @@ describe("planFeatures (PL-26)", () => {
     expect(planFeatures(PLAN_CATALOG.studio.limits, allOff).some((feature) => feature.state === "included")).toBe(false);
   });
 
+  it("never lists a kind without a runner as included, and lets a read-only plan override the switches", () => {
+    const voice = planFeatures(PLAN_CATALOG.pro.limits, allOn).find((feature) => feature.kind === "voice_receptionist");
+    expect(voice).toEqual({ kind: "voice_receptionist", label: "Voice and missed-call text back", state: "off", offReason: "coming" });
+    const readOnly = planFeatures(PLAN_CATALOG.studio.limits, { appointment_reminder: "read_only", review_request: "read_only", inquiry_followup: "read_only", voice_receptionist: "read_only" });
+    expect(readOnly.every((feature) => feature.state === "off" && feature.offReason === "read_only")).toBe(true);
+  });
+
   it("names only what the plan's limits hold, from the same entitlements the catalog sells", () => {
     const kinds = (plan: HubPlan) => planFeatures(PLAN_CATALOG[plan].limits, allOn).map((feature) => feature.kind);
     expect(kinds("solo")).toEqual(["appointment_reminder", "review_request"]);

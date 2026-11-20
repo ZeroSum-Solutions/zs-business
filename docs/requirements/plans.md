@@ -618,12 +618,18 @@ catalog offer adds `features`, from one rule in `packages/contracts` (`planFeatu
   holds all four. A feature the plan does not hold is left out.
 - Each feature is `included` or `off`. It is `included` only when the tenant's `agent_settings` row for the
   kind is enabled, not killed, and support's global switch (`agent_global_switch`) is not on: the same inputs,
-  in the same order, as the runners' gate (agents.md G-3). Otherwise it is `off` with the first reason:
-  `paused` (support's switch), `disabled` (the tenant's setting, which is the default), `stopped` (the tenant's
-  kill switch). Quiet hours and caps pass by themselves and do not turn a feature off.
+  in the same order, as the runners' gate (agents.md G-3), read in one statement so the answer is one snapshot.
+  Otherwise it is `off` with the first reason: `paused` (support's switch), `disabled` (the tenant's setting,
+  which is the default), `stopped` (the tenant's kill switch). Quiet hours and caps pass by themselves and do not
+  turn a feature off. Two more reasons come from outside the switch: `read_only` (the tenant's plan is read-only,
+  so the dispatcher refuses every agent run, PL-8; the current plan's list only, not the offers') and `coming`
+  (the kind has no runner yet, so it is never `included`, whatever its row says).
 - The dashboard shows an `off` feature as "<name>: off until you turn it on", "stopped" or "paused by support",
-  with no check mark. A response without `features` (an API deployed before the dashboard) names no feature.
-  The key is optional in the schema so a dashboard deployed first accepts either response.
+  with no check mark; `read_only` reads "paused until the plan is paid" and `coming` "coming soon". The dashboard
+  reads the plan again each time the page opens, so a switch changed on the Agents page shows at once. A response
+  without `features` names no feature. The key is optional in the schema so a dashboard deployed first accepts
+  either response; the response schema is strict, so the API must not send `features` before the dashboard reads
+  it (as PL-22 `grant`): the dashboard deploys first.
 - Prices, limits and the other plan lines are unchanged. Demo mode derives the switches from its demo agents.
 
 ## Known limits (revision 7)
@@ -631,4 +637,7 @@ catalog offer adds `features`, from one rule in `packages/contracts` (`planFeatu
 - The switch is the tenant's setting. A deploy whose runner is off (`FOLLOWUP_AGENT`, `AGENT_TEMPLATED`, delivery
   worker) is a separate project's environment that the API cannot read, so a feature a tenant switched on can still
   send nothing there until the runner is on.
-- `voice_receptionist` has no runner yet (voice-receptionist.md is a draft), so it stays `off` until one reads its row.
+- `voice_receptionist` has no runner yet (voice-receptionist.md is a draft), so it is `off` with reason `coming` even
+  when its row is enabled; a rule that adds the runner flips `runner` in `PLAN_FEATURES`.
+- "Agents that draft with AI" follows the plan's `modelAgents` limit, the plan's advertised tier. The runtime does
+  not enforce that limit yet (see above), so a Solo tenant can switch follow-ups on and still sees no such line.
