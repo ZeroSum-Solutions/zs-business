@@ -317,6 +317,76 @@ describe("the worker run (OS-13)", () => {
   });
 });
 
+describe("the holiday calendar (OS-11)", () => {
+  /** 08:30 PST on a given winter local date. */
+  const morning = (date: string) => Date.parse(`${date}T16:30:00.000Z`);
+
+  it("sends nothing on Thanksgiving 2026 or the day after, and sends on the next send day", async () => {
+    const r = await rig();
+    await world.rows("UPDATE outreach_prospects SET next_due_on='2026-11-26' WHERE tenant_id=$1", [r.tenant]);
+    for (const day of ["2026-11-26", "2026-11-27", "2026-11-28", "2026-11-29"]) {
+      world.time.ms = morning(day);
+      await r.run();
+      expect(r.fake.sendCalls(), day).toBe(0);
+      expect(await r.sends()).toEqual([]);
+    }
+    expect((await r.prospects())[0]).toMatchObject({ status: "active", next_step: 1, due: "2026-11-26" });
+    world.time.ms = morning("2026-11-30");
+    await r.run();
+    expect(r.fake.sendCalls()).toBe(1);
+    expect((await r.sends())[0]).toMatchObject({ status: "sent", step_number: 1, local_send_date: "2026-11-30" });
+  });
+
+  it("sends nothing on Christmas Day 2026 and sends on the next send day", async () => {
+    const r = await rig();
+    await world.rows("UPDATE outreach_prospects SET next_due_on='2026-12-25' WHERE tenant_id=$1", [r.tenant]);
+    world.time.ms = Date.parse("2026-12-25T17:30:00.000Z"); // 09:30 PST
+    await r.run();
+    expect(r.fake.sendCalls()).toBe(0);
+    world.time.ms = morning("2026-12-28");
+    await r.run();
+    expect(r.fake.sendCalls()).toBe(1);
+    expect((await r.sends())[0]).toMatchObject({ status: "sent", local_send_date: "2026-12-28" });
+  });
+
+  it("moves a follow-up that falls on a holiday to the next send day, and counts later delays from the real send", async () => {
+    const r = await rig();
+    await world.rows("UPDATE outreach_prospects SET next_due_on='2026-11-24' WHERE tenant_id=$1", [r.tenant]);
+    world.time.ms = morning("2026-11-24"); // Tuesday
+    await r.run();
+    expect(r.fake.sendCalls()).toBe(1);
+    // Step 2 is 3 business days later: Friday 2026-11-27, the day after Thanksgiving, so it moves to Monday.
+    expect((await r.prospects())[0]).toMatchObject({ status: "active", next_step: 2, due: "2026-11-30" });
+    world.time.ms = morning("2026-11-27");
+    await r.run();
+    expect(r.fake.sendCalls()).toBe(1);
+    world.time.ms = morning("2026-11-30");
+    await r.run();
+    expect(r.fake.sendCalls()).toBe(2);
+    // Step 3 is 5 business days after the real send date (Monday 11-30), not after the holiday.
+    expect((await r.prospects())[0]).toMatchObject({ status: "active", next_step: 3, due: "2026-12-07" });
+  });
+
+  it("respects the tenant's time zone: a tenant in Auckland holds Thanksgiving by its own local date", async () => {
+    const r = await rig();
+    await world.profile(r.tenant, { timeZone: "Pacific/Auckland" });
+    await world.rows("UPDATE outreach_prospects SET next_due_on='2026-11-26' WHERE tenant_id=$1", [r.tenant]);
+    // 2026-11-25T20:30Z is 09:30 on Thursday 2026-11-26 in Auckland (NZDT), inside the 08:00..10:30 window.
+    world.time.ms = Date.parse("2026-11-25T20:30:00.000Z");
+    await r.run();
+    expect(r.fake.sendCalls()).toBe(0);
+    // The next day's window there (Friday 11-27 local) is the day after Thanksgiving: still held.
+    world.time.ms = Date.parse("2026-11-26T20:30:00.000Z");
+    await r.run();
+    expect(r.fake.sendCalls()).toBe(0);
+    // Monday 2026-11-30 09:30 local, a prospect due that day: 2026-11-29T20:30Z is still Sunday in UTC.
+    await world.rows("UPDATE outreach_prospects SET next_due_on='2026-11-30' WHERE tenant_id=$1", [r.tenant]);
+    world.time.ms = Date.parse("2026-11-29T20:30:00.000Z");
+    await r.run();
+    expect(r.fake.sendCalls()).toBe(1);
+  });
+});
+
 describe("the pre-send check (OS-14)", () => {
   const stopped = (status: string) => ({ prospect: status });
   const cases: Array<{ name: string; change: (r: Rig) => Promise<void>; prospect: string; campaign?: { status: string; paused_reason: string | null } }> = [

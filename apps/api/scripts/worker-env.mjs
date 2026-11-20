@@ -8,7 +8,7 @@
 /** The cron schedules, set as build variables on the workers project only. */
 export const CRON_SCHEDULE_VARIABLES = [
   "DELIVERY_CRON_SCHEDULE", "BILLING_CRON_SCHEDULE", "CALENDAR_CRON_SCHEDULE", "ACTIVEPIECES_CRON_SCHEDULE", "FOLLOWUP_CRON_SCHEDULE",
-  "CONNECTIONS_CRON_SCHEDULE", "OUTREACH_CRON_SCHEDULE",
+  "CONNECTIONS_CRON_SCHEDULE", "OUTREACH_CRON_SCHEDULE", "INTAKE_SWEEP_CRON_SCHEDULE",
 ];
 
 export const WORKER_ONLY_ENV = [
@@ -56,6 +56,9 @@ export const WORKER_ONLY_ENV = [
   "OUTREACH_GOOGLE_CLIENT_SECRET", "OUTREACH_TOKEN_PRIVATE_KEY", "OUTREACH_SEND_ENABLED", "OUTREACH_GMAIL_BASE_URL",
   "OUTREACH_MAILBOX_DAILY_LIMIT", "OUTREACH_SENDS_PER_TICK", "OUTREACH_MIN_GAP_MS", "OUTREACH_PROBE_DELAY_MS",
   "OUTREACH_RUN_BUDGET_MS",
+  // document intake sweep (src/intake-sweep/config.ts, document-intake.md DL-16). It reads the R2_* names the API's site store
+  // reads, so those are not here.
+  "INTAKE_SWEEP_WORKER", "INTAKE_SWEEP_DATABASE_URL", "INTAKE_SWEEP_SERVICE_DATABASE_URL", "INTAKE_SWEEP_BATCH", "INTAKE_SWEEP_RUN_BUDGET_MS",
   // cron failure alert email (src/cron-alert-mail.ts); it sends with the RESEND_* sender above
   "OPS_ALERT_EMAIL",
   // build variables of the workers project
