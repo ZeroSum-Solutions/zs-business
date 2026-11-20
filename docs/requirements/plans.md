@@ -162,12 +162,16 @@ the action's own transaction, after an idempotent replay is answered and before 
 every action of every principal. **Read-only** means `read_only_after` is set and at or before the
 injected clock. A read-only tenant may run only: `plan.checkout.create`, `wallet.topup.create`,
 `suppression.record`, the inbound and worker records (`sms.status.record`, `sms.reply.record`,
-`voice.call.record`, `voice.voicemail.record`, `voice.textback.optin`, `transcription.job.complete`,
+`voice.call.record`, `voice.voicemail.record`, `transcription.job.complete`,
 `transcription.job.fail`, `catalog.intake.result`, `catalog.intake.fail`, `media.variant.stage`,
-`media.variant.fail`; not `voice.textback.optin`, which starts an outbound text), the stops (`agent.kill`, `agent.kind.kill`, `browser.kill`,
-`agent.run.finish`, `agent.run.stall`, `agent.kind.run.finish`, `agent.cost.warn`) and the
+`media.variant.fail`; `voice.textback.optin` is not on the list, because it starts an outbound
+text), the stops (`agent.kill`, `agent.kind.kill`, `browser.kill`,
+`agent.run.finish`, `agent.run.stall`, `agent.kind.run.finish`, `agent.cost.warn`,
+`outreach.campaign.pause`, `outreach.prospect.stop`) and the
 removals (`member.remove`, `connection.disconnect`, `calendar.google.disconnect`,
-`automation.token.revoke`, `approval.reject`, `approval.revoke`, `inbox.reply.discard`) and the customer's own cancel (`booking.self_cancel`). Anything
+`automation.token.revoke`, `approval.reject`, `approval.revoke`, `inbox.reply.discard`,
+`outreach.mailbox.disconnect`) and the customer's own cancel (`booking.self_cancel`). The list
+is `READ_ONLY_ALLOWED_ACTIONS` in `packages/core/src/billing/plan-gate.ts:93-107`. Anything
 else is refused with 409 `plan_read_only`. Reads always work, so an owner can see and export the
 data. **Limits** (PL-1) apply to a tenant whose record names a plan: before `member.invite`,
 `connection.connect` and `automation.token.create`, the dispatcher takes a per-tenant transaction
@@ -558,10 +562,13 @@ the free one is the hosting decision's. They are tunable by a later revision. Th
 
 ## Known limits (revision 3)
 
-- **Before the listing is submitted:** an App Store install does not yet create or bind a hub
-  tenant. A merchant who installs gets no tenant and no PL-17 link by itself, and the operator
-  links by hand. App Store review installs the app, so an install path (verified shop, tenant,
-  link, then the plan selection page) needs a rule in connections.md first.
+- **App Store install path (corrected 2026-11-20).** An App Store install does create and bind a
+  hub tenant, with no operator: the embedded page verifies the shop, the owner makes a hub or
+  claims one, the worker binds the shop to the tenant and PL-17 links the billing, and the page
+  then offers the plan selection page (connections.md C-19 to C-30; code
+  `apps/api/src/public/shopify-embedded.ts` and `packages/core/src/shopify/native-worker.ts`).
+  The listing was submitted for review on 2026-11-08 (connections.md, C-25). What still needs a
+  person is the Partner Dashboard plan catalog (PL-16).
 - Shopify tenants cannot buy the extra-connection add-on (PL-16) or wallet usage (PL-15).
 - A linked Shopify tenant that never chooses a plan is comped, as any tenant without a plan.
 - A Shopify freeze is not told apart from a cancellation: both read as no contract (PL-18), so a

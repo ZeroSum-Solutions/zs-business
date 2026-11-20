@@ -590,8 +590,9 @@ role for workers (all workers share one pattern today; Known limits).
   `SERVER_IDEMPOTENCY_PREFIXES`; both actions get `integrations` in `ACTION_PERMISSIONS`,
   join `NEVER_APPROVED_ACTIONS`, and run beside the integration actions in
   `packages/core/src/automation/admin.ts`; `packages/db/test/tenant-tables.ts` gets
-  generators for the new tables; the dashboard adds `connections` to the proxy's `AREAS` for
-  the plain routes and dedicated handlers for connect, callback, callback status, pending
+  generators for the new tables; the dashboard proxy answers the `connections` area through a
+  dedicated allowlist, `connectionsRouteAllowed` (`apps/dashboard/src/lib/server/api-proxy.ts:62,92`),
+  not through `AREAS`, and has dedicated handlers for connect, callback, callback status, pending
   `DELETE` and confirm, as `calendar-connect.ts` does.
 - **C-17 Production opening and measurement.** Devin directed on 2026-11-07 that production
   opens now, Zero Sum first; the preview measurement is monitoring only and gates nothing.
@@ -647,7 +648,12 @@ Goal: clear every Shopify App Store requirement that costs no money, so the list
 when Devin pays the one-time registration fee. This revision adds a **native** tier (`native`)
 for Shopify beside the `composio` tier, an embedded app page, install-to-tenant binding with no
 operator, and the compliance webhooks. It changes C-1, C-4, C-7, C-13 and C-14 only where
-named. Nothing here submits the listing.
+named. This revision did not submit the listing. **Listing state (updated 2026-11-20):** the
+app was submitted for App Store review on 2026-11-08 and was awaiting review at that time (proof
+`proof/L6.txt` of the goal run `zs-hub-launch-readiness`, kept outside the repository, with the
+Partner Dashboard page reading "Submitted"). The native tier and the embedded page described
+here are built and merged (PR #81 holds the plan, with the code of this revision in the same
+squash commit `f9f26b4`; later changes are named in `conformance.md`).
 
 Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the page it relies on):
 - S1 App Store requirements: https://shopify.dev/docs/apps/launch/shopify-app-store/app-store-requirements
@@ -743,7 +749,7 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
     page opened in a new top-level tab, and, when not linked, the two choices of C-21.
   - Headers (S6): every response of `/shopify/*` carries
     `Content-Security-Policy: frame-ancestors https://<shop> https://admin.shopify.com;
-    base-uri 'self'; object-src 'none'` with `<shop>` the `shop` query value only when it
+    base-uri 'none'; object-src 'none'` with `<shop>` the `shop` query value only when it
     matches `^[a-z0-9][a-z0-9-]{0,59}\.myshopify\.com$`; otherwise `frame-ancestors 'none'`.
     The route has no `X-Frame-Options`. Every other dashboard route keeps `'none'` and `DENY`.
     The route handler sets it per request (not `proxy.ts`, which would buffer the body), and
@@ -751,10 +757,12 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
     static or wildcard. It also sends a nonce-based script and style policy.
 - **C-21 Install-to-tenant binding with no operator.** The worker holds the Shopify client
   secret, the token seal key and the Supabase service key; the API and the dashboard hold
-  none of them. New signed worker operations (same signing, nonce and deadlines as C-3):
-  `shopify_open`, `shopify_create_hub`, `shopify_redeem_claim`, `claim_start`,
-  `claim_status`, `claim_confirm`, `claim_cancel`. Public ID-token routes are `POST
-  /v1/shopify/embedded/open|create-hub|claim`; owner routes are `POST /v1/shopify/claims`,
+  none of them. New signed worker operations (same signing, nonce and deadlines as C-3), nine in
+  all (`SHOPIFY_OPERATIONS`, `packages/contracts/src/shopify.ts:12-14`): `open`, `create_hub`,
+  `redeem_claim`, `sign_in`, `claim_start`, `claim_status`, `claim_cancel`, `claim_confirm` and
+  `orders`. Public ID-token routes are `POST
+  /public/v1/shopify/embedded/open|orders|create-hub|sign-in|redeem-claim`
+  (`apps/api/src/public/shopify-embedded.ts:62-81`); owner routes are `POST /v1/shopify/claims`,
   `GET /v1/shopify/claims/current`, `POST /v1/shopify/claims/:id/confirm` and `DELETE
   /v1/shopify/claims/:id` (permission `integrations`, member role `owner`).
   - **ID token check** (worker, S3): HS256 against `SHOPIFY_CLIENT_SECRET` (and the previous
@@ -830,16 +838,18 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
 - **C-22 Tokens: expiring offline, sealed, refreshed.** Table `shopify_installs` (worker-only:
   no tenant column, `REVOKE ALL` from every role but the worker, forced RLS, no policy):
   `shop_id` (GID) primary key, `shop_domain` unique, `shop_name`, `scopes`, `status` (`live`,
-  `needs_reauth`, `uninstalled`), `access_sealed`, `refresh_sealed`, `seal_key_id`,
-  `access_expires_at`, `refresh_expires_at`, `claim_failures`, `claim_locked_until`,
+  `needs_reauth`, `uninstalled`), `access_sealed`, `access_key_id`, `refresh_sealed`,
+  `refresh_key_id`, `access_expires_at`, `refresh_expires_at`, `claim_failures`, `claim_locked_until`,
   `generation` (bumped by every exchange and by uninstall), `installed_at`, `uninstalled_at`, `created_at`, `updated_at`.
   - **Sealing.** AES-256-GCM, a random 96-bit nonce per write, key from `SHOPIFY_TOKEN_SEAL_KEY`
     (32 bytes, base64; `SHOPIFY_TOKEN_SEAL_KEY_PREVIOUS` opens old rows during a rotation), the
-    authenticated data is `shop_id|column|seal_key_id`, so a sealed value copied to another
+    authenticated data is `zss1|shop_id|column|key id` (the key id of that column,
+    `packages/core/src/shopify/seal.ts:48`), so a sealed value copied to another
     row or column fails to open. Tokens are never logged, never returned, never in an error.
   - **One at a time per store.** Every exchange and refresh for a store runs under a
-    session advisory lock keyed by the verified shop domain (taken before any row exists, so two
-    first opens cannot both exchange; S2 forbids a refresh and an exchange together). Token
+    lease in the `shopify_locks` table keyed by the verified shop domain (taken before any
+    install row exists, so two first opens cannot both exchange; S2 forbids a refresh and an
+    exchange together; `packages/core/src/shopify/native-worker.ts:218`). Token
     writes are conditional on the `generation` read under the lock, so a write that was in
     flight when an uninstall wiped the row (which bumps `generation`) changes nothing.
   - **Use.** A run reads the install, and if the access token expires within 5 minutes it
@@ -885,14 +895,18 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
     body on any mismatch or missing header (S8). Then it requires `X-Shopify-Topic`,
     `X-Shopify-Shop-Domain` (shop regex above) and `X-Shopify-Webhook-Id`. Those headers are
     not covered by the HMAC (only the body is), so none of them is trusted alone: the parsed
-    body must carry the same shop (`domain` / `myshopify_domain` for `app/uninstalled`,
-    `shop_domain` and `shop_id` for the compliance topics) and a mismatch is 401. The body's
+    body must carry the same shop (`myshopify_domain` for `app/uninstalled`, where `domain` is
+    the store's custom domain and is not checked; `shop_domain` and `shop_id` for the
+    compliance topics) and a mismatch is 401. The body's
     shop is the one acted on. The dedupe id is the header; a changed id only lets an
     authenticated body run again, which is safe because every handler below is idempotent.
   - Deduplication: `shopify_webhook_events` (`webhook_id` primary key, `topic`, `shop_domain`,
     `received_at`) takes the id first; a repeat answers 200 and does nothing. Rows older than 30
     days are removed by the pass. Each handler is one short transaction, so the 200 is sent
     well inside 5 seconds. An unknown topic is 200 and ignored (never retried forever).
+  - Other answers (`apps/api/src/connections/shopify-webhook.ts:24-46`): JSON `413` for a body
+    over 256 KiB, JSON `400` for an unreadable body (as the other webhook routes do), `404` when
+    the native tier is off, and `500` with no body when a handler fails (Shopify retries).
   - **Ordering (Shopify guarantees neither order nor delivery).** Before acting on
     `app/uninstalled` the handler checks with Shopify: it tries the stored access token (a
     refresh if needed). If the call succeeds the shop was reinstalled after the event, so the
@@ -946,17 +960,22 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
   instructions. The onboarding screencast (4.5.3) is recorded from the dev store run and kept
   with the proof, or marked Open with the reason if the recording cannot be made. Items that
   need money or a human at Shopify (the registration fee, the listing text review) stay Open
-  and named.
+  and named. **State on 2026-11-20:** the listing was submitted for App Store review on
+  2026-11-08 and was awaiting review (proof `proof/L6.txt`, goal run `zs-hub-launch-readiness`,
+  outside the repository). No review result is recorded here.
 - **C-26 Migration and wiring (revision 4, built).** One forward migration: creates
-  `shopify_installs`, `shopify_claims` and `shopify_webhook_events` (grants as C-22, C-21 and
-  C-24; claims are a tenant table with the standard test generator); relaxes
+  `shopify_installs`, `shopify_claims`, `shopify_webhook_events` and `shopify_locks` (four
+  tables; grants as C-22, C-21 and C-24; claims are a tenant table with the standard test
+  generator; `shopify_locks` is the lease table of C-22); relaxes
   `connections_tier` to `composio` or `native` and the `composio_account_id` requirement to
   `composio` rows only; limits the take-attempt trigger to `composio` rows (a native row is
   inserted only by the worker, and the new `connections_native_guard` refuses it to every
-  other role); replaces `connections_guard` for the native recovery clause of C-22; adds the partial unique index of C-21. Contract schemas, the seven
-  operations, the worker env (`SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`,
-  `SHOPIFY_CLIENT_SECRET_PREVIOUS`, `SHOPIFY_TOKEN_SEAL_KEY`, `SHOPIFY_TOKEN_SEAL_KEY_PREVIOUS`,
-  `SHOPIFY_API_VERSION`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `HUB_SIGN_IN_URL`), the
+  other role); replaces `connections_guard` for the native recovery clause of C-22; adds the partial unique index of C-21. Contract schemas, the nine
+  operations (C-21), the worker env (`SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`,
+  `SHOPIFY_CLIENT_SECRET_PREVIOUS`, `SHOPIFY_TOKEN_SEAL_KEY`, `SHOPIFY_TOKEN_SEAL_KEY_ID`,
+  `SHOPIFY_TOKEN_SEAL_KEY_PREVIOUS`, `SHOPIFY_TOKEN_SEAL_KEY_PREVIOUS_ID`,
+  `SHOPIFY_API_VERSION`, `SHOPIFY_PLAN_GRACE_DAYS`, `ZS_TARGET_REF`, `SUPABASE_SERVICE_ROLE_KEY`,
+  `HUB_SIGN_IN_URL`; `apps/api/src/connections/config.ts:37-52`), the
   dashboard env (`SHOPIFY_CLIENT_ID`, read at request time) and the `shopify/*/shopify.app.toml` files are part of the
   change. Config parsing is strict: a partial Shopify config disables the native tier
   and fails the worker's start-up check with a named variable, never half-starts it.
