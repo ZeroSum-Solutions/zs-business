@@ -22,10 +22,12 @@ PR_URL = "https://github.com/example/repo/pull/7"
 
 def embedded_script():
     text = WORKFLOW.read_text()
-    match = re.search(r"python3 - <<'PLANE_LINK_PY'\n(.*?)\n\s*PLANE_LINK_PY\n", text, re.S)
+    # The terminator must sit at the same indent as the line that opens the heredoc: YAML strips
+    # that indent from the run block, so only then does bash see it at column 0.
+    match = re.search(r"^( *)python3 - <<'PLANE_LINK_PY'\n(.*?)\n\1PLANE_LINK_PY\n", text, re.S | re.M)
     if not match:
         raise AssertionError("no PLANE_LINK_PY block in %s" % WORKFLOW)
-    return textwrap.dedent(match.group(1))
+    return textwrap.dedent(match.group(2))
 
 
 class Reply:
@@ -52,11 +54,19 @@ class FakePlane:
         self.items = {n: {"id": "i%d" % n, "state": "s-" + group, "links": [], "comments": []}
                       for n, group in items.items()}
         self.calls = []
+        self.errors = []  # the script catches KeyError and ValueError, so a fake's own fault is kept here
 
     def group(self, n):
         return self.items[n]["state"][2:]
 
     def open(self, request, timeout=None):
+        try:
+            return self.answer(request)
+        except Exception as error:
+            self.errors.append(repr(error))
+            raise
+
+    def answer(self, request):
         url, method = request.full_url, request.get_method()
         assert url.startswith(PREFIX), url
         path = url[len(PREFIX):].split("?")[0]
@@ -99,6 +109,8 @@ def run(plane, action, merged=False, branch="", title="", body=""):
         except SystemExit as exit_:
             if exit_.code not in (None, 0):  # the workflow step would fail
                 raise AssertionError("script exited with %r:\n%s" % (exit_.code, out.getvalue()))
+    if plane.errors:  # a request the fake did not expect, swallowed by the script's handler
+        raise AssertionError("unexpected Plane requests: %s\n%s" % (plane.errors, out.getvalue()))
     return out.getvalue()
 
 
