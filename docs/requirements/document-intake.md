@@ -208,12 +208,9 @@ role cannot delete a `catalog_items` row.
 - An upload whose Idempotency-Key already names an action (a replay of an accepted upload, or a key another
   action used) is checked before storage is touched: it returns the stored outcome or the dispatcher's refusal
   (`IdempotencyConflict` for a changed payload or another action, `BindingMismatch` for another actor) and writes
-  no object, so a PDF the sweep deleted stays deleted (ZSB-13). When a new upload fails after its write, the object
-  is deleted only while the request holds the key's lock, taken without waiting, and no job holds the object. A
-  failure a same-key request may still commit (`in_progress`, `commit_unknown`), a busy lock, a request deadline or
-  an error in that check keeps the object, so it can stay unreferenced; nothing sweeps such an object. A failed
-  request's delete can land between a same-key winner's write and its commit, so the winner checks the object after
-  its commit and writes it again if it is gone.
+  no object, so a PDF the sweep deleted stays deleted (ZSB-13). Only the sweep deletes a stored PDF: when a new
+  upload fails after its write, its object stays, unreferenced, because a same-key request may have written the same
+  path and be about to commit its job. Nothing sweeps such an object yet.
 - `catalog_items` and `knowledge_entries` are minimal and new. They will need a revision when
   store sync, variants, stock or images arrive.
 - Header mapping uses a fixed synonym list; a PDF with other headings yields `invalid` rows.

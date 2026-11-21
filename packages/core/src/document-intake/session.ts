@@ -47,7 +47,7 @@ import {
   type IntakeUploadResult,
   type IntakeWorkerOutcome,
 } from "@zs/contracts";
-import { DatabaseUnavailable, type Transaction } from "@zs/db";
+import type { Transaction } from "@zs/db";
 import type { Authorize, EdgeDependencies, Principal } from "../edge/session.js";
 import { createSession, directDispatch, memberDispatch, parseInput } from "../edge/session.js";
 import { validationError } from "../edge/errors.js";
@@ -180,24 +180,6 @@ export function createDocumentIntakeSession(deps: EdgeDependencies, config: Docu
         payload: toJson(payload),
       });
 
-      /**
-       * After a new upload fails, delete its object when no job holds it. Only while holding the key's lock,
-       * taken without waiting: a same-key request that holds it may still commit a job for this path. A failure
-       * that request may still commit (in_progress) or this one may have committed (commit_unknown), a busy
-       * lock, and any error here keep the object; a kept object is unreferenced, and nothing sweeps it.
-       */
-      async function dropOrphan(error: unknown, key: string, jobId: string, fileSha256: string, path: string): Promise<void> {
-        if (error instanceof DatabaseUnavailable && (error.reason === "in_progress" || error.reason === "commit_unknown")) return;
-        await deps.db.tenant(tenantId, async (tx) => {
-          const locked = (await tx.query<{ locked: boolean }>(
-            "SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS locked", [`${tenantId}:${key}`])).rows[0]!.locked;
-          if (!locked) return;
-          const held = (await tx.query(
-            "SELECT 1 FROM document_intake_jobs WHERE tenant_id=$1 AND id=$2 AND file_sha256=$3", [tenantId, jobId, fileSha256])).rowCount !== 0;
-          if (!held) await config.store.delete(path);
-        }).catch(() => undefined);
-      }
-
       async function readJob(jobId: string): Promise<IntakeJobDetail> {
         const id = uuidSchema.safeParse(jobId);
         if (!id.success) throw new NotFound();
@@ -227,8 +209,7 @@ export function createDocumentIntakeSession(deps: EdgeDependencies, config: Docu
         /**
          * DL-3: store the PDF at the server-built path, then queue the job. Owner only, checked first;
          * the type, the signature and the size are checked before a byte is stored. A replay of a key that
-         * already names an action never writes the object. A failed insert deletes the object when the key's
-         * lock shows no job holds it (DL-16).
+         * already names an action never writes the object. Only the 30-day sweep deletes an object (DL-16).
          */
         async upload(input: UploadInput, rawKey: unknown): Promise<IntakeUploadResult> {
           await asOwner(async () => undefined);
@@ -255,19 +236,11 @@ export function createDocumentIntakeSession(deps: EdgeDependencies, config: Docu
           const replay = await asOwner(async (tx) => (await tx.query(
             "SELECT 1 FROM actions WHERE tenant_id=$1 AND idempotency_key=$2", [tenantId, key])).rowCount !== 0);
           if (replay) return dispatch();
+          // Nothing deletes the object if the insert then fails: a same-key request may have written the same path
+          // and be about to commit its job, and a delete here could race it and leave that job without its PDF.
+          // The object stays unreferenced instead (ZSB-13).
           await config.store.put(path, input.bytes);
-          let queued: IntakeUploadResult;
-          try {
-            queued = await dispatch();
-          } catch (error) {
-            await dropOrphan(error, key, jobId, fileSha256, path);
-            throw error;
-          }
-          // A failed same-key request can delete this path before this job commits (dropOrphan runs under the key's
-          // lock, which this dispatch took after its write). Once the job has committed nothing deletes it until
-          // the sweep, so a missing object here is put back.
-          if (!(await config.store.exists(path))) await config.store.put(path, input.bytes);
-          return queued;
+          return dispatch();
         },
 
         async list(limit = 50): Promise<IntakeJobList> {

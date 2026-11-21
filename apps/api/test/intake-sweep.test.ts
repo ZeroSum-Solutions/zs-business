@@ -200,7 +200,7 @@ describe("the deployed cron function (vercel-intake-sweep)", () => {
 });
 
 describe("createIntakeFileStore", () => {
-  it("stores a PDF, reads it back, answers null for a missing path, says whether it exists, and deletes", async () => {
+  it("stores a PDF, reads it back, answers null for a missing path, and deletes", async () => {
     const objects = createMemorySiteStore();
     const files = createIntakeFileStore(objects);
     const path = intakeFilePath(randomUUID(), randomUUID(), "a".repeat(64));
@@ -208,11 +208,8 @@ describe("createIntakeFileStore", () => {
     expect(await files.read(path)).toEqual(new Uint8Array([37, 80, 68, 70]));
     expect((await objects.get(path))?.contentType).toBe("application/pdf");
     expect(await files.read(`${path}.missing`)).toBeNull();
-    expect(await files.exists(path)).toBe(true);
-    expect(await files.exists(`${path}.missing`)).toBe(false);
     await files.delete(path);
     expect(objects.keys()).toEqual([]);
-    expect(await files.exists(path)).toBe(false);
     await files.delete(path);
   });
 });

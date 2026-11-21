@@ -11,9 +11,6 @@ export function createIntakeFileStore(objects: SiteObjectStore): IntakeFileStore
     async read(path) {
       return (await objects.get(path))?.body ?? null;
     },
-    async exists(path) {
-      return (await objects.head(path)) !== null;
-    },
     async delete(path) {
       await objects.delete(path);
     },

@@ -27,14 +27,12 @@ export class DoclingLimitError extends Error {
 
 /**
  * DL-3, DL-16: where uploaded PDFs live, at the server-built path `t/<tenantId>/intake/<jobId>/<sha256>.pdf`.
- * A tenant never names the path. Deletion happens 30 days after the job ends; a failed insert deletes the object
- * when no job holds it.
+ * A tenant never names the path. Deletion happens 30 days after the job ends. Only that sweep deletes: an object
+ * written for an insert that then failed stays, unreferenced (ZSB-13).
  */
 export interface IntakeFileStore {
   put(path: string, bytes: Uint8Array): Promise<void>;
   read(path: string): Promise<Uint8Array | null>;
-  /** Whether an object is stored at the path, without reading it. */
-  exists(path: string): Promise<boolean>;
   delete(path: string): Promise<void>;
 }
 
@@ -51,9 +49,6 @@ export class InMemoryIntakeFileStore implements IntakeFileStore {
   async read(path: string): Promise<Uint8Array | null> {
     const found = this.objects.get(path);
     return found ? new Uint8Array(found) : null;
-  }
-  async exists(path: string): Promise<boolean> {
-    return this.objects.has(path);
   }
   async delete(path: string): Promise<void> {
     this.deleted.push(path);
