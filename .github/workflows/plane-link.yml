@@ -1,9 +1,11 @@
 name: plane-link
 
-# Links a pull request to its Plane work items. Put a ZSB-<n> key in the branch name, the PR
-# title or the PR body: the work item gets the PR as a link and a comment, moves to
-# In Progress while the PR is open and to Done when it merges into the default branch.
-# Best effort: it never fails a PR.
+# Links a pull request to its Plane work items. Put a ZSB-<n> key in the branch name or the PR
+# title: the work item gets the PR as a link and a comment, moves to In Progress while the PR
+# is open and to Done when it merges into the default branch. A key named only in the PR body
+# ("tracked as ZSB-13") gets the link and the comment, never a state change (ZSB-24).
+# Best effort: it never fails a PR. scripts/plane_link_test.py runs this script against a fake
+# Plane (CI job plane-link-script).
 #
 # Security. The trigger is pull_request_target, so the workflow file always comes from the
 # default branch: a pull request cannot change what runs with the secrets. The job checks out
@@ -62,11 +64,14 @@ jobs:
           # Keys in order: branch, then title, then body, so the cap never drops the branch's own key.
           # A key must not touch a letter or digit on either side; at most 7 digits.
           pattern = re.compile(r"(?<![A-Za-z0-9])%s-0*([0-9]{1,7})(?![A-Za-z0-9])" % PREFIX, re.I)
-          numbers = []
+          numbers, named = [], set()
           for field in ("PR_BRANCH", "PR_TITLE", "PR_BODY"):
               for n in pattern.findall(env.get(field, "")):
-                  if int(n) not in numbers:
-                      numbers.append(int(n))
+                  n = int(n)
+                  if field != "PR_BODY":  # only the branch and the title may move a work item
+                      named.add(n)
+                  if n not in numbers:
+                      numbers.append(n)
           if not numbers:
               print("no %s-n key in the branch, title or body: nothing to do" % PREFIX)
               sys.exit(0)
@@ -128,7 +133,9 @@ jobs:
                   seen = (html.unescape(re.sub(r"<[^>]+>", "", c.get("comment_html") or "")) for c in rows(root + "/comments/"))
                   if not any(note in text for text in seen):
                       api("POST", root + "/comments/", {"comment_html": "<p>%s</p>" % html.escape(note)})
-                  if target:
+                  if target and n not in named:
+                      print("%s: named only in the body, state left as it is" % ident)
+                  elif target:
                       states = rows("projects/%s/states/" % item["project"])
                       want = sorted((s for s in states if s["group"] == target), key=lambda s: s.get("sequence") or 0)
                       # Read the state again just before the move: another pull request may have finished the item.
