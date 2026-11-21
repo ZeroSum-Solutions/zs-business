@@ -4,15 +4,15 @@
 // and the models are fakes, so no test reaches a vendor, a key or a model download.
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   ActionError, CATALOG_INTAKE_APPLY_ACTION, CATALOG_INTAKE_UPLOAD_ACTION, Conflict, DOCUMENT_INTAKE_JOB_TARGET, INTAKE_LEASE_MS, INTAKE_MAX_BYTES,
-  NotFound, Refused, TenantDenied, idempotencyKeySchema, type IntakeJobDetail, type MemberRole,
+  IdempotencyConflict, NotFound, Refused, TenantDenied, idempotencyKeySchema, type IntakeJobDetail, type MemberRole,
 } from "@zs/contracts";
-import { asService, type Transaction } from "@zs/db";
+import { asService, type ScopedDatabase, type Transaction } from "@zs/db";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import {
-  createDocumentIntakeSession, createFakeDoclingPort, FAKE_PRICE_LIST, InMemoryIntakeFileStore, intakeFilePath,
+  createDocumentIntakeSession, createFakeDoclingPort, FAKE_PRICE_LIST, InMemoryIntakeFileStore, intakeFilePath, intakeJobId,
   memberDispatch, runDocumentIntakeWorker, type EdgeDependencies,
 } from "../src/index.js";
 import { createSession } from "../src/index.js";
@@ -127,6 +127,53 @@ describe("DL-3 upload", () => {
     const run = await runDocumentIntakeWorker({ api: intake().worker, port });
     expect(run?.outcome?.status).toBe("review");
     await member(ownerA).discard(first.jobId, randomUUID());
+  });
+
+  it("an upload under a key another action already used is refused and writes no object (ZSB-13)", async () => {
+    const key = randomUUID();
+    await createSession(deps(), { tenantId: tenantA, actorId: ownerA }).upsertContact({ displayName: "Key holder", email: "key-holder@example.com" }, key);
+    const put = vi.spyOn(store, "put");
+    try {
+      expect(await rejection(member(ownerA).upload({ bytes: pdfVariant(80), filename: "k.pdf", contentType: "application/pdf" }, key)))
+        .toBeInstanceOf(IdempotencyConflict);
+      expect(put).not.toHaveBeenCalled();
+    } finally {
+      put.mockRestore();
+    }
+  });
+
+  /** A database whose `call`-th tenant transaction fails, as a dispatch that breaks after the write would. */
+  const failingOn = (call: number): ScopedDatabase => {
+    let calls = 0;
+    const tenant: ScopedDatabase["tenant"] = (id, work, options) =>
+      ++calls === call ? Promise.reject(new Error("dispatch broke")) : database.db.tenant(id, work, options);
+    return Object.assign(Object.create(database.db) as ScopedDatabase, { tenant });
+  };
+  // Upload's tenant transactions: 1 the owner check, 2 the replay check, 3 the dispatch.
+  const brokenDispatch = () => createDocumentIntakeSession({ ...deps(), db: failingOn(3) }, { store }).forMember({ tenantId: tenantA, actorId: ownerA });
+  const pathOf = (key: string, bytes: Buffer) => intakeFilePath(tenantA, intakeJobId(tenantA, key), createHash("sha256").update(bytes).digest("hex"));
+
+  it("an upload whose insert fails keeps its object, so a same-key upload that commits never loses its PDF (ZSB-13)", async () => {
+    const key = randomUUID();
+    const bytes = pdfVariant(83);
+    const upload = { bytes, filename: "race.pdf", contentType: "application/pdf" };
+    const path = pathOf(key, bytes);
+    // The winner writes first; before its dispatch commits, a same-key request writes the same path and its insert
+    // fails. Deleting that object would leave the winner's job without its PDF.
+    let loser: unknown;
+    const winnerStore = new InMemoryIntakeFileStore();
+    winnerStore.put = async (at, data) => {
+      await store.put(at, data);
+      loser = await rejection(brokenDispatch().upload(upload, key));
+    };
+    const queued = await createDocumentIntakeSession(deps(), { store: winnerStore }).forMember({ tenantId: tenantA, actorId: ownerA }).upload(upload, key);
+    expect(loser).toMatchObject({ message: "dispatch broke" });
+    expect(store.deleted).not.toContain(path);
+    expect(store.objects.get(path)).toEqual(new Uint8Array(bytes));
+    const run = await runDocumentIntakeWorker({ api: intake().worker, port });
+    expect(run?.job.id).toBe(queued.jobId);
+    expect(run?.outcome?.status).toBe("review");
+    await member(ownerA).discard(queued.jobId, randomUUID());
   });
 });
 
@@ -363,6 +410,31 @@ describe("DL-16 files and two tenants", () => {
     expect(store.objects.size).toBe(objects - removed);
     expect(await intake().sweepFiles()).toBe(0);
     expect(await rows("SELECT 1 FROM document_intake_jobs WHERE file_deleted_at IS NULL AND finished_at IS NOT NULL", [])).toHaveLength(0);
+  });
+
+  it("a replay of an accepted upload after the sweep returns the first outcome and writes no object", async () => {
+    const key = randomUUID();
+    const bytes = pdfVariant(70);
+    const upload = { bytes, filename: "swept.pdf", contentType: "application/pdf" };
+    const first = await member(ownerA).upload(upload, key);
+    expect((await runDocumentIntakeWorker({ api: intake().worker, port }))?.job.id).toBe(first.jobId);
+    await member(ownerA).discard(first.jobId, randomUUID());
+    now += 31 * DAY;
+    expect(await intake().sweepFiles()).toBe(1);
+    const path = intakeFilePath(tenantA, first.jobId, createHash("sha256").update(bytes).digest("hex"));
+    expect(store.objects.has(path)).toBe(false);
+
+    const put = vi.spyOn(store, "put");
+    try {
+      expect(await member(ownerA).upload(upload, key)).toEqual(first);
+      // The same key with other bytes is refused and writes nothing either.
+      expect(await rejection(member(ownerA).upload({ ...upload, bytes: pdfVariant(71) }, key))).toBeInstanceOf(IdempotencyConflict);
+      expect(put).not.toHaveBeenCalled();
+    } finally {
+      put.mockRestore();
+    }
+    expect(store.objects.has(path)).toBe(false);
+    expect(await rows("SELECT 1 FROM document_intake_jobs WHERE tenant_id=$1 AND id=$2 AND file_deleted_at IS NOT NULL", [tenantA, first.jobId])).toHaveLength(1);
   });
 
   it("tenant B reads none of A's jobs, rows or items, and A's lease opens none of B's files", async () => {
