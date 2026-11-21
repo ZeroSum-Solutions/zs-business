@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   ActionError, CATALOG_INTAKE_APPLY_ACTION, CATALOG_INTAKE_UPLOAD_ACTION, Conflict, DOCUMENT_INTAKE_JOB_TARGET, INTAKE_LEASE_MS, INTAKE_MAX_BYTES,
-  NotFound, Refused, TenantDenied, idempotencyKeySchema, type IntakeJobDetail, type MemberRole,
+  IdempotencyConflict, NotFound, Refused, TenantDenied, idempotencyKeySchema, type IntakeJobDetail, type MemberRole,
 } from "@zs/contracts";
 import { asService, type Transaction } from "@zs/db";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
@@ -381,7 +381,7 @@ describe("DL-16 files and two tenants", () => {
     try {
       expect(await member(ownerA).upload(upload, key)).toEqual(first);
       // The same key with other bytes is refused and writes nothing either.
-      expect(await rejection(member(ownerA).upload({ ...upload, bytes: pdfVariant(71) }, key))).toBeInstanceOf(ActionError);
+      expect(await rejection(member(ownerA).upload({ ...upload, bytes: pdfVariant(71) }, key))).toBeInstanceOf(IdempotencyConflict);
       expect(put).not.toHaveBeenCalled();
     } finally {
       put.mockRestore();
