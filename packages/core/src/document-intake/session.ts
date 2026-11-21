@@ -47,7 +47,7 @@ import {
   type IntakeUploadResult,
   type IntakeWorkerOutcome,
 } from "@zs/contracts";
-import type { Transaction } from "@zs/db";
+import { DatabaseUnavailable, type Transaction } from "@zs/db";
 import type { Authorize, EdgeDependencies, Principal } from "../edge/session.js";
 import { createSession, directDispatch, memberDispatch, parseInput } from "../edge/session.js";
 import { validationError } from "../edge/errors.js";
@@ -209,7 +209,7 @@ export function createDocumentIntakeSession(deps: EdgeDependencies, config: Docu
         /**
          * DL-3: store the PDF at the server-built path, then queue the job. Owner only, checked first;
          * the type, the signature and the size are checked before a byte is stored. A replay of a key that
-         * already has a job never writes the object. A failed insert deletes the object at once (DL-16).
+         * already names an action or a job never writes the object. A failed insert deletes the object at once (DL-16).
          */
         async upload(input: UploadInput, rawKey: unknown): Promise<IntakeUploadResult> {
           await asOwner(async () => undefined);
@@ -229,20 +229,29 @@ export function createDocumentIntakeSession(deps: EdgeDependencies, config: Docu
             jobId, targetKind: "catalog", source: "upload", filename, fileSha256, byteLength: input.bytes.byteLength,
           });
           const dispatch = async () => (await run(command(CATALOG_INTAKE_UPLOAD_ACTION, jobId, key, payload))).result as unknown as IntakeUploadResult;
-          // The job ID comes from the key, so a job under it means this is a replay: the dispatcher returns
-          // the stored outcome (or refuses a changed payload), and storage is not touched. Writing first
-          // would put back a PDF the 30-day sweep already deleted (DL-16).
-          const replay = await deps.db.tenant(tenantId, async (tx) => (await tx.query(
-            "SELECT 1 FROM document_intake_jobs WHERE tenant_id=$1 AND id=$2", [tenantId, jobId])).rowCount === 1);
+          // A key that already names an action, or the job derived from it, makes this a replay: the dispatcher
+          // returns the stored outcome or refuses a changed payload, another actor or another action, and storage
+          // is not touched. Writing first would put back a PDF the 30-day sweep already deleted (DL-16).
+          const replay = await asOwner(async (tx) => (await tx.query<{ found: boolean }>(
+            `SELECT EXISTS (SELECT 1 FROM actions WHERE tenant_id=$1 AND idempotency_key=$2)
+                 OR EXISTS (SELECT 1 FROM document_intake_jobs WHERE tenant_id=$1 AND id=$3) AS found`,
+            [tenantId, key, jobId])).rows[0]!.found);
           if (replay) return dispatch();
           await config.store.put(path, input.bytes);
           try {
             return await dispatch();
           } catch (error) {
-            // A retry of an accepted upload finds its job and keeps the object.
-            const kept = await deps.db.tenant(tenantId, async (tx) => (await tx.query(
-              "SELECT 1 FROM document_intake_jobs WHERE tenant_id=$1 AND id=$2 AND file_sha256=$3", [tenantId, jobId, fileSha256])).rowCount === 1);
-            if (!kept) { try { await config.store.delete(path); } catch { /* the object is unreferenced; the job never existed */ } }
+            // Delete the object only when no job holds it. An earlier request with this key may still be running
+            // (in_progress) or this commit may have landed (commit_unknown): keep it then. Otherwise wait on the
+            // dispatcher's key lock, so a same-key request in flight commits or rolls back before the check; any
+            // doubt keeps the object, since a job without its PDF cannot be repaired by a retry.
+            if (error instanceof DatabaseUnavailable && (error.reason === "in_progress" || error.reason === "commit_unknown")) throw error;
+            const orphan = await deps.db.tenant(tenantId, async (tx) => {
+              await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`${tenantId}:${key}`]);
+              return (await tx.query(
+                "SELECT 1 FROM document_intake_jobs WHERE tenant_id=$1 AND id=$2 AND file_sha256=$3", [tenantId, jobId, fileSha256])).rowCount === 0;
+            }).catch(() => false);
+            if (orphan) { try { await config.store.delete(path); } catch { /* the object is unreferenced; the job never existed */ } }
             throw error;
           }
         },

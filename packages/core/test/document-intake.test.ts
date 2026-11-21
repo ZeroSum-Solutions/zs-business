@@ -9,10 +9,10 @@ import {
   ActionError, CATALOG_INTAKE_APPLY_ACTION, CATALOG_INTAKE_UPLOAD_ACTION, Conflict, DOCUMENT_INTAKE_JOB_TARGET, INTAKE_LEASE_MS, INTAKE_MAX_BYTES,
   IdempotencyConflict, NotFound, Refused, TenantDenied, idempotencyKeySchema, type IntakeJobDetail, type MemberRole,
 } from "@zs/contracts";
-import { asService, type Transaction } from "@zs/db";
+import { asService, createScopedDatabase, type Transaction } from "@zs/db";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import {
-  createDocumentIntakeSession, createFakeDoclingPort, FAKE_PRICE_LIST, InMemoryIntakeFileStore, intakeFilePath,
+  createDocumentIntakeSession, createFakeDoclingPort, FAKE_PRICE_LIST, InMemoryIntakeFileStore, intakeFilePath, intakeJobId,
   memberDispatch, runDocumentIntakeWorker, type EdgeDependencies,
 } from "../src/index.js";
 import { createSession } from "../src/index.js";
@@ -127,6 +127,44 @@ describe("DL-3 upload", () => {
     const run = await runDocumentIntakeWorker({ api: intake().worker, port });
     expect(run?.outcome?.status).toBe("review");
     await member(ownerA).discard(first.jobId, randomUUID());
+  });
+
+  it("an upload under a key another action already used is refused and writes no object (ZSB-13)", async () => {
+    const key = randomUUID();
+    await createSession(deps(), { tenantId: tenantA, actorId: ownerA }).upsertContact({ displayName: "Key holder", email: "key-holder@example.com" }, key);
+    const put = vi.spyOn(store, "put");
+    try {
+      expect(await rejection(member(ownerA).upload({ bytes: pdfVariant(80), filename: "k.pdf", contentType: "application/pdf" }, key)))
+        .toBeInstanceOf(IdempotencyConflict);
+      expect(put).not.toHaveBeenCalled();
+    } finally {
+      put.mockRestore();
+    }
+  });
+
+  it("keeps the object when a same-key request still holds the key, and a retry then queues the job (ZSB-13)", async () => {
+    const key = randomUUID();
+    const bytes = pdfVariant(81);
+    const upload = { bytes, filename: "held.pdf", contentType: "application/pdf" };
+    const path = intakeFilePath(tenantA, intakeJobId(tenantA, key), createHash("sha256").update(bytes).digest("hex"));
+    const bounded = createScopedDatabase(database.runtimePool, { lockTimeoutMs: 20, statementTimeoutMs: 1000 });
+    const holder = await database.pool.connect();
+    try {
+      await holder.query("begin");
+      await holder.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`${tenantA}:${key}`]);
+      const session = createDocumentIntakeSession({ ...deps(), db: bounded }, { store }).forMember({ tenantId: tenantA, actorId: ownerA });
+      // The holder may yet commit a job for this key, so the object must stay.
+      expect(await rejection(session.upload(upload, key))).toMatchObject({ name: "DatabaseUnavailable", reason: "in_progress" });
+      expect(store.objects.has(path)).toBe(true);
+    } finally {
+      await holder.query("rollback");
+      holder.release();
+    }
+    const queued = await member(ownerA).upload(upload, key);
+    expect(store.objects.has(path)).toBe(true);
+    const run = await runDocumentIntakeWorker({ api: intake().worker, port });
+    expect(run?.job.id).toBe(queued.jobId);
+    await member(ownerA).discard(queued.jobId, randomUUID());
   });
 });
 
