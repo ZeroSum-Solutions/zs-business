@@ -180,6 +180,24 @@ export function createDocumentIntakeSession(deps: EdgeDependencies, config: Docu
         payload: toJson(payload),
       });
 
+      /**
+       * After a new upload fails, delete its object when no job holds it. Only while holding the key's lock,
+       * taken without waiting: a same-key request that holds it may still commit a job for this path. A failure
+       * that request may still commit (in_progress) or this one may have committed (commit_unknown), a busy
+       * lock, and any error here keep the object; a kept object is unreferenced, and nothing sweeps it.
+       */
+      async function dropOrphan(error: unknown, key: string, jobId: string, fileSha256: string, path: string): Promise<void> {
+        if (error instanceof DatabaseUnavailable && (error.reason === "in_progress" || error.reason === "commit_unknown")) return;
+        await deps.db.tenant(tenantId, async (tx) => {
+          const locked = (await tx.query<{ locked: boolean }>(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS locked", [`${tenantId}:${key}`])).rows[0]!.locked;
+          if (!locked) return;
+          const held = (await tx.query(
+            "SELECT 1 FROM document_intake_jobs WHERE tenant_id=$1 AND id=$2 AND file_sha256=$3", [tenantId, jobId, fileSha256])).rowCount !== 0;
+          if (!held) await config.store.delete(path);
+        }).catch(() => undefined);
+      }
+
       async function readJob(jobId: string): Promise<IntakeJobDetail> {
         const id = uuidSchema.safeParse(jobId);
         if (!id.success) throw new NotFound();
@@ -209,7 +227,8 @@ export function createDocumentIntakeSession(deps: EdgeDependencies, config: Docu
         /**
          * DL-3: store the PDF at the server-built path, then queue the job. Owner only, checked first;
          * the type, the signature and the size are checked before a byte is stored. A replay of a key that
-         * already names an action or a job never writes the object. A failed insert deletes the object at once (DL-16).
+         * already names an action never writes the object. A failed insert deletes the object when the key's
+         * lock shows no job holds it (DL-16).
          */
         async upload(input: UploadInput, rawKey: unknown): Promise<IntakeUploadResult> {
           await asOwner(async () => undefined);
@@ -229,31 +248,26 @@ export function createDocumentIntakeSession(deps: EdgeDependencies, config: Docu
             jobId, targetKind: "catalog", source: "upload", filename, fileSha256, byteLength: input.bytes.byteLength,
           });
           const dispatch = async () => (await run(command(CATALOG_INTAKE_UPLOAD_ACTION, jobId, key, payload))).result as unknown as IntakeUploadResult;
-          // A key that already names an action, or the job derived from it, makes this a replay: the dispatcher
-          // returns the stored outcome or refuses a changed payload, another actor or another action, and storage
-          // is not touched. Writing first would put back a PDF the 30-day sweep already deleted (DL-16).
-          const replay = await asOwner(async (tx) => (await tx.query<{ found: boolean }>(
-            `SELECT EXISTS (SELECT 1 FROM actions WHERE tenant_id=$1 AND idempotency_key=$2)
-                 OR EXISTS (SELECT 1 FROM document_intake_jobs WHERE tenant_id=$1 AND id=$3) AS found`,
-            [tenantId, key, jobId])).rows[0]!.found);
+          // A key that already names an action makes this a replay: the dispatcher returns the stored outcome or
+          // refuses a changed payload, another actor or another action, and storage is not touched. Writing first
+          // would put back a PDF the 30-day sweep already deleted (DL-16). Actions are never pruned, so the job
+          // the key derives exists only beside its action.
+          const replay = await asOwner(async (tx) => (await tx.query(
+            "SELECT 1 FROM actions WHERE tenant_id=$1 AND idempotency_key=$2", [tenantId, key])).rowCount !== 0);
           if (replay) return dispatch();
           await config.store.put(path, input.bytes);
+          let queued: IntakeUploadResult;
           try {
-            return await dispatch();
+            queued = await dispatch();
           } catch (error) {
-            // Delete the object only when no job holds it. An earlier request with this key may still be running
-            // (in_progress) or this commit may have landed (commit_unknown): keep it then. Otherwise wait on the
-            // dispatcher's key lock, so a same-key request in flight commits or rolls back before the check; any
-            // doubt keeps the object, since a job without its PDF cannot be repaired by a retry.
-            if (error instanceof DatabaseUnavailable && (error.reason === "in_progress" || error.reason === "commit_unknown")) throw error;
-            const orphan = await deps.db.tenant(tenantId, async (tx) => {
-              await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`${tenantId}:${key}`]);
-              return (await tx.query(
-                "SELECT 1 FROM document_intake_jobs WHERE tenant_id=$1 AND id=$2 AND file_sha256=$3", [tenantId, jobId, fileSha256])).rowCount === 0;
-            }).catch(() => false);
-            if (orphan) { try { await config.store.delete(path); } catch { /* the object is unreferenced; the job never existed */ } }
+            await dropOrphan(error, key, jobId, fileSha256, path);
             throw error;
           }
+          // A failed same-key request can delete this path before this job commits (dropOrphan runs under the key's
+          // lock, which this dispatch took after its write). Once the job has committed nothing deletes it until
+          // the sweep, so a missing object here is put back.
+          if (!(await config.store.exists(path))) await config.store.put(path, input.bytes);
+          return queued;
         },
 
         async list(limit = 50): Promise<IntakeJobList> {

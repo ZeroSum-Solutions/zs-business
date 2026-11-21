@@ -9,7 +9,7 @@ import {
   ActionError, CATALOG_INTAKE_APPLY_ACTION, CATALOG_INTAKE_UPLOAD_ACTION, Conflict, DOCUMENT_INTAKE_JOB_TARGET, INTAKE_LEASE_MS, INTAKE_MAX_BYTES,
   IdempotencyConflict, NotFound, Refused, TenantDenied, idempotencyKeySchema, type IntakeJobDetail, type MemberRole,
 } from "@zs/contracts";
-import { asService, createScopedDatabase, type Transaction } from "@zs/db";
+import { asService, createScopedDatabase, type ScopedDatabase, type Transaction } from "@zs/db";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import {
   createDocumentIntakeSession, createFakeDoclingPort, FAKE_PRICE_LIST, InMemoryIntakeFileStore, intakeFilePath, intakeJobId,
@@ -142,19 +142,41 @@ describe("DL-3 upload", () => {
     }
   });
 
+  /** A database whose `call`-th tenant transaction fails, as a dispatch that breaks after the write would. */
+  const failingOn = (call: number): ScopedDatabase => {
+    let calls = 0;
+    const tenant: ScopedDatabase["tenant"] = (id, work, options) =>
+      ++calls === call ? Promise.reject(new Error("dispatch broke")) : database.db.tenant(id, work, options);
+    return Object.assign(Object.create(database.db) as ScopedDatabase, { tenant });
+  };
+  // Upload's tenant transactions: 1 the owner check, 2 the replay check, 3 the dispatch, 4 the cleanup.
+  const brokenDispatch = () => createDocumentIntakeSession({ ...deps(), db: failingOn(3) }, { store }).forMember({ tenantId: tenantA, actorId: ownerA });
+  const pathOf = (key: string, bytes: Buffer) => intakeFilePath(tenantA, intakeJobId(tenantA, key), createHash("sha256").update(bytes).digest("hex"));
+
+  it("deletes the object of an upload whose insert failed when no job holds it (DL-16)", async () => {
+    const key = randomUUID();
+    const bytes = pdfVariant(82);
+    expect(await rejection(brokenDispatch().upload({ bytes, filename: "x.pdf", contentType: "application/pdf" }, key))).toMatchObject({ message: "dispatch broke" });
+    expect(store.objects.has(pathOf(key, bytes))).toBe(false);
+    expect(store.deleted).toContain(pathOf(key, bytes));
+  });
+
   it("keeps the object when a same-key request still holds the key, and a retry then queues the job (ZSB-13)", async () => {
     const key = randomUUID();
     const bytes = pdfVariant(81);
     const upload = { bytes, filename: "held.pdf", contentType: "application/pdf" };
-    const path = intakeFilePath(tenantA, intakeJobId(tenantA, key), createHash("sha256").update(bytes).digest("hex"));
+    const path = pathOf(key, bytes);
     const bounded = createScopedDatabase(database.runtimePool, { lockTimeoutMs: 20, statementTimeoutMs: 1000 });
     const holder = await database.pool.connect();
     try {
       await holder.query("begin");
       await holder.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`${tenantA}:${key}`]);
+      // The dispatch times out on the held lock: the holder may yet commit a job for this key.
       const session = createDocumentIntakeSession({ ...deps(), db: bounded }, { store }).forMember({ tenantId: tenantA, actorId: ownerA });
-      // The holder may yet commit a job for this key, so the object must stay.
       expect(await rejection(session.upload(upload, key))).toMatchObject({ name: "DatabaseUnavailable", reason: "in_progress" });
+      expect(store.objects.has(path)).toBe(true);
+      // Any other failure while the lock is held keeps it too: the cleanup never waits for the lock and never deletes without it.
+      expect(await rejection(brokenDispatch().upload(upload, key))).toMatchObject({ message: "dispatch broke" });
       expect(store.objects.has(path)).toBe(true);
     } finally {
       await holder.query("rollback");
@@ -164,6 +186,30 @@ describe("DL-3 upload", () => {
     expect(store.objects.has(path)).toBe(true);
     const run = await runDocumentIntakeWorker({ api: intake().worker, port });
     expect(run?.job.id).toBe(queued.jobId);
+    await member(ownerA).discard(queued.jobId, randomUUID());
+  });
+
+  it("a same-key upload that fails while another commits never leaves the committed job without its PDF (ZSB-13)", async () => {
+    const key = randomUUID();
+    const bytes = pdfVariant(83);
+    const upload = { bytes, filename: "race.pdf", contentType: "application/pdf" };
+    const path = pathOf(key, bytes);
+    // The winner writes first; before its dispatch takes the key's lock, a same-key request fails and its cleanup,
+    // finding no job yet, deletes the shared path. The winner then commits and must put the object back.
+    let loser: unknown;
+    const winnerStore = new InMemoryIntakeFileStore();
+    winnerStore.put = async (at, data) => {
+      await store.put(at, data);
+      if (loser === undefined) loser = await rejection(brokenDispatch().upload(upload, key));
+    };
+    winnerStore.exists = (at) => store.exists(at);
+    const queued = await createDocumentIntakeSession(deps(), { store: winnerStore }).forMember({ tenantId: tenantA, actorId: ownerA }).upload(upload, key);
+    expect(loser).toMatchObject({ message: "dispatch broke" });
+    expect(store.deleted).toContain(path);
+    expect(store.objects.get(path)).toEqual(new Uint8Array(bytes));
+    const run = await runDocumentIntakeWorker({ api: intake().worker, port });
+    expect(run?.job.id).toBe(queued.jobId);
+    expect(run?.outcome?.status).toBe("review");
     await member(ownerA).discard(queued.jobId, randomUUID());
   });
 });
