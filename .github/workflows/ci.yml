@@ -64,6 +64,18 @@ jobs:
           python-version: "3.12.13"
       - run: python -I -B -m unittest discover -s tests -t . -v
 
+  # The Plane link script runs only on pull_request_target with secrets; this runs it against a
+  # fake Plane (no network, no secrets), so a change to which keys move a work item is tested.
+  plane-link-script:
+    name: plane-link script (fake Plane)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: python3 -I -B scripts/plane_link_test.py
+
   e2e:
     runs-on: ubuntu-latest
     # Playwright's own image carries the browsers and their system libraries. Installing them on
