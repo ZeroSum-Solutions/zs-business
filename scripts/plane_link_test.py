@@ -96,8 +96,9 @@ def run(plane, action, merged=False, branch="", title="", body=""):
             redirect_stdout(out):
         try:
             exec(compile(embedded_script(), str(WORKFLOW), "exec"), {"__name__": "__main__"})
-        except SystemExit:
-            pass
+        except SystemExit as exit_:
+            if exit_.code not in (None, 0):  # the workflow step would fail
+                raise AssertionError("script exited with %r:\n%s" % (exit_.code, out.getvalue()))
     return out.getvalue()
 
 
@@ -132,6 +133,9 @@ class PlaneLinkTest(unittest.TestCase):
         run(plane, "closed", merged=True, branch="chore/tidy", title="chore: tidy", body="See ZSB-50 and ZSB-51.")
         self.assertEqual((plane.group(50), plane.group(51)), ("started", "backlog"))
         self.assertFalse([c for c in plane.calls if c[0] == "PATCH"])
+        for n in (50, 51):  # still linked and commented
+            self.assertEqual([link["url"] for link in plane.items[n]["links"]], [PR_URL])
+            self.assertEqual(len(plane.items[n]["comments"]), 1)
 
     def test_edit_does_not_repeat_the_comment(self):
         plane = FakePlane({60: "started"})
