@@ -81,6 +81,8 @@ export interface AppConfig {
    * and rolls back; a write that already committed replays on a retry with its key.
    */
   readonly requestTimeoutMs?: number;
+  /** The H-8 usage write's own budget on POST /mcp, default USAGE_WRITE_TIMEOUT_MS (1.5 s). */
+  readonly usageWriteTimeoutMs?: number;
 }
 export interface AppDependencies {
   readonly verifier: TokenVerifier;
@@ -317,7 +319,10 @@ export function createApp(deps: AppDependencies) {
       keySecrets: deps.activepieces.keySecrets,
       limiter: createPostgresRateLimiter(deps.db, deps.clock),
       // The usage write runs on the raw database, off the request's deadline (H-8).
-      usage: { db: deps.db, clock: deps.clock },
+      usage: {
+        db: deps.db, clock: deps.clock,
+        ...(deps.config.usageWriteTimeoutMs === undefined ? {} : { timeoutMs: deps.config.usageWriteTimeoutMs }),
+      },
       ...(deps.onError ? { report: deps.onError } : {}),
     }, requestEdge));
   }

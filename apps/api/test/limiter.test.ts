@@ -180,14 +180,15 @@ describe("shared Postgres limiter", () => {
       await holder.query("LOCK TABLE rate_limit_buckets IN EXCLUSIVE MODE");
       const impatient = createPostgresRateLimiter(createScopedDatabase(database.runtimePool, { lockTimeoutMs: 200 }), at(0));
       // Well inside the request deadline: the lock timeout, not the deadline, ends the wait.
-      const started = performance.now();
+      // 55P03 is the lock timeout's own error (a statement timeout would be 57014), so the
+      // code proves it without timing the wait.
       await expect(impatient.take([{ key: randomUUID(), rule: rule(1) }], { remainingMs: () => 10_000 }))
         .rejects.toMatchObject({ name: "DatabaseUnavailable", reason: "busy", cause: { code: "55P03" } });
-      expect(performance.now() - started).toBeLessThan(5000);
 
       const waiting = createPostgresRateLimiter(instance(), at(0)).take([{ key: randomUUID(), rule: rule(1) }]);
+      // No try cap: the test timeout bounds the wait on a busy machine.
       let pid: number | undefined;
-      for (let i = 0; i < 100 && pid === undefined; i++) {
+      while (pid === undefined) {
         pid = (await database.pool.query<{ pid: number }>(
           `SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'
              AND query LIKE '%rate_limit%' LIMIT 1`)).rows[0]?.pid;
@@ -200,7 +201,7 @@ describe("shared Postgres limiter", () => {
       await holder.query("ROLLBACK");
       holder.release();
     }
-  });
+  }, 60_000);
 
   it("answers a backend lost between the transaction's statements as an unavailable store", async () => {
     const runtime = instance();

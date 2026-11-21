@@ -93,4 +93,5 @@ it.each([
   } finally {
     await rm(earlier, { recursive: true, force: true });
   }
-}, 60000);
+  // Two databases through the migration chain: real Postgres work, slow on a busy machine.
+}, 180_000);

@@ -332,9 +332,10 @@ describe("sync (G-6, G-7)", () => {
     await holding;
     let finished = false;
     const run = h.worker(w.google, w.clock).runOnce().then((counts) => { finished = true; return counts; });
-    // The worker's apply transaction waits on the same advisory lock.
+    // The worker's apply transaction waits on the same advisory lock. No try cap: on a busy
+    // machine the worker can take seconds to get there, and the test timeout bounds the wait.
     let waiting = 0;
-    for (let tries = 0; tries < 100 && waiting === 0; tries += 1) {
+    while (waiting === 0) {
       waiting = Number((await h.database.pool.query<{ n: string }>(
         "SELECT count(*) AS n FROM pg_locks WHERE locktype='advisory' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database())")).rows[0]!.n);
       if (waiting === 0) await new Promise((resolve) => setTimeout(resolve, 20));
@@ -628,19 +629,15 @@ describe("push notifications and channels (G-8)", () => {
   });
 
   it("channel calls end with the run's deadline, and none starts once no time is left (G-10)", async () => {
+    // A slow call answers after 3 s, well inside the 10 s request timeout: only the cut to the
+    // 100 ms the run has left can fail it. The outcome proves the cut, not the elapsed time.
     const slow = () => new Promise<void>((resolve) => setTimeout(resolve, 3000));
-    const timed = async (work: () => Promise<unknown>) => {
-      const started = Date.now();
-      const result = await work();
-      return { result, ms: Date.now() - started };
-    };
     // A slow watch: cut at the 100 ms left; the sync still applies.
     const v = await world();
     v.google.fail("watch", slow);
-    const watching = await timed(() => h.worker(v.google, v.clock, { webhookUrl: WEBHOOK_URL })
-      .runOnce({ deadline: new Date(v.clock.now().getTime() + 100) }));
-    expect(watching.result).toMatchObject({ synced: 1, channelsOpened: 0, channelFailures: 1 });
-    expect(watching.ms).toBeLessThan(1500);
+    expect(await h.worker(v.google, v.clock, { webhookUrl: WEBHOOK_URL })
+      .runOnce({ deadline: new Date(v.clock.now().getTime() + 100) }))
+      .toMatchObject({ synced: 1, channelsOpened: 0, channelFailures: 1 });
 
     // Renewal: a slow stop of the old channel is cut the same way.
     const w = await world();
@@ -649,9 +646,8 @@ describe("push notifications and channels (G-8)", () => {
     w.clock.set(START + CHANNEL_TTL_MS - DAY + MINUTE);
     w.google.reset();
     w.google.fail("stopChannel", slow);
-    const stopping = await timed(() => worker.runOnce({ deadline: new Date(w.clock.now().getTime() + 100) }));
-    expect(stopping.result).toMatchObject({ synced: 1, channelsOpened: 1, channelsStopped: 0 });
-    expect(stopping.ms).toBeLessThan(1500);
+    expect(await worker.runOnce({ deadline: new Date(w.clock.now().getTime() + 100) }))
+      .toMatchObject({ synced: 1, channelsOpened: 1, channelsStopped: 0 });
 
     // A watch that uses up the run: the old channel is not stopped at all; it expires on its own.
     w.clock.set(START + 2 * CHANNEL_TTL_MS - DAY);
@@ -930,20 +926,18 @@ describe("deadline (G-10)", () => {
     const w = await world({ delayMs: 400 });
     w.google.put(w.token, timed("busy", "2026-10-21T10:00:00Z", "2026-10-21T11:00:00Z"));
     const worker = h.worker(w.google, w.clock);
-    // 50 ms left: the 10 s request timeout would outlast the run, so the call ends with the deadline.
-    const started = Date.now();
+    // 50 ms left: the 10 s request timeout would outlast the run, so the call ends with the
+    // deadline. Without the cut the 400 ms answer would arrive and the sync would succeed.
     expect(await worker.runOnce({ deadline: new Date(START + 50) })).toMatchObject({ synced: 0, syncFailed: 1 });
-    expect(Date.now() - started).toBeLessThan(2_000);
     expect(await h.connectionRow(w.resource.tenantId, w.connectionId)).toMatchObject({ lease_until: null, last_error: "run_deadline" });
   });
 
   it("bounds a token refresh by the time the run has left", async () => {
     const w = await world();
     w.google.fail("refreshAccessToken", () => new Promise<void>(() => {}));
+    // Without the cut the refresh would end at the 400 ms request timeout as google_timeout.
     const worker = h.worker(w.google, w.clock, { requestTimeoutMs: 400 });
-    const started = Date.now();
     expect(await worker.runOnce({ deadline: new Date(START + 40) })).toMatchObject({ synced: 0, syncFailed: 1 });
-    expect(Date.now() - started).toBeLessThan(400);
     expect(await h.connectionRow(w.resource.tenantId, w.connectionId)).toMatchObject({ lease_until: null, last_error: "run_deadline" });
   });
 

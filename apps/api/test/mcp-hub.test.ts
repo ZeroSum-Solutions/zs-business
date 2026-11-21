@@ -18,8 +18,8 @@ import {
   READ_SCOPES,
   type AutomationScope,
 } from "@zs/contracts";
-import { DatabaseUnavailable, type ScopedDatabase, type Transaction } from "@zs/db";
-import { appOnDatabase, call, contactAndDeal, createApiHarness, NOW, provisionPage, signedInMember, type ApiHarness, type MemberSetup, type TenantSetup } from "./helpers.js";
+import { createScopedDatabase, DatabaseUnavailable, type ScopedDatabase, type Transaction } from "@zs/db";
+import { answeredAtDeadline, appOnDatabase, call, contactAndDeal, createApiHarness, NOW, provisionPage, signedInMember, type ApiHarness, type MemberSetup, type TenantSetup, waitUntil as poll } from "./helpers.js";
 
 const URL_BASE = "http://hub.test/mcp";
 const ALL_SCOPES: AutomationScope[] = [
@@ -92,14 +92,8 @@ async function seedContact(tenant: TenantSetup, name: string) {
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-async function waitUntil(condition: () => Promise<boolean>, what: string, ms = 8000) {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    if (await condition()) return;
-    await sleep(25);
-  }
-  throw new Error(`Timed out waiting for: ${what}`);
-}
+/** Waits for `what` with no wall-clock cap of its own: the test's timeout bounds it, at any machine speed. */
+const waitUntil = (condition: () => Promise<boolean>, _what: string) => poll(condition);
 /** Runtime-role statements waiting on a lock whose text contains `needle`. */
 const lockWaiters = (needle: string) => queryCount(
   `SELECT count(*) AS n FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE $1`, [`%${needle}%`]);
@@ -600,7 +594,7 @@ describe("deadline, disconnect and outage (H-5)", () => {
     const response = await pending;
     expect(response.status).toBe(503);
     expect(apiErrorBodySchema.parse(await response.json()).error.code).toBe("Unavailable");
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await waitUntil(async () => held.outcomes.length > 0, "the held statement to end");
     expect(held.outcomes).toEqual(["Database unavailable (aborted)"]);
   });
 
@@ -619,8 +613,10 @@ describe("deadline, disconnect and outage (H-5)", () => {
   it("ends a read past the request deadline with 503", async () => {
     const { secret } = await mint(owner(h.a), ["contacts:read"]);
     const held = holding(/FROM crm_contacts/i);
-    const app = appOnDatabase(held.db, { clock, requestTimeoutMs: 150 });
-    const response = await rpc(app, secret, callTool("list_contacts"));
+    const deadlineMs = 30_000;
+    const app = appOnDatabase(held.db, { clock, requestTimeoutMs: deadlineMs });
+    // The read is held at its statement; it answers only when the (moved) deadline passes.
+    const response = await answeredAtDeadline(async () => rpc(app, secret, callTool("list_contacts")), held.atStatement, deadlineMs);
     expect(response.status).toBe(503);
     // The held statement was cut by the deadline, not left to run: it ends with the abort error.
     held.release();
@@ -853,19 +849,22 @@ describe("usage under pressure and by definition (H-8)", () => {
   const usageOf = async (tokenId: string) =>
     automationUsageSchema.parse((await call(h.app, "GET", `/v1/integrations/activepieces/tokens/${tokenId}/usage`, { token: h.a.token })).body).totals;
 
-  it("answers 200 within seconds when the usage row is locked by another transaction, and reports the failed write", async () => {
+  it("answers 200 when the usage row is locked by another transaction, and reports the failed write", async () => {
     const { secret, token } = await mint(owner(h.a), ["business:read"]);
     const reported: unknown[] = [];
-    const app = appOnDatabase(h.database.db, { clock, onError: (error) => { reported.push(error); } });
+    // Lock and statement timeouts far past any test run: only the usage write's own 200 ms
+    // budget can end its wait on the held row, so without that budget the request never answers.
+    const patient = createScopedDatabase(h.database.runtimePool, { lockTimeoutMs: 600_000, statementTimeoutMs: 600_000 });
+    const app = appOnDatabase(patient, {
+      clock, usageWriteTimeoutMs: 200, requestTimeoutMs: 600_000, onError: (error) => { reported.push(error); },
+    });
     const holder = await h.database.pool.connect();
     await holder.query("BEGIN");
     try {
       const hour = new Date(Math.floor(clockMs / 3_600_000) * 3_600_000).toISOString();
       await holder.query("INSERT INTO automation_token_usage (tenant_id,token_id,hour,requests) VALUES ($1,$2,$3,1)", [h.a.tenantId, token.id, hour]);
-      const started = Date.now();
       const response = await rpc(app, secret, callTool("get_business"));
       expect(response.status).toBe(200);
-      expect(Date.now() - started).toBeLessThan(6000);
       expect(reported).toHaveLength(1);
     } finally {
       await holder.query("ROLLBACK");

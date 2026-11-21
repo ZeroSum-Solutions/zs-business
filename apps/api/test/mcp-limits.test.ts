@@ -11,7 +11,14 @@ import { appOnDatabase, call, createApiHarness, NOW, type ApiHarness } from "./h
 
 const MINUTE = 60_000;
 let h: ApiHarness;
+// Two API instances over two pools. Their deadline, usage-write budget and lock and statement
+// timeouts sit far past any test run, so a request queued behind its 19 siblings on one usage
+// row is served and counted however slow the machine is (the usage budget's own test is in
+// mcp-hub.test.ts).
+let first: ReturnType<typeof appOnDatabase>;
 let second: ReturnType<typeof appOnDatabase>;
+const PATIENT = { lockTimeoutMs: 600_000, statementTimeoutMs: 600_000 };
+const patientApp = (db: ScopedDatabase) => appOnDatabase(db, { clock, requestTimeoutMs: 600_000, usageWriteTimeoutMs: 600_000 });
 let clockMs = Date.parse(NOW);
 const clock = { now: () => new Date(clockMs) };
 const pools: Pool[] = [];
@@ -21,7 +28,8 @@ beforeAll(async () => {
   const pool = new Pool({ connectionString: h.database.runtimePool.options.connectionString, max: 4 });
   pool.on("error", () => undefined);
   pools.push(pool);
-  second = appOnDatabase(createScopedDatabase(pool), { clock });
+  first = patientApp(createScopedDatabase(h.database.runtimePool, PATIENT));
+  second = patientApp(createScopedDatabase(pool, PATIENT));
 });
 afterAll(async () => {
   await Promise.all(pools.map((pool) => pool.end()));
@@ -48,13 +56,13 @@ const usageOf = async (tokenId: string) =>
 describe("rate limits across two API instances (H-7)", () => {
   it("refuses the 121st request inside a minute with 429 and Retry-After, on either instance, and reopens after the window", async () => {
     const { secret, token } = await mint();
-    const apps = [h.app, second];
+    const apps = [first, second];
     // 120 requests, spread over both instances in concurrent groups of 20.
     for (let sent = 0; sent < 120; sent += 20) {
       const replies = await Promise.all(Array.from({ length: 20 }, (_, i) => ping(apps[(sent + i) % 2]!, secret)));
       expect(replies.map((reply) => reply.status)).toEqual(Array(20).fill(200));
     }
-    for (const app of [h.app, second, h.app]) {
+    for (const app of [first, second, first]) {
       const refused = await ping(app, secret);
       expect(refused.status).toBe(429);
       expect(apiErrorBodySchema.parse(await refused.json()).error.code).toBe("RateLimited");
@@ -74,11 +82,11 @@ describe("rate limits across two API instances (H-7)", () => {
     } finally {
       clockMs = Date.parse(NOW);
     }
-  });
+  }, 180_000);
 
   it("refuses the 2,001st request inside an hour, with a Retry-After that names the hour", async () => {
     const { secret, token } = await mint();
-    const apps = [h.app, second];
+    const apps = [first, second];
     let sent = 0;
     // 2,000 requests over 20 minutes: the minute bucket reopens between batches, the hour bucket does not.
     for (let batch = 0; batch < 20; batch++) {
@@ -91,7 +99,7 @@ describe("rate limits across two API instances (H-7)", () => {
     }
     expect(sent).toBe(2000);
     try {
-      for (const app of [second, h.app]) {
+      for (const app of [second, first]) {
         const refused = await ping(app, secret);
         expect(refused.status).toBe(429);
         // Not the minute bucket (at most 60 s): the hour has about 40 minutes left.

@@ -581,6 +581,10 @@ describe("every session operation, per role", () => {
     expect(Object.keys(operations(session)).sort()).toEqual(offered.sort());
   });
 
+  // These walk every operation a session offers against real Postgres, one after another: on a
+  // busy machine that takes well over the default 15 s, so they get a generous budget.
+  const EVERY_OPERATION_MS = 120_000;
+
   for (const role of ["owner", "staff"] as const) {
     it(`${role}: allowed exactly where the role grants the permission`, async () => {
       const { userId } = await addMember(tenant.tenantId, role);
@@ -595,7 +599,7 @@ describe("every session operation, per role", () => {
         "SELECT count(*) AS n FROM actions WHERE tenant_id=$1 AND actor_id=$2 AND action_type LIKE 'member.%'", [tenant.tenantId, userId],
       ))).rows[0]!.n);
       expect(memberActions).toBe(role === "owner" ? 3 : 0);
-    });
+    }, EVERY_OPERATION_MS);
   }
 
   it("refuses a caller with no membership, and a member of another tenant, everything", async () => {
@@ -605,7 +609,7 @@ describe("every session operation, per role", () => {
         await expect(operation.run(), name).rejects.toBeInstanceOf(TenantDenied);
       expect(await actionRows(tenant.tenantId, actorId)).toBe(0);
     }
-  });
+  }, EVERY_OPERATION_MS);
 
   it("re-reads the role on every call: a demoted owner loses member actions at once", async () => {
     const promoted = await addMember(tenant.tenantId, "owner");

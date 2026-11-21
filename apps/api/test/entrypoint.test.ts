@@ -12,6 +12,10 @@ import { KEY_SECRET, signedInMember } from "./helpers.js";
 const SECRET = ["entry", "point", "x".repeat(32)].join("-");
 const API_DIR = fileURLToPath(new URL("..", import.meta.url));
 const TSX = fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
+// A child process starts tsx, compiles the app and checks the runtime login before it listens.
+// On a busy machine that alone can take tens of seconds, so each test gets a generous budget;
+// nothing below waits a fixed time for the child or times how long it took.
+const CHILD_TEST_MS = 180_000;
 
 let database: TestDatabase;
 let fixture: TwoTenantFixture;
@@ -54,11 +58,16 @@ async function startApi(extraEnv: Record<string, string> = {}): Promise<Running>
   });
   let output = "";
   let exitCode: number | null = null;
-  child.stdout?.on("data", (chunk: Buffer) => { output += chunk.toString(); });
-  child.stderr?.on("data", (chunk: Buffer) => { output += chunk.toString(); });
-  child.on("exit", (code) => { exitCode = code ?? -1; });
-  for (let i = 0; i < 200 && !output.includes("listening") && exitCode === null; i += 1)
-    await new Promise((resolve) => setTimeout(resolve, 50));
+  let changed = () => {};
+  const onOutput = (chunk: Buffer) => { output += chunk.toString(); changed(); };
+  child.stdout?.on("data", onOutput);
+  child.stderr?.on("data", onOutput);
+  child.on("exit", (code) => { exitCode = code ?? -1; changed(); });
+  // Started once it says so, or failed once it exits; the test timeout bounds the wait.
+  await new Promise<void>((resolve) => {
+    changed = () => { if (exitCode !== null || output.includes("listening")) resolve(); };
+    changed();
+  });
   if (exitCode !== null || !output.includes("listening")) throw new Error(`API did not start: ${output}`);
   return {
     child, port, output: () => output, exited: () => exitCode,
@@ -74,6 +83,11 @@ async function startApi(extraEnv: Record<string, string> = {}): Promise<Running>
 async function memberToken(): Promise<string> {
   const member = await signedInMember(database, fixture, fixture.a.tenantId, "owner");
   return signDevToken(SECRET, member, { now: () => new Date() }, 600);
+}
+
+/** Resolves once the child's output contains `text`. */
+async function logged(api: Running, text: string): Promise<void> {
+  while (!api.output().includes(text)) await new Promise((resolve) => setTimeout(resolve, 25));
 }
 
 /**
@@ -102,9 +116,9 @@ describe("API entry point", () => {
     try {
       // Startup checked the runtime login, so the pool holds one idle connection now.
       expect(await terminateRuntimeBackends()).toBeGreaterThan(0);
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      // The pool logs the lost connection (57P01) and the process carries on to serve below.
+      await logged(api, "57P01");
       expect(api.exited(), api.output()).toBeNull();
-      expect(api.output()).toContain("57P01");
 
       const token = await memberToken();
       const response = await fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, {
@@ -119,46 +133,69 @@ describe("API entry point", () => {
     } finally {
       await api.stop();
     }
-  }, 30_000);
+  }, CHILD_TEST_MS);
 
   it("answers 503 within the request deadline when every connection is busy", async () => {
-    const api = await startApi({ DATABASE_POOL_MAX: "1", REQUEST_TIMEOUT_MS: "1000", DATABASE_CONNECT_TIMEOUT_MS: "500" });
+    // The 60 s checkout timeout is far longer than the 1 s deadline: only the deadline can end
+    // the second request's wait for the one connection while the lock is held.
+    const api = await startApi({ DATABASE_POOL_MAX: "1", REQUEST_TIMEOUT_MS: "1000", DATABASE_CONNECT_TIMEOUT_MS: "60000" });
     // Hold the API's only connection: lock a row it needs, then make it wait on that lock.
     const holder = await database.pool.connect();
+    const sentinel = await database.pool.connect();
     try {
       const token = await memberToken();
       await holder.query("BEGIN");
       await holder.query("LOCK TABLE booking_resources IN ACCESS EXCLUSIVE MODE");
       const headers = { Authorization: `Bearer ${token}` };
-      const first = fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, { headers });
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      const started = performance.now();
-      const second = await fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, { headers });
-      const elapsed = performance.now() - started;
-      expect(second.status).toBe(503);
-      expect(second.headers.get("retry-after")).toBe("1");
-      expect(await second.json()).toEqual({ error: { code: "Unavailable", message: "Service unavailable", details: {} } });
-      expect(elapsed).toBeLessThan(1500);
+      let firstDone = false;
+      const first = fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, { headers })
+        .finally(() => { firstDone = true; });
+      // The first request's transaction, once it waits on the lock. On a busy machine its
+      // deadline can pass before it gets there; then there is no wait to check.
+      let waiter: { pid: number; xact: string } | undefined;
+      while (waiter === undefined && !firstDone) {
+        waiter = (await database.pool.query<{ pid: number; xact: string }>(
+          `SELECT pid, xact_start::text AS xact FROM pg_stat_activity
+            WHERE datname = current_database() AND usename = 'zs_runtime' AND wait_event_type = 'Lock'`,
+        )).rows[0];
+        if (waiter === undefined) await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      const second = fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, { headers });
+      if (waiter !== undefined) {
+        // The deadline reached Postgres: the request's lock wait was capped at the second it had
+        // left, so it ends before a sentinel that starts waiting later with a 3.5 s lock timeout,
+        // though the lock is still held. Without the cap it would wait the 5 s lock timeout.
+        // Both waits are timed by Postgres, so a busy machine delays them alike.
+        await sentinel.query("BEGIN");
+        await sentinel.query("SET LOCAL lock_timeout = 3500");
+        await expect(sentinel.query("LOCK TABLE booking_resources IN ACCESS SHARE MODE"))
+          .rejects.toMatchObject({ code: "55P03" });
+        await sentinel.query("ROLLBACK");
+        const { rows } = await database.pool.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM pg_stat_activity
+            WHERE pid = $1 AND xact_start::text = $2 AND wait_event_type = 'Lock'`,
+          [waiter.pid, waiter.xact],
+        );
+        expect(rows[0]?.n, "the first request still waits on the lock").toBe(0);
+      }
+      const answered = await second;
+      expect(answered.status).toBe(503);
+      expect(answered.headers.get("retry-after")).toBe("1");
+      expect(await answered.json()).toEqual({ error: { code: "Unavailable", message: "Service unavailable", details: {} } });
       expect((await first).status).toBe(503);
-      // The deadline reached Postgres too: the first request's statement stopped waiting on
-      // the lock, though the lock is still held, instead of holding the connection for the
-      // 5 s lock timeout.
-      const waiting = async () => (await database.pool.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM pg_stat_activity
-          WHERE datname = current_database() AND usename = 'zs_runtime' AND wait_event_type = 'Lock'`,
-      )).rows[0]?.n;
-      await expect.poll(waiting, { timeout: 1500, interval: 100 }).toBe(0);
       await holder.query("ROLLBACK");
       // Once the lock is gone the same process serves again.
       const after = await fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, { headers });
       expect(after.status).toBe(200);
       expect(api.exited()).toBeNull();
     } finally {
+      await sentinel.query("ROLLBACK").catch(() => undefined);
+      sentinel.release();
       await holder.query("ROLLBACK").catch(() => undefined);
       holder.release();
       await api.stop();
     }
-  }, 30_000);
+  }, CHILD_TEST_MS);
 });
 
 // P-10 revision 6: two API processes stand in for two serverless instances on one database.
@@ -177,7 +214,7 @@ describe("public limits across API instances", () => {
     } finally {
       await Promise.all([first!.stop(), second!.stop()]);
     }
-  }, 30_000);
+  }, CHILD_TEST_MS);
 
   it("grants each instance the whole budget again with PUBLIC_RATE_LIMIT_STORE=memory", async () => {
     // Why hosted deploys refuse memory: the same four writes all pass.
@@ -189,7 +226,7 @@ describe("public limits across API instances", () => {
     } finally {
       await Promise.all([first!.stop(), second!.stop()]);
     }
-  }, 30_000);
+  }, CHILD_TEST_MS);
 });
 
 // hub-launch L9: the dashboard's sign-in limits through the real entry point (env parsing, server wiring, the
@@ -222,7 +259,7 @@ describe("sign-in limits across API instances", () => {
     } finally {
       await Promise.all([first!.stop(), second!.stop()]);
     }
-  }, 30_000);
+  }, CHILD_TEST_MS);
 
   it("leaves the route off (404) until SIGN_IN_LIMITER_SECRET is set", async () => {
     const api = await startApi();
@@ -231,5 +268,5 @@ describe("sign-in limits across API instances", () => {
     } finally {
       await api.stop();
     }
-  }, 30_000);
+  }, CHILD_TEST_MS);
 });

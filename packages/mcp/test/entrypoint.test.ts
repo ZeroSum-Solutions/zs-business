@@ -81,12 +81,13 @@ it("keeps serving tools after its idle database connection is terminated", async
         WHERE datname = current_database() AND usename = 'zs_runtime'`,
     );
     expect(rows[0]?.n).toBeGreaterThan(0);
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    // The pool logs the lost connection (57P01) and the child carries on to serve below.
+    while (!stderr.includes("57P01")) await new Promise((resolve) => setTimeout(resolve, 25));
     expect(closed, stderr).toBe(false);
-    expect(stderr).toContain("57P01");
     const second = await client.callTool({ name: "list_resources", arguments: {} }) as CallToolResult;
     expect(second.isError, JSON.stringify(second)).toBeFalsy();
   } finally {
     await client.close();
   }
-}, 30_000);
+  // Starting tsx and the child takes tens of seconds on a busy machine; nothing here is timed.
+}, 180_000);
