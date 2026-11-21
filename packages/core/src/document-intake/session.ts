@@ -208,8 +208,8 @@ export function createDocumentIntakeSession(deps: EdgeDependencies, config: Docu
       return {
         /**
          * DL-3: store the PDF at the server-built path, then queue the job. Owner only, checked first;
-         * the type, the signature and the size are checked before a byte is stored. A failed insert
-         * deletes the object at once (DL-16).
+         * the type, the signature and the size are checked before a byte is stored. A replay of a key that
+         * already has a job never writes the object. A failed insert deletes the object at once (DL-16).
          */
         async upload(input: UploadInput, rawKey: unknown): Promise<IntakeUploadResult> {
           await asOwner(async () => undefined);
@@ -228,10 +228,16 @@ export function createDocumentIntakeSession(deps: EdgeDependencies, config: Docu
           const payload = intakeUploadPayloadSchema.parse({
             jobId, targetKind: "catalog", source: "upload", filename, fileSha256, byteLength: input.bytes.byteLength,
           });
+          const dispatch = async () => (await run(command(CATALOG_INTAKE_UPLOAD_ACTION, jobId, key, payload))).result as unknown as IntakeUploadResult;
+          // The job ID comes from the key, so a job under it means this is a replay: the dispatcher returns
+          // the stored outcome (or refuses a changed payload), and storage is not touched. Writing first
+          // would put back a PDF the 30-day sweep already deleted (DL-16).
+          const replay = await deps.db.tenant(tenantId, async (tx) => (await tx.query(
+            "SELECT 1 FROM document_intake_jobs WHERE tenant_id=$1 AND id=$2", [tenantId, jobId])).rowCount === 1);
+          if (replay) return dispatch();
           await config.store.put(path, input.bytes);
           try {
-            const done = await run(command(CATALOG_INTAKE_UPLOAD_ACTION, jobId, key, payload));
-            return done.result as unknown as IntakeUploadResult;
+            return await dispatch();
           } catch (error) {
             // A retry of an accepted upload finds its job and keeps the object.
             const kept = await deps.db.tenant(tenantId, async (tx) => (await tx.query(

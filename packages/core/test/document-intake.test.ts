@@ -4,7 +4,7 @@
 // and the models are fakes, so no test reaches a vendor, a key or a model download.
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   ActionError, CATALOG_INTAKE_APPLY_ACTION, CATALOG_INTAKE_UPLOAD_ACTION, Conflict, DOCUMENT_INTAKE_JOB_TARGET, INTAKE_LEASE_MS, INTAKE_MAX_BYTES,
   NotFound, Refused, TenantDenied, idempotencyKeySchema, type IntakeJobDetail, type MemberRole,
@@ -363,6 +363,31 @@ describe("DL-16 files and two tenants", () => {
     expect(store.objects.size).toBe(objects - removed);
     expect(await intake().sweepFiles()).toBe(0);
     expect(await rows("SELECT 1 FROM document_intake_jobs WHERE file_deleted_at IS NULL AND finished_at IS NOT NULL", [])).toHaveLength(0);
+  });
+
+  it("a replay of an accepted upload after the sweep returns the first outcome and writes no object", async () => {
+    const key = randomUUID();
+    const bytes = pdfVariant(70);
+    const upload = { bytes, filename: "swept.pdf", contentType: "application/pdf" };
+    const first = await member(ownerA).upload(upload, key);
+    expect((await runDocumentIntakeWorker({ api: intake().worker, port }))?.job.id).toBe(first.jobId);
+    await member(ownerA).discard(first.jobId, randomUUID());
+    now += 31 * DAY;
+    expect(await intake().sweepFiles()).toBe(1);
+    const path = intakeFilePath(tenantA, first.jobId, createHash("sha256").update(bytes).digest("hex"));
+    expect(store.objects.has(path)).toBe(false);
+
+    const put = vi.spyOn(store, "put");
+    try {
+      expect(await member(ownerA).upload(upload, key)).toEqual(first);
+      // The same key with other bytes is refused and writes nothing either.
+      expect(await rejection(member(ownerA).upload({ ...upload, bytes: pdfVariant(71) }, key))).toBeInstanceOf(ActionError);
+      expect(put).not.toHaveBeenCalled();
+    } finally {
+      put.mockRestore();
+    }
+    expect(store.objects.has(path)).toBe(false);
+    expect(await rows("SELECT 1 FROM document_intake_jobs WHERE tenant_id=$1 AND id=$2 AND file_deleted_at IS NOT NULL", [tenantA, first.jobId])).toHaveLength(1);
   });
 
   it("tenant B reads none of A's jobs, rows or items, and A's lease opens none of B's files", async () => {
