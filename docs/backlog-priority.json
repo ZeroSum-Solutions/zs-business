@@ -1,0 +1,315 @@
+[
+  {
+    "id": "B01",
+    "title": "Make the load-sensitive deadline tests independent of machine load",
+    "why": "Every later ticket lands through CI. The deadline suites (commit-unknown, mcp-hub, calendar worker, permissions) time out under load and hide real failures.",
+    "done_when": "A committed script, scripts/stress-deadlines.sh, runs the four suites 20 times in a row while two full `pnpm -r test` runs execute beside them on the same machine. All 20 pass with no retry setting. The fix uses the injected clock or a deadline that does not depend on wall time. The script's output is attached to the PR.",
+    "stage": "Stage 0: Base",
+    "blast": "low",
+    "depends_on": [],
+    "existing_ticket": "ZSB-21"
+  },
+  {
+    "id": "B02",
+    "title": "Fix the plane-link workflow so a PR with a ZSB key reaches its work item",
+    "why": "The tracker link is how work is followed. It is a separate change from the test fix and is judged on its own; both are tracked under ZSB-21.",
+    "done_when": "A test PR whose branch holds a ZSB key is added to its work item and moves it to In Progress on open and Done on merge. The workflow stays on pull_request_target with no checkout and never fails a PR. The run log is attached.",
+    "stage": "Stage 0: Base",
+    "blast": "low",
+    "depends_on": [],
+    "existing_ticket": "ZSB-21"
+  },
+  {
+    "id": "B03",
+    "title": "Bind the resolved destination into a send approval and void it on change",
+    "why": "Today the delivery digest holds the contact ID, subject and body, not the address (packages/core/src/delivery/policy.ts, deliveryContentDigest), and the worker sends to the contact's current address (packages/core/src/delivery/worker.ts, recheck). An owner can approve a send to one address and have it go to another. Exact-action approval is the centre of the trust model, so this comes before any new agent.",
+    "done_when": "A revision of delivery.md and approvals.md states that an approved send binds the normalized destination and the rendered subject and body as shown to the approver. The approval record (or its digest) stores the destination at approval time. At delivery, a different current address ends the send with a new final reason and no provider call; the owner sees why and can re-approve. Tests change the contact's email and phone between approval and delivery, for an owner draft, an agent draft and a templated send, and prove nothing is sent. The approval read returns the resolved destination and content for the queue.",
+    "stage": "Stage 0: Base",
+    "blast": "high",
+    "depends_on": [
+      "B01"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B04",
+    "title": "Approvals queue: one phone screen for every pending approval, with the resolved recipient and content",
+    "why": "The API lists approvals (approvals.md A-11) but the dashboard shows them in four areas. A send approval's payload is only {replyId} (packages/contracts/src/inbox.ts), so the card must show the resolved destination and text, not the raw payload.",
+    "done_when": "A new /approvals route lists every pending approval of every action type, newest first. A send card shows the recipient's name and bound address, the channel, the full subject and body, the requester and the expiry. Other cards show the action type, target and real payload (A-12). Approve and reject use 44px targets and a replay-safe key. Home's 'needs you' count includes pending approvals and links here. Playwright covers it at 390x844 and 1440x900 on demo and live; axe reports no serious issue.",
+    "stage": "Stage 0: Base",
+    "blast": "medium",
+    "depends_on": [
+      "B03"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B05",
+    "title": "Redacted action log the owner can read",
+    "why": "Every action must leave a receipt the owner can read. The actions table holds them; nothing shows them. This is the base log; the larger Team screen comes later.",
+    "done_when": "GET /v1/actions lists the tenant's actions (actor as person or agent, type, target, approval, outcome, time), keyset paged, owners only. Message bodies, addresses and secrets are not in the list; each row points to its source record. A plain screen under the account menu shows the list at 390x844, and each approval card links to its receipt. Tests cover two-tenant denial and the redaction.",
+    "stage": "Stage 0: Base",
+    "blast": "low",
+    "depends_on": [
+      "B01"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B06",
+    "title": "Company facts: hours, tone, policies and who set each fact",
+    "why": "Agents must answer from facts the owner confirmed. business-profile.md BP-13 and BP-14 hold a description and service names only; there is no tone, no policies, no opening hours as a fact, and no record of who set a value.",
+    "done_when": "A revision of business-profile.md adds opening hours, a tone of voice note, and a short list of policies (for example cancellation, refunds, deposits), each with a set-by and set-at mark and the owner as the only writer. One read, used by every agent prompt builder, returns the facts with their provenance; a test fails if a prompt builder reads the profile another way. The settings screen edits them on a phone. Missing facts read as 'not known', never as a guess.",
+    "stage": "Stage 0: Base",
+    "blast": "medium",
+    "depends_on": [
+      "B01"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B07",
+    "title": "General template and a minimal setup for any business type",
+    "why": "Setup offers four business types (industry-templates.md IT-1). A business outside them has no path. A new owner needs one useful flow before more agents are added.",
+    "done_when": "A revision of industry-templates.md adds a 'general' template (a neutral pipeline, one appointment type, an unpublished booking page, a reminder message) that passes the template schema test. /setup asks for the business name, what it does, services and hours on one phone screen, shows the result to confirm, and applies the template and the company facts in one action. A Playwright test at 390x844 takes a fresh tenant to a published booking page.",
+    "stage": "Stage 0: Base",
+    "blast": "medium",
+    "depends_on": [
+      "B06"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B08",
+    "title": "Enforce allowances for a tenant with no paid plan",
+    "why": "A tenant that never subscribed gets null plan limits, which means comped access (packages/core/src/billing/plan-gate.ts, planLimits; plans.md Known limits). The free marker limits site publishing only. Public sign-up would hand unlimited use to anyone.",
+    "done_when": "A revision of plans.md defines the allowances of a self-signed-up tenant (seats, resources, connections, tokens, emails, agent model budget) and the plan gate enforces each on the one action path. Operator-created and granted tenants keep their current behaviour. Tests walk sign-up, permitted agent use, hitting each limit, upgrade, payment failure and cancellation. The model-assisted agent and email allowance rows that PL-1 states but does not enforce are enforced or removed from the plan page.",
+    "stage": "Stage 0: Base",
+    "blast": "high",
+    "depends_on": [
+      "B01"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B09",
+    "title": "Public sign-up on preview: a new person creates a tenant and becomes its owner",
+    "why": "Sign-ups are off and an operator script creates each tenant (apps/api/README.md, hosted notes; industry-templates.md scope). Nobody outside can start.",
+    "done_when": "On preview, a new email address signs up from a phone-size browser, receives a sign-in link, and lands on /setup as owner of a new tenant with a profile row and the self-sign-up allowances of B08. Sign-up is rate limited per address and per client address in the shared Postgres limiter. A two-tenant denial test under the runtime role covers the new write path. A Playwright live test covers sign-up through the general setup of B07. The operator script still works. Production stays closed until B16.",
+    "stage": "Stage 0: Base",
+    "blast": "high",
+    "depends_on": [
+      "B07",
+      "B08"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B10",
+    "title": "Configure the personal-data model lane on preview",
+    "why": "Hosted deploys run the follow-up agent with no model provider (README.md, 'Off until their settings exist'). The Cerebras adapter is in packages/core/src/agents/adapters/cerebras.ts. Preview needs a real model to measure quality and cost.",
+    "done_when": "On preview only, one scheduled follow-up run for the demo tenant drafts a reply through the real adapter and writes an agent_model_calls row with tokens and cost. The key comes from the vault and sits only on the preview workers project. The agents.md header is corrected to say which of G-14 to G-21 are built. Production is not changed.",
+    "stage": "Stage 0: Base",
+    "blast": "medium",
+    "depends_on": [
+      "B01"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B11",
+    "title": "One model budget per company, shared by every agent kind",
+    "why": "The cost cap is per tenant and agent kind (packages/core/src/agents/cost.ts, reserveModelCall). Command, briefing and triage callers would each get their own budget, so a company has no ceiling.",
+    "done_when": "A revision of agents.md adds a company budget. Every model call reserves against it before the call, under one lock order, and keeps the per-kind cap. Tests run concurrent kinds, retries and failed calls against one ceiling and prove the total never passes it; a call above it is not made and the run stops with a stated reason. The status read shows company spend against the budget. The allowance of B08 sets the default.",
+    "stage": "Stage 0: Base",
+    "blast": "medium",
+    "depends_on": [
+      "B08"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B12",
+    "title": "Seats and typed tasks with durable execution and a stop that reaches queued sends",
+    "why": "agents.md excludes an org chart and has no task record, so nothing can hand work to an agent and track it. A task must survive a crash, run once, and stop when the owner says stop. Today the delivery worker rechecks approval and consent but has no stop check (packages/core/src/delivery/worker.ts, recheck).",
+    "done_when": "A revision of agents.md defines a seat catalog in packages/contracts (each seat maps to agent kinds, allowed actions and a model lane) and an agent_tasks table with a stated state machine: queued, claimed, waiting_approval, done, failed, cancelled. A claim holds a lease; an expired lease returns the task to queued; completion is idempotent by key; retry rules are written per failure type. Each seat runs under its own principal, denied every action outside its seat. A tenant stop cancels queued and claimed tasks and holds agent-requested deliveries that are queued but not sent; resume releases nothing without a fresh owner decision. Tests with the fake model prove restart recovery, exclusive claims, idempotent completion and the stop for tasks and queued sends. Forced RLS and a two-tenant test cover the table. The follow-up agent records its run as a task.",
+    "stage": "Stage 0: Base",
+    "blast": "high",
+    "depends_on": [
+      "B03"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B13",
+    "title": "Owner export of the tenant's records",
+    "why": "The owner must be able to take their data out. No export exists.",
+    "done_when": "An owner starts an export from the account menu and receives a file set with contacts, deals, bookings, inbox replies, company facts, approvals and the action log. It holds no secret, token or other tenant's row; tests prove both. Export works while billing has made the tenant read-only. The export is itself an action with a receipt and is rate limited.",
+    "stage": "Stage 0: Base",
+    "blast": "medium",
+    "depends_on": [
+      "B05"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B14",
+    "title": "Deletion and retention policy for tenant data",
+    "why": "There is no general rule for how long each kind of data is kept or how a tenant or a customer is erased. Receipts are append-only, so the rule must say what happens to them.",
+    "done_when": "A new contract lists each data type with its retention and its erasure behaviour, including immutable action receipts (redacted in place, kept as a record that something happened). An owner can request deletion of one customer and of the whole tenant; a runner applies it and writes a receipt. Tests cover cross-tenant denial, that a deleted customer's text is gone from replies, drafts and model call records, and that the action log still reads without it.",
+    "stage": "Stage 0: Base",
+    "blast": "high",
+    "depends_on": [
+      "B05",
+      "B13"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B15",
+    "title": "Release checks for the agent path",
+    "why": "The Stage 0 gate asks for zero critical failures before production. No suite proves it today.",
+    "done_when": "One named test suite runs in CI and covers: a stale or expired approval, a destination changed after approval, a duplicate send or duplicate task, a stopped queue, a provider answer that is unknown after a timeout, consent withdrawn after approval, a cross-tenant attempt, and an interrupted owner session that resumes. Each case has at least one test that fails when the guard is removed. The suite's result is written to a release record file the promotion ticket reads.",
+    "stage": "Stage 0: Base",
+    "blast": "medium",
+    "depends_on": [
+      "B03",
+      "B11",
+      "B12"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B16",
+    "title": "Promote the model lane and public sign-up to production, and record the Stage 0 gate",
+    "why": "Production opens only on evidence, not after one good preview run.",
+    "done_when": "The release checks of B15 show zero critical failures on the commit to be promoted. A person who did not build the product signs up on preview from a phone, completes the general setup and approves one agent-drafted reply from the queue; it is delivered once to the bound address. Cost per agent run is recorded. Then the production workers project gets the model key, production sign-up opens, a backup and a receipt are kept, and docs/gates/stage-0.md records each gate line with its proof.",
+    "stage": "Stage 0: Base",
+    "blast": "high",
+    "depends_on": [
+      "B04",
+      "B05",
+      "B09",
+      "B10",
+      "B13",
+      "B14",
+      "B15"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B17",
+    "title": "Command box: the owner types a request and the Chief of Staff turns it into a task or a draft",
+    "why": "The goal is 'say what you want and the steps are taken care of'. The dashboard has no place to state a request. Text comes first: voice is poor at exact content and every voice feature needs a text path.",
+    "done_when": "Home has one input. A typed request becomes a known task type or the answer 'I cannot do that yet' with the reason. 'Draft a follow-up to <customer>' produces a draft and a pending approval. 'Pause all agents' engages the tenant stop at once. A read question answers from tenant reads with the record linked. The command path cannot approve, send or change settings; a test proves each is denied. Input text reaches the model as data, with an injection test. Every call reserves against the company budget.",
+    "stage": "Stage 1: The first team on a phone",
+    "blast": "medium",
+    "depends_on": [
+      "B04",
+      "B11",
+      "B12"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B18",
+    "title": "Today briefing on Home",
+    "why": "The owner should see what happened, what needs them and what comes next. Home holds results, bookings and waiting threads (apps/dashboard/src/components/home) but no briefing and none of the agents' work.",
+    "done_when": "GET /v1/home/briefing returns a short briefing from deterministic reads: pending approvals, threads waiting, today's bookings, new leads and what each seat did since the last briefing, each line linked. A model may shorten the wording; every figure comes from the reads and a test fails if one differs. Home shows it above the fold at 390x844 and can read it aloud with the browser's speech output. A tenant with no data sees the next setup step.",
+    "stage": "Stage 1: The first team on a phone",
+    "blast": "low",
+    "depends_on": [
+      "B11",
+      "B12"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B19",
+    "title": "Inbound email slice 1: receive, dark",
+    "why": "The Assistant cannot triage mail it cannot see. inbound-email.md cuts the work into slices; this is its first, exactly as written there ('First slice').",
+    "done_when": "Slice 1 of inbound-email.md is built and nothing more: the two tables with their guard, the route, the signed inbound webhook, routing on to, cc and bcc, the receive action with its plan entry, the admission cap, and a metadata-only entry in sender threads for member sessions. No worker, no body, no matching, no customer thread, no change to outbound sends. It ships dark. The contract's tests 1, 3, 4, 5, 6, 10, 14 and 15 for receive pass. The conformance matrix gains a row per rule.",
+    "stage": "Stage 1: The first team on a phone",
+    "blast": "high",
+    "depends_on": [
+      "B01"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B20",
+    "title": "Inbound email slice 2: content, dark",
+    "why": "The second contracted slice: fetch and sanitise the text, with limits and erasure, still unreachable by customers.",
+    "done_when": "Slice 2 of inbound-email.md is built as listed there: the content worker with both database logins, retrieval with the stream cap, sanitising and the sender name, the authentication mapping, kinds, content and account limits, settle, the spam filter, retention erasure and the erase script. Text shows in sender threads only. The contract's tests 5, 6, 9, 11, 12, 15 and 17 pass. Erasure follows the policy of B14.",
+    "stage": "Stage 1: The first team on a phone",
+    "blast": "high",
+    "depends_on": [
+      "B19",
+      "B14"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B21",
+    "title": "Inbound email slice 3: replies reach the customer's thread",
+    "why": "The first slice in which a customer's email appears in their thread. It touches the live send path, so it comes last and alone.",
+    "done_when": "Slice 3 of inbound-email.md is built as listed there: Reply-To with the reference, thread references, matching and binding with proof, link, customer threads with needsReply, and the follow-up stop in the same PR. The dashboard shows the address from here. The contract's tests 2, 7, 8, 13, 16 and 19 pass, including the acceptance test: an approved reply goes out, the customer's answer appears in that customer's thread, the follow-up agent skips it, and another tenant sees nothing.",
+    "stage": "Stage 1: The first team on a phone",
+    "blast": "high",
+    "depends_on": [
+      "B20",
+      "B03"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B22",
+    "title": "Push alert for a waiting approval",
+    "why": "Once more than one agent drafts on its own schedule, the owner must learn that something waits without opening the app. Nothing sends notifications today (apps/dashboard/README.md, settings note).",
+    "done_when": "An owner can turn on alerts on a phone. A new pending approval sends at most one alert per approval; alerts are grouped when several arrive together. Tapping it opens that approval card after sign-in. The alert text holds no customer name, address or message body. Refusing permission leaves the product working and Home says alerts are off. Tests cover refusal, delivery through a fake push service, deduplication and the deep link.",
+    "stage": "Stage 1: The first team on a phone",
+    "blast": "medium",
+    "depends_on": [
+      "B04"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B23",
+    "title": "Assistant triage: label every waiting thread and draft a reply where one helps",
+    "why": "Triage is the first job the owner named. The existing agent drafts only for unanswered website requests (agents.md G-7).",
+    "done_when": "A new agent kind under the Assistant seat reads each thread that waits for the business, writes a label (needs reply, booking request, complaint, money, spam, no action) with its reason, and for 'needs reply' and 'booking request' writes an email draft with one pending approval per message. It sends nothing itself and uses no SMS. Complaint and money threads get no draft and are raised to the owner. Caps, quiet hours, suppression, the stop and the company budget apply. Drafts use the company facts of B06 and say 'not known' where a fact is missing. Thread text reaches the model as data; an injection test proves a thread cannot change the label rules. A golden set of reviewed threads runs in CI.",
+    "stage": "Stage 1: The first team on a phone",
+    "blast": "medium",
+    "depends_on": [
+      "B06",
+      "B11",
+      "B12",
+      "B21",
+      "B22"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B24",
+    "title": "Voice entry for the command box, with an editable transcript",
+    "why": "Voice is how the owner wants to drive the product. No microphone input exists; the transcription contract serves voicemail on a local worker only.",
+    "done_when": "A hold-to-talk button on Home records speech and shows the transcript in the command box before anything runs; the owner can edit it and must send it. An interrupted recording keeps its text. Names, amounts and recipients are never acted on from voice alone: they open a structured screen. A stop phrase engages the tenant stop. The contract names the speech lane (on-device where the browser offers it, else a hosted lane already approved for personal data) and its cost per use. VoiceOver labels and a text path are tested. If no approved hosted lane exists, the ticket ships the on-device path and raises the lane choice to the owner.",
+    "stage": "Stage 1: The first team on a phone",
+    "blast": "medium",
+    "depends_on": [
+      "B17"
+    ],
+    "existing_ticket": null
+  },
+  {
+    "id": "B25",
+    "title": "Close the document-intake upload bug and add no scope",
+    "why": "An upload replay after a sweep can rewrite the stored PDF. It is a data-integrity fault in built code, so it is worth closing. Document intake itself is parked.",
+    "done_when": "A test reproduces the replay after a sweep and proves the stored file and its digest do not change. The fix is merged. No new document-intake rule or target is added, and the sweep cron stays off.",
+    "stage": "Close-out (does not block Stage 0)",
+    "blast": "low",
+    "depends_on": [],
+    "existing_ticket": "ZSB-13"
+  }
+]
