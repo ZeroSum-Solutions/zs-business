@@ -18,6 +18,7 @@ import {
   createTranscriptionSession,
   DatabaseUnavailable,
   mapError,
+  SiteStoreUnavailable,
   type AutomationEdgeConfig,
   type DocumentIntakeConfig,
   type EnrichmentConfigInput,
@@ -453,8 +454,9 @@ export function createApp(deps: AppDependencies) {
       return c.json(apiErrorBody(code, error.message || code), error.status, headers);
     }
     const mapped = mapError(error);
-    // An Auth outage answers 503 like a busy pool, but someone should hear about it.
-    if (mapped.status === 500 || error instanceof AuthUnavailable) deps.onError?.(error);
+    // An Auth or object store outage answers 503 like a busy pool, but someone should hear about it (the store's
+    // cause names the R2 failure: wrong keys, a missing bucket, a timeout).
+    if (mapped.status === 500 || error instanceof AuthUnavailable || error instanceof SiteStoreUnavailable) deps.onError?.(error);
     // A public route's own no-store header is not set when the deadline answers for it.
     if (mapped.status === 503) {
       const path = c.req.path;

@@ -5,6 +5,7 @@ import { createApp, DEFAULT_RATE_LIMITS, type PublicIntakeConfig, type RateLimit
 import { createPostgresRateLimiter } from "./public/postgres-limiter.js";
 import { createVerifierFromConfig } from "./auth.js";
 import type { ServerEnv } from "./config.js";
+import { createIntakeFileStore } from "./intake-sweep/store.js";
 import { createR2SiteStore } from "./sites/r2-s3.js";
 
 /**
@@ -72,6 +73,10 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }, optio
   // image-port.md IM-21: images share the site store (parseServerEnv requires SITES_STORE); the
   // API only queues jobs, so it holds no vendor port. The image worker calls the vendor.
   const images = env.images === null || sites === undefined ? undefined : { store: sites.store, config: env.images.config };
+  // document-intake.md DL-3, DL-16: the PDFs share the site store's bucket (parseServerEnv requires SITES_STORE), at
+  // t/<tenant>/intake/<job>/<sha256>.pdf, where the workers project's 30-day sweep deletes them.
+  const documentIntake = env.documentIntake === null || sites === undefined ? undefined
+    : { store: createIntakeFileStore(sites.store), workerToken: env.documentIntake.workerToken };
   const app = createApp({
     verifier: createVerifierFromConfig(env.jwt, clock),
     sessionCheck: createSessionCheckFromConfig(env.sessionCheck, { db, clock }),
@@ -83,6 +88,7 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }, optio
     ...(publicIntake === undefined ? {} : { publicIntake }),
     ...(sites === undefined ? {} : { sites }),
     ...(images === undefined ? {} : { images }),
+    ...(documentIntake === undefined ? {} : { documentIntake }),
     ...(unsubscribe === undefined ? {} : { unsubscribe }),
     ...(env.signInLimiterSecrets === null ? {} : { signInLimit: { secrets: env.signInLimiterSecrets, ...shared } }),
     ...(env.resendWebhook === null ? {} : {
