@@ -17,7 +17,7 @@ import {
   ValidationFailed,
   type AutomationScope,
 } from "@zs/contracts";
-import { assertSitePublishRoom, createKindSiteCompiler, createMemorySiteStore, plainSiteCompiler, type SiteCompiler } from "@zs/core";
+import { assertSitePublishRoom, createKindSiteCompiler, createMemorySiteStore, plainSiteCompiler, SiteStoreUnavailable, type SiteCompiler } from "@zs/core";
 import { signDevToken } from "../src/dev-token.js";
 import { appOnDatabase, call, createApiHarness, NOW, SECRET, type ApiHarness, type TenantSetup } from "./helpers.js";
 
@@ -351,6 +351,12 @@ describe("the blob reader and the site kinds (H-17)", () => {
     expect(fresh.headers.get("retry-after")).not.toBeNull();
     const preview = await call(h.app, "POST", `/v1/sites/${mine.id}/preview`, { token: h.a.token, body: { spec } });
     expect(preview.status).toBe(503);
+    // The outage reaches the error log with its cause, not only the 503 (ZSB-17).
+    const reported: unknown[] = [];
+    const reporting = appOnDatabase(h.database.db, { clock, sites: { store, compiler: createKindSiteCompiler({ plain: plainSiteCompiler, publisher: fakePublisher, linkpage: fakeLinkpage }) }, onError: (error) => reported.push(error) });
+    expect((await call(reporting, "POST", `/v1/sites/${mine.id}/preview`, { token: h.a.token, body: { spec } })).status).toBe(503);
+    expect(reported).toHaveLength(1);
+    expect(reported[0]).toBeInstanceOf(SiteStoreUnavailable);
   });
 
   it("answers 400 for linkpage until its adapter is wired, and for an untagged spec when no publisher is wired", async () => {

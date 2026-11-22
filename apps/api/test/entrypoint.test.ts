@@ -193,7 +193,8 @@ describe("public limits across API instances", () => {
 });
 
 // document-intake.md DL-3, DL-5 (ZSB-17): the hosted entry point mounts the upload and worker routes when
-// DOCUMENT_INTAKE_WORKER_TOKEN is set, behind the same member auth as the rest of /v1, and leaves them 404 otherwise.
+// DOCUMENT_INTAKE_WORKER_TOKEN is set: the owner routes behind the member auth of /v1, the worker routes behind that
+// token. Unset, the owner routes are 404 and a worker call falls under the member auth of /v1 (401).
 describe("document intake through the entry point", () => {
   const TOKEN = ["entry", "intake", "w".repeat(32)].join("-");
   const PDF = Buffer.from("%PDF-1.4\n% entry point upload\n%%EOF\n", "latin1");
