@@ -326,7 +326,9 @@ describe("parseServerEnv", () => {
     expect(message).not.toContain("short-intake-token");
     // The worker auth reads one Bearer word: a value with inner whitespace is refused, surrounding whitespace trimmed.
     const spaced = `${"s".repeat(20)} ${"s".repeat(20)}`;
-    expect(() => parseServerEnv({ ...base, SITES_STORE: "memory", DOCUMENT_INTAKE_WORKER_TOKEN: spaced })).toThrow(/DOCUMENT_INTAKE_WORKER_TOKEN: must not contain whitespace/);
+    expect(() => parseServerEnv({ ...base, SITES_STORE: "memory", DOCUMENT_INTAKE_WORKER_TOKEN: spaced })).toThrow(/DOCUMENT_INTAKE_WORKER_TOKEN: must be printable ASCII with no whitespace/);
+    // A header value cannot carry non-ASCII: such a token would pass here and fail every worker call.
+    expect(() => parseServerEnv({ ...base, SITES_STORE: "memory", DOCUMENT_INTAKE_WORKER_TOKEN: `${token}\u0394` })).toThrow(/DOCUMENT_INTAKE_WORKER_TOKEN: must be printable ASCII/);
     expect(() => parseServerEnv({ ...base, SITES_STORE: "memory", DOCUMENT_INTAKE_WORKER_TOKEN: " ".repeat(40) })).toThrow(/DOCUMENT_INTAKE_WORKER_TOKEN/);
     expect(parseServerEnv({ ...base, SITES_STORE: "memory", DOCUMENT_INTAKE_WORKER_TOKEN: `${token}\n` }).documentIntake).toEqual({ workerToken: token });
   });
