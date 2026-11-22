@@ -25,6 +25,8 @@ export interface ChatCompletionsConfig<L extends AgentLane> {
   readonly maxTokensParameter: "max_completion_tokens" | "max_tokens";
   /** The vendor's JSON-mode request fields, and any change to the system text they need. */
   readonly jsonMode: (request: TextModelRequest) => { readonly responseFormat: unknown; readonly system: string };
+  /** Fixed vendor-specific request fields (no tenant data), sent with every request. */
+  readonly extraBody?: Readonly<Record<string, string>>;
 }
 
 /** The part of a chat-completions answer the adapters read; everything else is ignored. */
@@ -58,6 +60,7 @@ export function createChatCompletionsModel<L extends AgentLane>(config: ChatComp
         temperature: 0.2,
         stream: false,
         response_format: mode.responseFormat,
+        ...config.extraBody,
       });
       const response = await abortable(config.fetch(`${config.baseUrl}/chat/completions`, {
         method: "POST",

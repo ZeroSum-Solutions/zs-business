@@ -65,6 +65,7 @@ describe("Cerebras adapter (personal-data lane)", () => {
     expect(sent[0]!.body).toMatchObject({
       model: CEREBRAS_DEFAULT_MODEL,
       max_completion_tokens: 600,
+      reasoning_effort: "low",
       stream: false,
       response_format: { type: "json_schema", json_schema: { strict: true } },
       messages: [
@@ -73,6 +74,15 @@ describe("Cerebras adapter (personal-data lane)", () => {
       ],
     });
     expect(sent[0]!.body).not.toHaveProperty("max_tokens");
+  });
+
+  it("asks gpt-oss models for low reasoning effort, so reasoning cannot use up the output cap, and other models for nothing extra", async () => {
+    const gptOss = replay("cerebras-ok");
+    await createCerebrasModel({ apiKey: "k", fetch: gptOss.fetch, model: "gpt-oss-120b" }).complete(request);
+    expect(gptOss.sent[0]!.body.reasoning_effort).toBe("low");
+    const other = replay("cerebras-ok");
+    await createCerebrasModel({ apiKey: "k", fetch: other.fetch, model: "qwen-3.8-27b" }).complete(request);
+    expect(other.sent[0]!.body).not.toHaveProperty("reasoning_effort");
   });
 
   it("returns an answer that is not JSON as raw text for the caller to refuse", async () => {
@@ -162,6 +172,7 @@ describe("DeepSeek adapter (no-personal-data lane)", () => {
     expect(sent[0]!.headers.authorization).toBe("Bearer test-key");
     expect(sent[0]!.body).toMatchObject({ max_tokens: 600, response_format: { type: "json_object" } });
     expect(sent[0]!.body).not.toHaveProperty("max_completion_tokens");
+    expect(sent[0]!.body).not.toHaveProperty("reasoning_effort");
     const system = (sent[0]!.body.messages as { role: string; content: string }[])[0]!.content;
     expect(system.startsWith(request.system)).toBe(true);
     expect(system).toContain("JSON Schema");

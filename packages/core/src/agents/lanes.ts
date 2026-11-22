@@ -34,8 +34,8 @@ export const AGENT_KIND_LANES: Readonly<Record<AgentKind, AgentLane>> = Object.f
 
 /**
  * G-15: the vendors' list prices in USD millionths per million tokens, keyed by model ID. Not read
- * from the environment. UNVERIFIED against the vendors' price pages: confirm before a real tenant
- * runs a real lane, and update with the model ID.
+ * from the environment. The Cerebras price was checked against cerebras.ai/pricing on 2026-11-22;
+ * the DeepSeek price is unverified. Update a price with its model ID.
  */
 export const VENDOR_MODEL_PRICES: ModelPrices = Object.freeze({
   ...FAKE_MODEL_PRICES,
