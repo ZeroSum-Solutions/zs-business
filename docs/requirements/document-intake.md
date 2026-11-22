@@ -205,6 +205,12 @@ role cannot delete a `catalog_items` row.
   calls it once per run with a bounded batch (default 50, at most 200). It is off by default: it needs
   `INTAKE_SWEEP_WORKER=on` and a build-time `INTAKE_SWEEP_CRON_SCHEDULE`, and nothing sets either until an
   operator does (apps/api/README.md, "Document intake sweep", says how). Until then, stored PDFs stay.
+- An upload whose Idempotency-Key already names an action (a replay of an accepted upload, or a key another
+  action used) is checked before storage is touched: it returns the stored outcome or the dispatcher's refusal
+  (`IdempotencyConflict` for a changed payload or another action, `BindingMismatch` for another actor) and writes
+  no object, so a PDF the sweep deleted stays deleted (ZSB-13). Only the sweep deletes a stored PDF: when a new
+  upload fails after its write, its object stays, unreferenced, because a same-key request may have written the same
+  path and be about to commit its job. Nothing sweeps such an object yet.
 - `catalog_items` and `knowledge_entries` are minimal and new. They will need a revision when
   store sync, variants, stock or images arrive.
 - Header mapping uses a fixed synonym list; a PDF with other headings yields `invalid` rows.

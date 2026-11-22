@@ -208,8 +208,8 @@ export function createDocumentIntakeSession(deps: EdgeDependencies, config: Docu
       return {
         /**
          * DL-3: store the PDF at the server-built path, then queue the job. Owner only, checked first;
-         * the type, the signature and the size are checked before a byte is stored. A failed insert
-         * deletes the object at once (DL-16).
+         * the type, the signature and the size are checked before a byte is stored. A replay of a key that
+         * already names an action never writes the object. Only the 30-day sweep deletes an object (DL-16).
          */
         async upload(input: UploadInput, rawKey: unknown): Promise<IntakeUploadResult> {
           await asOwner(async () => undefined);
@@ -228,17 +228,19 @@ export function createDocumentIntakeSession(deps: EdgeDependencies, config: Docu
           const payload = intakeUploadPayloadSchema.parse({
             jobId, targetKind: "catalog", source: "upload", filename, fileSha256, byteLength: input.bytes.byteLength,
           });
+          const dispatch = async () => (await run(command(CATALOG_INTAKE_UPLOAD_ACTION, jobId, key, payload))).result as unknown as IntakeUploadResult;
+          // A key that already names an action makes this a replay: the dispatcher returns the stored outcome or
+          // refuses a changed payload, another actor or another action, and storage is not touched. Writing first
+          // would put back a PDF the 30-day sweep already deleted (DL-16). Actions are never pruned, so the job
+          // the key derives exists only beside its action.
+          const replay = await asOwner(async (tx) => (await tx.query(
+            "SELECT 1 FROM actions WHERE tenant_id=$1 AND idempotency_key=$2", [tenantId, key])).rowCount !== 0);
+          if (replay) return dispatch();
+          // Nothing deletes the object if the insert then fails: a same-key request may have written the same path
+          // and be about to commit its job, and a delete here could race it and leave that job without its PDF.
+          // The object stays unreferenced instead (ZSB-13).
           await config.store.put(path, input.bytes);
-          try {
-            const done = await run(command(CATALOG_INTAKE_UPLOAD_ACTION, jobId, key, payload));
-            return done.result as unknown as IntakeUploadResult;
-          } catch (error) {
-            // A retry of an accepted upload finds its job and keeps the object.
-            const kept = await deps.db.tenant(tenantId, async (tx) => (await tx.query(
-              "SELECT 1 FROM document_intake_jobs WHERE tenant_id=$1 AND id=$2 AND file_sha256=$3", [tenantId, jobId, fileSha256])).rowCount === 1);
-            if (!kept) { try { await config.store.delete(path); } catch { /* the object is unreferenced; the job never existed */ } }
-            throw error;
-          }
+          return dispatch();
         },
 
         async list(limit = 50): Promise<IntakeJobList> {
