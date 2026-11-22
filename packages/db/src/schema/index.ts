@@ -53,7 +53,7 @@ export const actions = pgTable(
       .on(table.tenantId, sql`((${table.approvalReference}->>'id')::uuid)`)
       .where(sql`${table.approvalReference} IS NOT NULL`),
     // The owner's action log pages newest first (B05).
-    index("actions_tenant_created").on(table.tenantId, table.createdAt.desc(), table.id.desc()),
+    index("actions_tenant_created").on(table.tenantId, table.createdAt.desc().nullsFirst(), table.id.desc().nullsFirst()),
     check("actions_type_nonempty", sql`length(${table.actionType}) > 0`),
     check("actions_key_nonempty", sql`length(${table.idempotencyKey}) > 0`),
     tenantPolicy(table.tenantId, true),

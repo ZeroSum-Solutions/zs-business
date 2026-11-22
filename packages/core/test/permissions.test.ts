@@ -349,6 +349,10 @@ function operations(session: Session, actorId: string = randomUUID()): Record<st
       return session.getThread(`c_${tenant.contactId}`);
     } },
     homeResults: { permission: "reports", run: () => session.homeResults({ zone: "America/New_York" }) },
+    // ZSB-42: the action log is an owner's record.
+    listActions: { permission: "reports", run: () => session.listActions({}) },
+    getAction: { permission: "reports", run: async () =>
+      session.getAction((await sessionFor(tenant.ownerId).listActions({ limit: 1 })).items[0]!.id) },
     moveDealStage: { permission: "customers", run: async () => {
       const deals = await sessionFor(tenant.ownerId).listDeals({ limit: 100 });
       const current = deals.items.find((deal) => deal.id === tenant.dealId)!;
