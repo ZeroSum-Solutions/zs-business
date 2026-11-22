@@ -232,10 +232,14 @@ describe("document intake through the entry point", () => {
     }
   }, 30_000);
 
-  it("leaves the routes off (404) until DOCUMENT_INTAKE_WORKER_TOKEN is set", async () => {
+  it("leaves the routes off until DOCUMENT_INTAKE_WORKER_TOKEN is set: uploads 404, worker calls the member auth's 401", async () => {
     const api = await startApi({ SITES_STORE: "memory" });
     try {
       expect((await upload(api, { Authorization: `Bearer ${await memberToken()}` })).status).toBe(404);
+      const claim = await fetch(`http://127.0.0.1:${api.port}/v1/workers/document-intake/claim`, {
+        method: "POST", headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      expect(claim.status).toBe(401);
     } finally {
       await api.stop();
     }

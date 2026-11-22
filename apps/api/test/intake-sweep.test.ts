@@ -9,8 +9,8 @@ import { asService } from "@zs/db";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import type { SiteObjectStore } from "@zs/contracts";
 import {
-  createDocumentIntakeSession, createFakeDoclingPort, createMemorySiteStore, intakeFilePath, runDocumentIntakeWorker,
-  type EdgeDependencies,
+  createDocumentIntakeSession, createFakeDoclingPort, createMemorySiteStore, intakeFilePath, mapError, runDocumentIntakeWorker,
+  SiteStoreUnavailable, type EdgeDependencies,
 } from "@zs/core";
 import { createCronAlertsOnPool, listOpenCronAlerts } from "../src/cron-alerts.js";
 import { cronRoutes } from "../src/delivery/cron.js";
@@ -211,6 +211,17 @@ describe("createIntakeFileStore", () => {
     await files.delete(path);
     expect(objects.keys()).toEqual([]);
     await files.delete(path);
+  });
+
+  it("turns a failed put or read into SiteStoreUnavailable (a retryable 503) and leaves a failed delete as it is (ZSB-17)", async () => {
+    const down = new Error("R2 down");
+    const broken: SiteObjectStore = { ...createMemorySiteStore(), put: async () => { throw down; }, get: async () => { throw down; }, delete: async () => { throw down; } };
+    const files = createIntakeFileStore(broken);
+    const path = intakeFilePath(randomUUID(), randomUUID(), "b".repeat(64));
+    await expect(files.put(path, new Uint8Array([37]))).rejects.toMatchObject({ name: "SiteStoreUnavailable", cause: down });
+    await expect(files.read(path)).rejects.toMatchObject({ name: "SiteStoreUnavailable", cause: down });
+    expect(mapError(new SiteStoreUnavailable()).status).toBe(503);
+    await expect(files.delete(path)).rejects.toBe(down);
   });
 });
 

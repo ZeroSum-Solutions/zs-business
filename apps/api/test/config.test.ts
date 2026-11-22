@@ -324,6 +324,11 @@ describe("parseServerEnv", () => {
     try { parseServerEnv({ ...base, SITES_STORE: "memory", DOCUMENT_INTAKE_WORKER_TOKEN: "short-intake-token" }); } catch (error) { message = String(error); }
     expect(message).toMatch(/DOCUMENT_INTAKE_WORKER_TOKEN/);
     expect(message).not.toContain("short-intake-token");
+    // The worker auth reads one Bearer word: a value with inner whitespace is refused, surrounding whitespace trimmed.
+    const spaced = `${"s".repeat(20)} ${"s".repeat(20)}`;
+    expect(() => parseServerEnv({ ...base, SITES_STORE: "memory", DOCUMENT_INTAKE_WORKER_TOKEN: spaced })).toThrow(/DOCUMENT_INTAKE_WORKER_TOKEN: must not contain whitespace/);
+    expect(() => parseServerEnv({ ...base, SITES_STORE: "memory", DOCUMENT_INTAKE_WORKER_TOKEN: " ".repeat(40) })).toThrow(/DOCUMENT_INTAKE_WORKER_TOKEN/);
+    expect(parseServerEnv({ ...base, SITES_STORE: "memory", DOCUMENT_INTAKE_WORKER_TOKEN: `${token}\n` }).documentIntake).toEqual({ workerToken: token });
   });
 
   it("keeps the in-memory site store to loopback databases", () => {

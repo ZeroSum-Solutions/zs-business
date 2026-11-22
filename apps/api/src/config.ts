@@ -124,10 +124,12 @@ const envSchema = z.object({
   R2_BUCKET: z.string().min(3).max(63).optional(),
   R2_ACCESS_KEY_ID: z.string().min(1).optional(),
   R2_SECRET_ACCESS_KEY: z.string().min(1).optional(),
-  // document-intake.md DL-3, DL-5: the Docling worker's bearer token, 32+ characters. Set, the API mounts the
-  // owner's routes (/v1/document-intake) and the worker's (/v1/workers/document-intake); unset, both are 404.
-  // The PDFs live in the site store's bucket, so it needs SITES_STORE.
-  DOCUMENT_INTAKE_WORKER_TOKEN: z.string().min(32).optional(),
+  // document-intake.md DL-3, DL-5: the Docling worker's bearer token, trimmed, 32+ characters, no whitespace (the
+  // worker auth reads one `Bearer <token>` word). Set, the API mounts the owner's routes (/v1/document-intake) and
+  // the worker's (/v1/workers/document-intake). Unset, the owner's routes are 404 and a worker call falls under the
+  // member auth of /v1 (401). The PDFs live in the site store's bucket, so it needs SITES_STORE.
+  DOCUMENT_INTAKE_WORKER_TOKEN: z.string().trim().min(32, "must be at least 32 characters")
+    .regex(/^\S+$/, "must not contain whitespace").optional(),
 }).superRefine((env, ctx) => {
   const issue = (path: string, message: string) => ctx.addIssue({ code: "custom", path: [path], message });
   let host: string;
@@ -193,7 +195,7 @@ export interface ServerEnv {
   readonly images: ImageEnv | null;
   /** outreach-sequencer.md OS-1, OS-21: the tenants that may use outreach; null (every /v1/outreach route 404) when OUTREACH_TENANTS is unset. */
   readonly outreach: { readonly tenants: readonly string[] } | null;
-  /** document-intake.md DL-3, DL-5: PDF uploads and the worker's routes; null (all 404) when DOCUMENT_INTAKE_WORKER_TOKEN is unset. */
+  /** document-intake.md DL-3, DL-5: PDF uploads and the worker's routes; null (not mounted) when DOCUMENT_INTAKE_WORKER_TOKEN is unset. */
   readonly documentIntake: { readonly workerToken: string } | null;
 }
 export interface ImageEnv {
