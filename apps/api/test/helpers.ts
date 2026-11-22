@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { expect, vi } from "vitest";
+import { expect, onTestFinished, vi } from "vitest";
 import { createDealOutputSchema, createOrFindContactOutputSchema } from "@zs/contracts";
 import {
   createTestDatabase,
@@ -240,7 +240,7 @@ export function appOnDatabase(db: ScopedDatabase, options: { clock?: { now(): Da
     config: {
       allowedOrigins: [ORIGIN],
       ...(options.requestTimeoutMs ? { requestTimeoutMs: options.requestTimeoutMs } : {}),
-      ...(options.usageWriteTimeoutMs ? { usageWriteTimeoutMs: options.usageWriteTimeoutMs } : {}),
+      ...(options.usageWriteTimeoutMs === undefined ? {} : { usageWriteTimeoutMs: options.usageWriteTimeoutMs }),
     },
     ...(options.activepieces === false ? {} : { activepieces: { keySecrets: { current: ACTIVEPIECES_KEY_SECRET } } }),
     ...(options.onError ? { onError: options.onError } : {}),
@@ -317,9 +317,12 @@ export async function provisionPage(
  */
 export async function answeredAtDeadline<T>(request: () => Promise<T>, parked: Promise<unknown>, deadlineMs: number): Promise<T> {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  // Real timers come back even when the request hangs and the test times out.
+  onTestFinished(() => { vi.useRealTimers(); });
   try {
     let settled = false;
     const pending = request().finally(() => { settled = true; });
+    pending.catch(() => undefined); // a rejection is the caller's to see; never an unhandled one
     await Promise.race([parked, pending]);
     await vi.advanceTimersByTimeAsync(deadlineMs - 1);
     expect(settled, "answered before the deadline").toBe(false);
@@ -330,7 +333,15 @@ export async function answeredAtDeadline<T>(request: () => Promise<T>, parked: P
   }
 }
 
-/** Polls `condition` every 25 ms. No wall-clock cap of its own: the test's timeout bounds it. */
-export async function waitUntil(condition: () => Promise<boolean> | boolean): Promise<void> {
-  while (!(await condition())) await new Promise((resolve) => setTimeout(resolve, 25));
+/**
+ * Polls `condition` every 25 ms. No wall-clock cap of its own: the test's timeout bounds it.
+ * `what` names the wait in the failure when the test ends first.
+ */
+export async function waitUntil(condition: () => Promise<boolean> | boolean, what = "a condition"): Promise<void> {
+  let done = false;
+  onTestFinished(() => { done = true; });
+  while (!(await condition())) {
+    if (done) throw new Error(`the test ended while waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
 }

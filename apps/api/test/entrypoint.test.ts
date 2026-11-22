@@ -4,7 +4,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, onTestFailed, onTestFinished } from "vitest";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import { signDevToken } from "../src/dev-token.js";
 import { KEY_SECRET, signedInMember } from "./helpers.js";
@@ -38,6 +38,19 @@ interface Running {
   stop(): Promise<void>;
 }
 
+/** Ends the child: SIGTERM, then SIGKILL if it has not exited 10 s later. */
+async function kill(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = once(child, "exit");
+  child.kill("SIGTERM");
+  const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
+  try {
+    await exited;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function startApi(extraEnv: Record<string, string> = {}): Promise<Running> {
   const port = await freePort();
   const url = new URL(database.url);
@@ -56,6 +69,8 @@ async function startApi(extraEnv: Record<string, string> = {}): Promise<Running>
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
+  // Registered before anything can fail: the child never outlives its test.
+  onTestFinished(() => kill(child));
   let output = "";
   let exitCode: number | null = null;
   let changed = () => {};
@@ -69,14 +84,8 @@ async function startApi(extraEnv: Record<string, string> = {}): Promise<Running>
     changed();
   });
   if (exitCode !== null || !output.includes("listening")) throw new Error(`API did not start: ${output}`);
-  return {
-    child, port, output: () => output, exited: () => exitCode,
-    async stop() {
-      if (exitCode !== null) return;
-      child.kill("SIGTERM");
-      await once(child, "exit");
-    },
-  };
+  onTestFailed(() => { console.error(`API output on port ${port}:\n${output}`); });
+  return { child, port, output: () => output, exited: () => exitCode, stop: () => kill(child) };
 }
 
 /** A live owner of tenant A, with a token signed for the child's real clock. */
@@ -85,9 +94,12 @@ async function memberToken(): Promise<string> {
   return signDevToken(SECRET, member, { now: () => new Date() }, 600);
 }
 
-/** Resolves once the child's output contains `text`. */
+/** Resolves once the child's output contains `text`; rejects if the child exits first. */
 async function logged(api: Running, text: string): Promise<void> {
-  while (!api.output().includes(text)) await new Promise((resolve) => setTimeout(resolve, 25));
+  while (!api.output().includes(text)) {
+    if (api.exited() !== null) throw new Error(`API exited before logging ${text}: ${api.output()}`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
 }
 
 /**
@@ -135,66 +147,40 @@ describe("API entry point", () => {
     }
   }, CHILD_TEST_MS);
 
-  it("answers 503 within the request deadline when every connection is busy", async () => {
-    // The 60 s checkout timeout is far longer than the 1 s deadline: only the deadline can end
-    // the second request's wait for the one connection while the lock is held.
-    const api = await startApi({ DATABASE_POOL_MAX: "1", REQUEST_TIMEOUT_MS: "1000", DATABASE_CONNECT_TIMEOUT_MS: "60000" });
-    // Hold the API's only connection: lock a row it needs, then make it wait on that lock.
+  // The entry point's wiring for a saturated pool: DATABASE_POOL_MAX and REQUEST_TIMEOUT_MS reach
+  // the app, a request that cannot get a connection answers 503, and the process lives on.
+  // deadline-database.test.ts proves in process, on fake timers, that the deadline ends each wait.
+  it("answers 503 when every connection is busy, then serves again once the lock is gone", async () => {
+    // A 5 s deadline: on a busy machine a healthy read still fits, and the busy ones end at it.
+    const api = await startApi({ DATABASE_POOL_MAX: "1", REQUEST_TIMEOUT_MS: "5000" });
+    // Hold the API's only connection: lock a table it reads, then make a request wait on that lock.
     const holder = await database.pool.connect();
-    const sentinel = await database.pool.connect();
-    try {
-      const token = await memberToken();
-      await holder.query("BEGIN");
-      await holder.query("LOCK TABLE booking_resources IN ACCESS EXCLUSIVE MODE");
-      const headers = { Authorization: `Bearer ${token}` };
-      let firstDone = false;
-      const first = fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, { headers })
-        .finally(() => { firstDone = true; });
-      // The first request's transaction, once it waits on the lock. On a busy machine its
-      // deadline can pass before it gets there; then there is no wait to check.
-      let waiter: { pid: number; xact: string } | undefined;
-      while (waiter === undefined && !firstDone) {
-        waiter = (await database.pool.query<{ pid: number; xact: string }>(
-          `SELECT pid, xact_start::text AS xact FROM pg_stat_activity
-            WHERE datname = current_database() AND usename = 'zs_runtime' AND wait_event_type = 'Lock'`,
-        )).rows[0];
-        if (waiter === undefined) await new Promise((resolve) => setTimeout(resolve, 25));
-      }
-      const second = fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, { headers });
-      if (waiter !== undefined) {
-        // The deadline reached Postgres: the request's lock wait was capped at the second it had
-        // left, so it ends before a sentinel that starts waiting later with a 3.5 s lock timeout,
-        // though the lock is still held. Without the cap it would wait the 5 s lock timeout.
-        // Both waits are timed by Postgres, so a busy machine delays them alike.
-        await sentinel.query("BEGIN");
-        await sentinel.query("SET LOCAL lock_timeout = 3500");
-        await expect(sentinel.query("LOCK TABLE booking_resources IN ACCESS SHARE MODE"))
-          .rejects.toMatchObject({ code: "55P03" });
-        await sentinel.query("ROLLBACK");
-        const { rows } = await database.pool.query<{ n: number }>(
-          `SELECT count(*)::int AS n FROM pg_stat_activity
-            WHERE pid = $1 AND xact_start::text = $2 AND wait_event_type = 'Lock'`,
-          [waiter.pid, waiter.xact],
-        );
-        expect(rows[0]?.n, "the first request still waits on the lock").toBe(0);
-      }
-      const answered = await second;
+    onTestFinished(async () => {
+      await holder.query("ROLLBACK").catch(() => undefined);
+      holder.release();
+    });
+    const token = await memberToken();
+    await holder.query("BEGIN");
+    await holder.query("LOCK TABLE booking_resources IN ACCESS EXCLUSIVE MODE");
+    const headers = { Authorization: `Bearer ${token}` };
+    const read = () => fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, { headers });
+    const [first, second] = await Promise.all([read(), read()]);
+    for (const answered of [first, second]) {
       expect(answered.status).toBe(503);
       expect(answered.headers.get("retry-after")).toBe("1");
       expect(await answered.json()).toEqual({ error: { code: "Unavailable", message: "Service unavailable", details: {} } });
-      expect((await first).status).toBe(503);
-      await holder.query("ROLLBACK");
-      // Once the lock is gone the same process serves again.
-      const after = await fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, { headers });
-      expect(after.status).toBe(200);
-      expect(api.exited()).toBeNull();
-    } finally {
-      await sentinel.query("ROLLBACK").catch(() => undefined);
-      sentinel.release();
-      await holder.query("ROLLBACK").catch(() => undefined);
-      holder.release();
-      await api.stop();
     }
+    await holder.query("ROLLBACK");
+    // Once the lock is gone the same process serves again. Its one connection may still be
+    // finishing the abandoned work, so a read may answer 503 first; the test's timeout bounds it.
+    for (;;) {
+      if (api.exited() !== null) throw new Error(`API exited: ${api.output()}`);
+      const after = await read();
+      await after.body?.cancel();
+      if (after.status === 200) break;
+      expect(after.status).toBe(503);
+    }
+    expect(api.exited()).toBeNull();
   }, CHILD_TEST_MS);
 });
 

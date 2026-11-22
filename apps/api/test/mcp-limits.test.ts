@@ -4,7 +4,7 @@
 // instance gets them. Usage rows count what happened. The clock is injected and moved by hand.
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { automationTokenWithSecretSchema, automationUsageSchema, apiErrorBodySchema } from "@zs/contracts";
 import { createScopedDatabase, type ScopedDatabase } from "@zs/db";
 import { appOnDatabase, call, createApiHarness, NOW, type ApiHarness } from "./helpers.js";
@@ -22,6 +22,8 @@ const patientApp = (db: ScopedDatabase) => appOnDatabase(db, { clock, requestTim
 let clockMs = Date.parse(NOW);
 const clock = { now: () => new Date(clockMs) };
 const pools: Pool[] = [];
+// Real Postgres I/O, hundreds of requests per test, on a possibly busy machine.
+const DATABASE_TEST_MS = 180_000;
 
 beforeAll(async () => {
   h = await createApiHarness({ clock, activepieces: {} });
@@ -30,7 +32,9 @@ beforeAll(async () => {
   pools.push(pool);
   first = patientApp(createScopedDatabase(h.database.runtimePool, PATIENT));
   second = patientApp(createScopedDatabase(pool, PATIENT));
-});
+}, DATABASE_TEST_MS);
+// A test that fails while the clock is moved leaves none of that time to the next.
+afterEach(() => { clockMs = Date.parse(NOW); });
 afterAll(async () => {
   await Promise.all(pools.map((pool) => pool.end()));
   await h?.close();
@@ -82,7 +86,7 @@ describe("rate limits across two API instances (H-7)", () => {
     } finally {
       clockMs = Date.parse(NOW);
     }
-  }, 180_000);
+  }, DATABASE_TEST_MS);
 
   it("refuses the 2,001st request inside an hour, with a Retry-After that names the hour", async () => {
     const { secret, token } = await mint();
@@ -112,7 +116,7 @@ describe("rate limits across two API instances (H-7)", () => {
     } finally {
       clockMs = Date.parse(NOW);
     }
-  }, 180_000);
+  }, DATABASE_TEST_MS);
 });
 
 describe("the quota comes before the token row and the body (H-5, H-7)", () => {
@@ -123,16 +127,18 @@ describe("the quota comes before the token row and the body (H-5, H-7)", () => {
   it("answers 429 over 404, 400 and a revoked row, without reading the token row, and charges nothing for refusals", async () => {
     const { secret, token } = await mint();
     const tokenRowReads: string[] = [];
+    // Patient, like the two instances: 20 concurrent requests on one usage row are all served.
+    const patient = createScopedDatabase(h.database.runtimePool, PATIENT);
     const counting: ScopedDatabase = {
-      ...h.database.db,
-      tenant: (tenantId, work, options) => h.database.db.tenant(tenantId, (tx) => work({
+      ...patient,
+      tenant: (tenantId, work, options) => patient.tenant(tenantId, (tx) => work({
         query: ((sql: string, params?: unknown[]) => {
           if (/\bautomation_tokens\b/.test(sql)) tokenRowReads.push(sql);
           return tx.query(sql as never, params as never);
         }) as typeof tx.query,
       }), options),
     };
-    const app = appOnDatabase(counting, { clock });
+    const app = patientApp(counting);
     for (let sent = 0; sent < 120; sent += 20)
       expect((await Promise.all(Array.from({ length: 20 }, () => ping(app, secret)))).map((reply) => reply.status)).toEqual(Array(20).fill(200));
     const names = bucketsOf(h.a.tenantId, token.id);
@@ -160,7 +166,7 @@ describe("the quota comes before the token row and the body (H-5, H-7)", () => {
     // Refused requests charged nothing: both buckets still stand at 120.
     expect(await bucket(names.minute)).toBe(120);
     expect(await bucket(names.hour)).toBe(120);
-  });
+  }, DATABASE_TEST_MS);
 
   it("charges a request that goes on to be refused for its body, once the quota allows it", async () => {
     const { secret, token } = await mint();

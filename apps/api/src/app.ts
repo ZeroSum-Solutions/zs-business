@@ -81,7 +81,10 @@ export interface AppConfig {
    * and rolls back; a write that already committed replays on a retry with its key.
    */
   readonly requestTimeoutMs?: number;
-  /** The H-8 usage write's own budget on POST /mcp, default USAGE_WRITE_TIMEOUT_MS (1.5 s). */
+  /**
+   * The H-8 usage write's own budget on POST /mcp, default USAGE_WRITE_TIMEOUT_MS (1.5 s).
+   * A whole number of milliseconds from 1 to 2^31 - 1; createApp refuses anything else.
+   */
   readonly usageWriteTimeoutMs?: number;
 }
 export interface AppDependencies {
@@ -209,6 +212,10 @@ const HTTP_ERROR_CODES: Partial<Record<number, ApiErrorCode>> = {
 const OUTREACH_IMPORT_PATH = /^\/v1\/outreach\/campaigns\/[^/]+\/prospects$/;
 
 export function createApp(deps: AppDependencies) {
+  const usageWriteTimeoutMs = deps.config.usageWriteTimeoutMs;
+  // An invalid budget would make every usage write fail at once, and that failure is only reported.
+  if (usageWriteTimeoutMs !== undefined && !(Number.isInteger(usageWriteTimeoutMs) && usageWriteTimeoutMs >= 1 && usageWriteTimeoutMs <= 2 ** 31 - 1))
+    throw new RangeError("usageWriteTimeoutMs must be a whole number of milliseconds from 1 to 2147483647");
   const app = new Hono<AppEnv>();
   const origins = new Set(deps.config.allowedOrigins);
   // First, so it also covers the CORS preflight, the 404 and every error the handlers below raise.
@@ -321,7 +328,7 @@ export function createApp(deps: AppDependencies) {
       // The usage write runs on the raw database, off the request's deadline (H-8).
       usage: {
         db: deps.db, clock: deps.clock,
-        ...(deps.config.usageWriteTimeoutMs === undefined ? {} : { timeoutMs: deps.config.usageWriteTimeoutMs }),
+        ...(usageWriteTimeoutMs === undefined ? {} : { timeoutMs: usageWriteTimeoutMs }),
       },
       ...(deps.onError ? { report: deps.onError } : {}),
     }, requestEdge));

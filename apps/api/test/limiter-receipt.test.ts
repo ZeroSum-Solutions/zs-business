@@ -125,8 +125,6 @@ describe.each([
 });
 
 describe("memory limiter receipts are bounded", () => {
-  // Filling the cap is 10,000 charges, each sweeping every receipt held: about 50 million map
-  // steps, which takes far longer than the default 15 s on a busy machine. No clock is involved.
   it("holds at most MAX_MEMORY_RECEIPTS: the oldest is dropped, and that charge simply cannot be refunded", async () => {
     const { limiter } = clocked((clock) => createMemoryRateLimiter(clock));
     const first = await receiptOf(limiter, [{ key: "k:first", rule: rule(1_000_000) }]);
@@ -134,7 +132,7 @@ describe("memory limiter receipts are bounded", () => {
     expect(await limiter.refund!(first)).toBe(0);
     const last = await receiptOf(limiter, [{ key: "k:last", rule: rule(10) }]);
     expect(await limiter.refund!(last)).toBe(1);
-  }, 120_000);
+  });
 
   it("sweeps a receipt whose window ended, and a late refund changes nothing", async () => {
     const { limiter, set } = clocked((clock) => createMemoryRateLimiter(clock));

@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { SignJWT } from "jose";
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { afterAll, beforeAll, expect, it, onTestFailed, onTestFinished } from "vitest";
 import {
   createTestDatabase,
   createTwoTenantFixture,
@@ -71,23 +71,25 @@ it("keeps serving tools after its idle database connection is terminated", async
   let closed = false;
   transport.onclose = () => { closed = true; };
   const client = new Client({ name: "entrypoint-test", version: "0.0.0" });
+  // Closing the client ends the child, however the test ends.
+  onTestFinished(() => client.close());
+  onTestFailed(() => { console.error(`MCP child stderr:\n${stderr}`); });
   await client.connect(transport);
-  try {
-    const first = await client.callTool({ name: "list_resources", arguments: {} }) as CallToolResult;
-    expect(first.isError, JSON.stringify(first)).toBeFalsy();
-    // Only the child logs in as the runtime role in this database; end its idle connection.
-    const { rows } = await database.pool.query<{ n: number }>(
-      `SELECT count(*) FILTER (WHERE pg_terminate_backend(pid))::int AS n FROM pg_stat_activity
-        WHERE datname = current_database() AND usename = 'zs_runtime'`,
-    );
-    expect(rows[0]?.n).toBeGreaterThan(0);
-    // The pool logs the lost connection (57P01) and the child carries on to serve below.
-    while (!stderr.includes("57P01")) await new Promise((resolve) => setTimeout(resolve, 25));
-    expect(closed, stderr).toBe(false);
-    const second = await client.callTool({ name: "list_resources", arguments: {} }) as CallToolResult;
-    expect(second.isError, JSON.stringify(second)).toBeFalsy();
-  } finally {
-    await client.close();
+  const first = await client.callTool({ name: "list_resources", arguments: {} }) as CallToolResult;
+  expect(first.isError, JSON.stringify(first)).toBeFalsy();
+  // Only the child logs in as the runtime role in this database; end its idle connection.
+  const { rows } = await database.pool.query<{ n: number }>(
+    `SELECT count(*) FILTER (WHERE pg_terminate_backend(pid))::int AS n FROM pg_stat_activity
+      WHERE datname = current_database() AND usename = 'zs_runtime'`,
+  );
+  expect(rows[0]?.n).toBeGreaterThan(0);
+  // The pool logs the lost connection (57P01) and the child carries on to serve below.
+  while (!stderr.includes("57P01")) {
+    if (closed) throw new Error(`MCP child exited before logging 57P01: ${stderr}`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
   }
+  expect(closed, stderr).toBe(false);
+  const second = await client.callTool({ name: "list_resources", arguments: {} }) as CallToolResult;
+  expect(second.isError, JSON.stringify(second)).toBeFalsy();
   // Starting tsx and the child takes tens of seconds on a busy machine; nothing here is timed.
 }, 180_000);

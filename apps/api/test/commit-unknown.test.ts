@@ -1,17 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { createServer, connect, type Socket } from "node:net";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, onTestFinished } from "vitest";
 import { apiErrorBodySchema, createOrFindContactOutputSchema, publicBookingReplySchema } from "@zs/contracts";
 import { createLocalStubSessionCheck } from "@zs/core";
 import { createRuntimePool, createScopedDatabase, DatabaseUnavailable, type ScopedDatabase, type Transaction } from "@zs/db";
 import { createApp, createHs256Verifier } from "../src/app.js";
 import {
-  answeredAtDeadline, call, clock, createApiHarness, KEY_SECRET, ORIGIN, provisionPage, PUBLIC_BASE_URL, SECRET, type ApiHarness,
+  answeredAtDeadline, call, clock, createApiHarness, KEY_SECRET, ORIGIN, provisionPage, PUBLIC_BASE_URL, SECRET, type ApiHarness, waitUntil,
 } from "./helpers.js";
+
+// Real Postgres I/O through a proxy on a possibly busy machine: generous budgets, nothing timed.
+const DATABASE_TEST_MS = 120_000;
 
 let h: ApiHarness;
 // Public routes on, so a public request's replay goes through the same app as an owner's.
-beforeAll(async () => { h = await createApiHarness({ publicIntake: {} }); });
+beforeAll(async () => { h = await createApiHarness({ publicIntake: {} }); }, DATABASE_TEST_MS);
 afterAll(async () => { await h?.close(); });
 
 /**
@@ -28,6 +31,8 @@ async function commitReplyLosingProxy(databaseUrl: string) {
   const server = createServer((client) => {
     let wrote = false;
     let stalled = false;
+    // The end of the previous chunk: a marker can straddle two TCP chunks.
+    let tail = Buffer.alloc(0);
     const upstream = connect(Number(target.port || 5432), target.hostname);
     for (const socket of [client, upstream]) {
       sockets.add(socket);
@@ -36,9 +41,11 @@ async function commitReplyLosingProxy(databaseUrl: string) {
     }
     client.on("data", (chunk: Buffer) => {
       upstream.write(chunk);
-      if (chunk.includes("INSERT INTO")) wrote = true;
+      const seen = Buffer.concat([tail, chunk]);
+      tail = seen.subarray(Math.max(0, seen.length - 16));
+      if (seen.includes("INSERT INTO")) wrote = true;
       // The simple-query message for COMMIT ends in its NUL; "READ COMMITTED" does not match.
-      if (wrote && chunk.includes("COMMIT\0")) stalled = true;
+      if (wrote && seen.includes("COMMIT\0")) stalled = true;
     });
     upstream.on("data", () => { if (stalled) held(); });
     upstream.on("data", (chunk) => { if (!stalled) client.write(chunk); });
@@ -89,7 +96,9 @@ describe("a COMMIT whose reply is lost at the deadline", () => {
       expect(first.status).toBe(503);
       expect(apiErrorBodySchema.parse(first.body).error.code).toBe("Unavailable");
       // The transaction says its COMMIT may have applied, not that nothing committed.
-      await expect.poll(() => failures.length, { timeout: 1000, interval: 50 }).toBe(1);
+      // The transaction reports after the response; the test's timeout bounds the wait.
+      await waitUntil(() => failures.length > 0, "the transaction to report its outcome");
+      expect(failures).toHaveLength(1);
       expect(failures[0]).toBeInstanceOf(DatabaseUnavailable);
       expect((failures[0] as DatabaseUnavailable).reason).toBe("commit_unknown");
 
@@ -114,7 +123,7 @@ describe("a COMMIT whose reply is lost at the deadline", () => {
       await proxy.close();
       await pool.end().catch(() => undefined);
     }
-  });
+  }, DATABASE_TEST_MS);
 });
 
 const publicIntake = { keySecrets: { current: KEY_SECRET }, publicBaseUrl: PUBLIC_BASE_URL };
@@ -173,12 +182,14 @@ describe("a public booking request under the request deadline", () => {
       await proxy.close();
       await pool.end().catch(() => undefined);
     }
-  });
+  }, DATABASE_TEST_MS);
 
   it("answers a retry that times out waiting on its key with 503, and a later replay returns the booking", async () => {
     // The original request takes its idempotency key lock, then stalls until released.
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
+    // The held transaction ends however the test ends.
+    onTestFinished(() => release());
     let holding!: () => void;
     const held = new Promise<void>((resolve) => { holding = resolve; });
     const runtime = createScopedDatabase(h.database.runtimePool);
@@ -224,5 +235,5 @@ describe("a public booking request under the request deadline", () => {
     expect(replay.status).toBe(201);
     expect(replay.body).toEqual((await original).body);
     expect(await bookings()).toHaveLength(1);
-  });
+  }, DATABASE_TEST_MS);
 });

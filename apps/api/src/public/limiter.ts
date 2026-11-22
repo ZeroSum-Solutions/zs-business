@@ -61,6 +61,8 @@ export function createMemoryRateLimiter(clock: { now(): Date }): RateLimiter {
   // Receipts live to the end of the latest window they touch (a refund after that changes nothing) and the
   // table is capped: an overflow drops the oldest receipt, which only means that charge cannot be refunded.
   const receipts = new Map<string, { expires: number; windows: { key: string; windowStart: number }[] }>();
+  // No receipt expires before this time, so a sweep before it would find nothing to drop.
+  let earliestExpiry = Number.POSITIVE_INFINITY;
   let nextReceipt = 0;
   const live = (bucket: { windowStart: number; windowMs: number } | undefined, now: number) =>
     bucket !== undefined && now - bucket.windowStart < bucket.windowMs;
@@ -92,11 +94,19 @@ export function createMemoryRateLimiter(clock: { now(): Date }): RateLimiter {
       const taken = take(charges);
       if (!taken.ok) return taken;
       const now = clock.now().getTime();
-      for (const [key, held] of receipts) if (held.expires <= now) receipts.delete(key);
+      if (now >= earliestExpiry) {
+        earliestExpiry = Number.POSITIVE_INFINITY;
+        for (const [key, held] of receipts) {
+          if (held.expires <= now) receipts.delete(key);
+          else earliestExpiry = Math.min(earliestExpiry, held.expires);
+        }
+      }
       while (receipts.size >= MAX_MEMORY_RECEIPTS) receipts.delete(receipts.keys().next().value as string);
       const id = `memory-receipt-${nextReceipt++}`;
       const windows = charges.map(({ key }) => ({ key, windowStart: buckets.get(key)!.windowStart }));
-      receipts.set(id, { expires: Math.max(...charges.map(({ key }) => buckets.get(key)!.windowStart + buckets.get(key)!.windowMs)), windows });
+      const expires = Math.max(...charges.map(({ key }) => buckets.get(key)!.windowStart + buckets.get(key)!.windowMs));
+      receipts.set(id, { expires, windows });
+      earliestExpiry = Math.min(earliestExpiry, expires);
       return { ok: true, receipt: { id } };
     },
     async refund(receipt, options) {

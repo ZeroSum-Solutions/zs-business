@@ -3,7 +3,7 @@
 // scopes allow, proposes only what an owner then decides, and stops at once when revoked or
 // expired. Fake data only: Halden & Rowe.
 import { randomUUID } from "node:crypto";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
@@ -34,7 +34,13 @@ const READ_TOOLS = [
 let h: ApiHarness;
 let clockMs = Date.parse(NOW);
 const clock = { now: () => new Date(clockMs) };
-beforeAll(async () => { h = await createApiHarness({ clock, activepieces: {} }); });
+// Real Postgres I/O on a possibly busy machine: generous budgets for the setup and the lock-wait
+// tests below. Nothing in them is timed against the wall clock.
+const DATABASE_TEST_MS = 120_000;
+beforeAll(async () => { h = await createApiHarness({ clock, activepieces: {} }); }, DATABASE_TEST_MS);
+/** Lock and statement timeouts, and a deadline, far past any test run: only the test ends a wait. */
+const PATIENT = { lockTimeoutMs: 600_000, statementTimeoutMs: 600_000 };
+const patientApp = () => appOnDatabase(createScopedDatabase(h.database.runtimePool, PATIENT), { clock, requestTimeoutMs: 600_000 });
 afterAll(async () => { await h?.close(); });
 
 /** The 20-active-token limit (W-15) is per tenant: each test's tokens are revoked when it ends. */
@@ -93,7 +99,7 @@ async function seedContact(tenant: TenantSetup, name: string) {
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 /** Waits for `what` with no wall-clock cap of its own: the test's timeout bounds it, at any machine speed. */
-const waitUntil = (condition: () => Promise<boolean>, _what: string) => poll(condition);
+const waitUntil = (condition: () => Promise<boolean>, what: string) => poll(condition, what);
 /** Runtime-role statements waiting on a lock whose text contains `needle`. */
 const lockWaiters = (needle: string) => queryCount(
   `SELECT count(*) AS n FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE $1`, [`%${needle}%`]);
@@ -112,20 +118,20 @@ async function holdTokenRow(tokenId: string) {
   };
 }
 /** The app's database with every statement logged, passed through unchanged below the scoped layer's checks. */
-function recording() {
+function recording(base: ScopedDatabase = h.database.db) {
   const sqls: string[] = [];
   const wrap = (tx: Transaction): Transaction => ({
     query: ((sql: string, params?: unknown[]) => { sqls.push(sql); return tx.query(sql as never, params as never); }) as Transaction["query"],
   });
   const db: ScopedDatabase = {
-    ...h.database.db,
-    tenant: (tenantId, work, options) => h.database.db.tenant(tenantId, (tx) => work(wrap(tx)), options),
-    withoutTenant: (work, options) => h.database.db.withoutTenant((tx) => work(wrap(tx)), options),
+    ...base,
+    tenant: (tenantId, work, options) => base.tenant(tenantId, (tx) => work(wrap(tx)), options),
+    withoutTenant: (work, options) => base.withoutTenant((tx) => work(wrap(tx)), options),
   };
   return { db, sqls };
 }
-const revokeToken = (tenant: TenantSetup, tokenId: string) =>
-  call(h.app, "POST", `/v1/integrations/activepieces/tokens/${tokenId}/revoke`, { token: tenant.token, key: randomUUID(), body: {} });
+const revokeToken = (tenant: TenantSetup, tokenId: string, app = h.app) =>
+  call(app, "POST", `/v1/integrations/activepieces/tokens/${tokenId}/revoke`, { token: tenant.token, key: randomUUID(), body: {} });
 const usageRows = (tokenId: string) => queryCount("SELECT count(*) AS n FROM automation_token_usage WHERE token_id=$1", [tokenId]);
 const failure = (reply: ToolReply) => {
   expect(reply.isError).toBe(true);
@@ -555,6 +561,8 @@ describe("deadline, disconnect and outage (H-5)", () => {
     const atStatement = new Promise<void>((resolve) => { reached = resolve; });
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
+    // The held transaction ends however the test ends.
+    onTestFinished(() => release());
     const outcomes: string[] = [];
     const db: ScopedDatabase = {
       ...h.database.db,
@@ -596,7 +604,7 @@ describe("deadline, disconnect and outage (H-5)", () => {
     expect(apiErrorBodySchema.parse(await response.json()).error.code).toBe("Unavailable");
     await waitUntil(async () => held.outcomes.length > 0, "the held statement to end");
     expect(held.outcomes).toEqual(["Database unavailable (aborted)"]);
-  });
+  }, DATABASE_TEST_MS);
 
   it("answers a database outage with 503 and Retry-After, whether it hits the token check or a read", async () => {
     const { secret } = await mint(owner(h.a), ["contacts:read"]);
@@ -622,7 +630,7 @@ describe("deadline, disconnect and outage (H-5)", () => {
     held.release();
     await waitUntil(async () => held.outcomes.length > 0, "the held statement to end");
     expect(held.outcomes).toEqual(["Database unavailable (aborted)"]);
-  });
+  }, DATABASE_TEST_MS);
 
   it("answers an already-aborted request at once, without a database statement", async () => {
     const { secret } = await mint(owner(h.a), ["contacts:read"]);
@@ -644,7 +652,8 @@ describe("deadline, disconnect and outage (H-5)", () => {
     const lock = await holdTokenRow(token.id);
     try {
       const gone = new AbortController();
-      const pending = Promise.resolve(h.app.fetch(new Request(URL_BASE, {
+      // Patient limits: only the client's disconnect can end the wait the test observes.
+      const pending = Promise.resolve(patientApp().fetch(new Request(URL_BASE, {
         method: "POST", headers: headersFor(secret), signal: gone.signal,
         body: JSON.stringify(callTool("propose_contact_upsert", { idempotencyKey: randomUUID(), email: `gone-${randomUUID().slice(0, 6)}@haldenrowe.example` })),
       }))).then((reply) => reply.status, () => 0);
@@ -659,12 +668,13 @@ describe("deadline, disconnect and outage (H-5)", () => {
       await lock.release();
     }
     expect(await approvals()).toBe(before);
-  });
+  }, DATABASE_TEST_MS);
 
   it("refuses a read that waited on the token row past its expiry, before any business query runs (K8)", async () => {
     const { secret, token } = await mint(owner(h.a), ["contacts:read"], { expiresInDays: 1 });
-    const seen = recording();
-    const app = appOnDatabase(seen.db, { clock });
+    // Patient limits: the read waits on the row until the test releases it.
+    const seen = recording(createScopedDatabase(h.database.runtimePool, PATIENT));
+    const app = appOnDatabase(seen.db, { clock, requestTimeoutMs: 600_000 });
     const lock = await holdTokenRow(token.id);
     try {
       const pending = rpc(app, secret, callTool("list_contacts"));
@@ -681,7 +691,7 @@ describe("deadline, disconnect and outage (H-5)", () => {
     expect(seen.sqls.filter((sql) => /FROM crm_contacts/i.test(sql))).toEqual([]);
     // A 401 mid-request is not use: nothing was recorded.
     expect(await usageRows(token.id)).toBe(0);
-  });
+  }, DATABASE_TEST_MS);
 
   it("lets an in-flight read finish and stops the next one when an owner revokes meanwhile", async () => {
     const { secret, token } = await mint(owner(h.a), ["contacts:read"]);
@@ -691,7 +701,7 @@ describe("deadline, disconnect and outage (H-5)", () => {
     const pending = rpc(app, secret, callTool("list_contacts", { search: seeded.email }));
     await held.atStatement;
     let revoked = false;
-    const revoking = revokeToken(h.a, token.id).then((reply) => { revoked = true; return reply; });
+    const revoking = revokeToken(h.a, token.id, patientApp()).then((reply) => { revoked = true; return reply; });
     await waitUntil(async () => (await lockWaiters("automation_tokens")) > 0, "the revoke to wait for the read");
     await sleep(300);
     expect(revoked).toBe(false);
@@ -701,7 +711,7 @@ describe("deadline, disconnect and outage (H-5)", () => {
     expect(text({ content: (await read.json()).result.content }).items.map((item: { id: string }) => item.id)).toEqual([seeded.contactId]);
     expect((await revoking).status).toBe(200);
     expect((await rpc(app, secret, callTool("list_contacts"))).status).toBe(401);
-  });
+  }, DATABASE_TEST_MS);
 
   it("lets an in-flight proposal commit, then refuses its replay and any new proposal after a revoke", async () => {
     const { secret, token } = await mint(owner(h.a), ["contacts:propose"]);
@@ -713,7 +723,7 @@ describe("deadline, disconnect and outage (H-5)", () => {
     const pending = rpc(app, secret, proposal);
     await held.atStatement;
     let revoked = false;
-    const revoking = revokeToken(h.a, token.id).then((reply) => { revoked = true; return reply; });
+    const revoking = revokeToken(h.a, token.id, patientApp()).then((reply) => { revoked = true; return reply; });
     await waitUntil(async () => (await lockWaiters("automation_tokens")) > 0, "the revoke to wait for the proposal");
     await sleep(300);
     expect(revoked).toBe(false);
@@ -726,7 +736,7 @@ describe("deadline, disconnect and outage (H-5)", () => {
     // The same proposal again is a replay of a stored answer; a revoked token gets no stored answer.
     expect((await rpc(app, secret, proposal)).status).toBe(401);
     expect((await rpc(app, secret, callTool("propose_contact_upsert", { idempotencyKey: randomUUID(), email: "new@haldenrowe.example" }))).status).toBe(401);
-  });
+  }, DATABASE_TEST_MS);
 });
 
 describe("expiry (H-1)", () => {
@@ -871,7 +881,7 @@ describe("usage under pressure and by definition (H-8)", () => {
       holder.release();
     }
     expect(await usageRows(token.id)).toBe(0);
-  });
+  }, DATABASE_TEST_MS);
 
   it("counts SDK errors as refusals, an outage as a request only, and a 401 as nothing", async () => {
     const { secret, token } = await mint(owner(h.a), ["contacts:read"]);
@@ -909,7 +919,7 @@ describe("usage under pressure and by definition (H-8)", () => {
     expect((await rpc(fresh, secret, callTool("get_business"))).status).toBe(200);
     await waitUntil(async () => (await old()) === 0, "the old usage rows to be pruned");
     expect(await usageRows(token.id)).toBe(1);
-  });
+  }, DATABASE_TEST_MS);
 });
 
 describe("the REST endpoint beside /mcp (W-9, W-13, K1, K2, K9)", () => {
