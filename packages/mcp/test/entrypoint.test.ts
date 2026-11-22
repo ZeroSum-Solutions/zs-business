@@ -75,14 +75,17 @@ it("keeps serving tools after its idle database connection is terminated", async
   onTestFinished(() => client.close());
   onTestFailed(() => { console.error(`MCP child stderr:\n${stderr}`); });
   await client.connect(transport);
-  const first = await client.callTool({ name: "list_resources", arguments: {} }) as CallToolResult;
-  expect(first.isError, JSON.stringify(first)).toBeFalsy();
-  // Only the child logs in as the runtime role in this database; end its idle connection.
-  const { rows } = await database.pool.query<{ n: number }>(
+  // Only the child logs in as the runtime role in this database; end its idle connection. The
+  // pool closes a connection after 10 s idle, which a slow machine can outlast between the call
+  // and the terminate, so call again until a terminate finds one. Only the count matters.
+  const terminate = async () => (await database.pool.query<{ n: number }>(
     `SELECT count(*) FILTER (WHERE pg_terminate_backend(pid))::int AS n FROM pg_stat_activity
       WHERE datname = current_database() AND usename = 'zs_runtime'`,
-  );
-  expect(rows[0]?.n).toBeGreaterThan(0);
+  )).rows[0]?.n ?? 0;
+  do {
+    const first = await client.callTool({ name: "list_resources", arguments: {} }) as CallToolResult;
+    expect(first.isError, JSON.stringify(first)).toBeFalsy();
+  } while (await terminate() === 0);
   // The pool logs the lost connection (57P01) and the child carries on to serve below.
   while (!stderr.includes("57P01")) {
     if (closed) throw new Error(`MCP child exited before logging 57P01: ${stderr}`);

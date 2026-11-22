@@ -126,13 +126,19 @@ describe("API entry point", () => {
   it("survives a terminated idle connection and serves the next request on a new one", async () => {
     const api = await startApi();
     try {
-      // Startup checked the runtime login, so the pool holds one idle connection now.
-      expect(await terminateRuntimeBackends()).toBeGreaterThan(0);
+      // Startup checked the runtime login, so the pool holds one idle connection. The pool closes
+      // a connection after 10 s idle, which a slow machine can outlast before this line runs; a
+      // read then leaves a fresh idle one to terminate. Only the count matters, not the timing.
+      const token = await memberToken();
+      while (await terminateRuntimeBackends() === 0) {
+        const read = await fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, { headers: { Authorization: `Bearer ${token}` } });
+        await read.body?.cancel();
+        expect(read.status).toBe(200);
+      }
       // The pool logs the lost connection (57P01) and the process carries on to serve below.
       await logged(api, "57P01");
       expect(api.exited(), api.output()).toBeNull();
 
-      const token = await memberToken();
       const response = await fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, {
         headers: { Authorization: `Bearer ${token}` },
       });

@@ -1,6 +1,6 @@
 // G-6..G-10: the calendar worker against the real local Postgres with an in-memory Google stub.
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { createBookingCommandSchema, type ActionBinding } from "@zs/contracts";
 import { asService } from "@zs/db";
 import {
@@ -33,6 +33,10 @@ import {
 
 const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
+// Every test here does real Postgres I/O, which a busy machine slows; no assertion is timed
+// against it, so the file gets generous test and hook timeouts.
+const DATABASE_TEST_MS = 120_000;
+vi.setConfig({ testTimeout: DATABASE_TEST_MS, hookTimeout: DATABASE_TEST_MS });
 let h: CalendarHarness;
 beforeAll(async () => { h = await createCalendarHarness(); });
 afterAll(async () => { await h?.close(); });
@@ -51,6 +55,43 @@ interface World {
   token: string;
   connectionId: string;
 }
+/**
+ * A Google call that parks: it hands the test the abort signal the worker gave it, then answers
+ * after `answerAfterMs` of fake time (never when undefined).
+ */
+function parkedCall(answerAfterMs?: number) {
+  let reached!: (signal: AbortSignal) => void;
+  const parked = new Promise<AbortSignal>((resolve) => { reached = resolve; });
+  const hook = (...args: unknown[]) => {
+    const options = args.at(-1) as { signal?: AbortSignal } | undefined;
+    if (!options?.signal) throw new Error("the worker passed no abort signal");
+    reached(options.signal);
+    return new Promise<void>((resolve) => { if (answerAfterMs !== undefined) setTimeout(resolve, answerAfterMs); });
+  };
+  return { parked, hook };
+}
+
+/**
+ * Runs `start` with setTimeout faked, waits until the run is parked in a Google call, and shows
+ * that the worker ends that call exactly when the run's `leftMs` are used up: its signal is not
+ * aborted one fake millisecond earlier, and is aborted at the deadline. The manual clock moves to
+ * the deadline with the timers, so later calls see no time left. No wall clock is read.
+ */
+async function endsAtDeadline<T>(clock: ManualClock, start: () => Promise<T>, parked: Promise<AbortSignal>, leftMs: number): Promise<T> {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  onTestFinished(() => { vi.useRealTimers(); });
+  const pending = start();
+  pending.catch(() => undefined);
+  const signal = await Promise.race([parked, pending.then(() => { throw new Error("the run ended before the call parked"); })]);
+  await vi.advanceTimersByTimeAsync(leftMs - 1);
+  expect(signal.aborted, "the call ended before the run's deadline").toBe(false);
+  clock.advance(leftMs);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(signal.aborted, "the call outlived the run's deadline").toBe(true);
+  vi.useRealTimers();
+  return pending;
+}
+
 async function world(options: { pageSize?: number; delayMs?: number; timeZone?: string } = {}): Promise<World> {
   const clock = manualClock();
   const google = stubGoogle(clock, options);
@@ -335,10 +376,11 @@ describe("sync (G-6, G-7)", () => {
     // The worker's apply transaction waits on the same advisory lock. No try cap: on a busy
     // machine the worker can take seconds to get there, and the test timeout bounds the wait.
     let waiting = 0;
-    while (waiting === 0) {
+    onTestFinished(() => { release(); });
+    while (waiting === 0 && !finished) {
       waiting = Number((await h.database.pool.query<{ n: string }>(
         "SELECT count(*) AS n FROM pg_locks WHERE locktype='advisory' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database())")).rows[0]!.n);
-      if (waiting === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+      if (waiting === 0 && !finished) await new Promise((resolve) => setTimeout(resolve, 20));
     }
     expect(waiting).toBe(1);
     expect(finished).toBe(false);
@@ -629,14 +671,15 @@ describe("push notifications and channels (G-8)", () => {
   });
 
   it("channel calls end with the run's deadline, and none starts once no time is left (G-10)", async () => {
-    // A slow call answers after 3 s, well inside the 10 s request timeout: only the cut to the
-    // 100 ms the run has left can fail it. The outcome proves the cut, not the elapsed time.
-    const slow = () => new Promise<void>((resolve) => setTimeout(resolve, 3000));
+    // A slow call would answer after 3 s, well inside the 10 s request timeout: only the cut to
+    // the 100 ms the run has left can end it, and it must end at exactly those 100 ms.
     // A slow watch: cut at the 100 ms left; the sync still applies.
     const v = await world();
-    v.google.fail("watch", slow);
-    expect(await h.worker(v.google, v.clock, { webhookUrl: WEBHOOK_URL })
-      .runOnce({ deadline: new Date(v.clock.now().getTime() + 100) }))
+    const watch = parkedCall(3000);
+    v.google.fail("watch", watch.hook);
+    const opener = h.worker(v.google, v.clock, { webhookUrl: WEBHOOK_URL });
+    const deadlineV = new Date(v.clock.now().getTime() + 100);
+    expect(await endsAtDeadline(v.clock, () => opener.runOnce({ deadline: deadlineV }), watch.parked, 100))
       .toMatchObject({ synced: 1, channelsOpened: 0, channelFailures: 1 });
 
     // Renewal: a slow stop of the old channel is cut the same way.
@@ -645,8 +688,10 @@ describe("push notifications and channels (G-8)", () => {
     await worker.runOnce();
     w.clock.set(START + CHANNEL_TTL_MS - DAY + MINUTE);
     w.google.reset();
-    w.google.fail("stopChannel", slow);
-    expect(await worker.runOnce({ deadline: new Date(w.clock.now().getTime() + 100) }))
+    const stop = parkedCall(3000);
+    w.google.fail("stopChannel", stop.hook);
+    const deadlineW = new Date(w.clock.now().getTime() + 100);
+    expect(await endsAtDeadline(w.clock, () => worker.runOnce({ deadline: deadlineW }), stop.parked, 100))
       .toMatchObject({ synced: 1, channelsOpened: 1, channelsStopped: 0 });
 
     // A watch that uses up the run: the old channel is not stopped at all; it expires on its own.
@@ -923,21 +968,26 @@ describe("deadline (G-10)", () => {
   });
 
   it("bounds each Google call by the time the run has left", async () => {
-    const w = await world({ delayMs: 400 });
+    const w = await world();
     w.google.put(w.token, timed("busy", "2026-10-21T10:00:00Z", "2026-10-21T11:00:00Z"));
+    const list = parkedCall(400);
+    w.google.fail("listEvents", list.hook);
     const worker = h.worker(w.google, w.clock);
     // 50 ms left: the 10 s request timeout would outlast the run, so the call ends with the
     // deadline. Without the cut the 400 ms answer would arrive and the sync would succeed.
-    expect(await worker.runOnce({ deadline: new Date(START + 50) })).toMatchObject({ synced: 0, syncFailed: 1 });
+    expect(await endsAtDeadline(w.clock, () => worker.runOnce({ deadline: new Date(START + 50) }), list.parked, 50))
+      .toMatchObject({ synced: 0, syncFailed: 1 });
     expect(await h.connectionRow(w.resource.tenantId, w.connectionId)).toMatchObject({ lease_until: null, last_error: "run_deadline" });
   });
 
   it("bounds a token refresh by the time the run has left", async () => {
     const w = await world();
-    w.google.fail("refreshAccessToken", () => new Promise<void>(() => {}));
+    const refresh = parkedCall();
+    w.google.fail("refreshAccessToken", refresh.hook);
     // Without the cut the refresh would end at the 400 ms request timeout as google_timeout.
     const worker = h.worker(w.google, w.clock, { requestTimeoutMs: 400 });
-    expect(await worker.runOnce({ deadline: new Date(START + 40) })).toMatchObject({ synced: 0, syncFailed: 1 });
+    expect(await endsAtDeadline(w.clock, () => worker.runOnce({ deadline: new Date(START + 40) }), refresh.parked, 40))
+      .toMatchObject({ synced: 0, syncFailed: 1 });
     expect(await h.connectionRow(w.resource.tenantId, w.connectionId)).toMatchObject({ lease_until: null, last_error: "run_deadline" });
   });
 
