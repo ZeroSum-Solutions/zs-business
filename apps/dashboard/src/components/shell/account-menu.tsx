@@ -1,6 +1,6 @@
 "use client";
 
-import { CaretDown, CreditCard, GearSix, LinkSimple, ListChecks, SignOut } from "@phosphor-icons/react";
+import { CaretDown, ClockCounterClockwise, CreditCard, GearSix, LinkSimple, ListChecks, SignOut } from "@phosphor-icons/react";
 import Link from "next/link";
 import { DropdownMenu } from "radix-ui";
 import { type Identity, MANAGE_BUSINESS, useCan, useIdentity, useSession } from "@/lib/session";
@@ -23,15 +23,18 @@ const ITEMS = [
   { href: "/account/connections", label: "Connections", icon: LinkSimple },
   { href: "/account/plan", label: "Plan", icon: CreditCard },
 ];
-/** Owners keep a link to first-run setup (industry-templates.md IT-7). */
-const SETUP_ITEM = { href: "/setup", label: "Setup", icon: ListChecks };
+/** Owners keep a link to first-run setup (industry-templates.md IT-7) and read the action log (B05). */
+const OWNER_ITEMS = [
+  { href: "/account/activity", label: "Activity", icon: ClockCounterClockwise },
+  { href: "/setup", label: "Setup", icon: ListChecks },
+];
 
 /** `header`: the desktop header (name and role from xl up). `topbar`: the phone bar, avatar only. */
 export function AccountMenu({ variant }: { variant: "header" | "topbar" }) {
   const { signOut } = useSession();
   const identity = useIdentity();
   const owner = useCan(MANAGE_BUSINESS);
-  const items = owner ? [...ITEMS, SETUP_ITEM] : ITEMS;
+  const items = owner ? [...ITEMS, ...OWNER_ITEMS] : ITEMS;
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger

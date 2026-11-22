@@ -22,7 +22,7 @@ import {
   type SlotQuery,
   type ThreadSummary,
 } from "./api";
-import type { BillingPlan, BookingRecord, BusinessProfile, ImageVariant, SlotsResponse, TemplatedKind } from "@zs/contracts";
+import type { ActionLogEntry, BillingPlan, BookingRecord, BusinessProfile, ImageVariant, SlotsResponse, TemplatedKind } from "@zs/contracts";
 import { preferNewerDeals } from "./deal-merge";
 import { newerProfile } from "./business-profile";
 
@@ -51,6 +51,9 @@ export const keys = {
   results: (query: HomeResultsQuery) => ["home", "results", query] as const,
   resultsAll: ["home", "results"] as const,
   /** Pages of the thread list, latest activity first. */
+  /** The owner's action log and one receipt (backlog B05). */
+  actions: ["actions", "list"] as const,
+  action: (id: string) => ["actions", "detail", id] as const,
   threads: ["inbox", "threads"] as const,
   thread: (id: string) => ["inbox", "thread", id] as const,
   inboxAll: ["inbox"] as const,
@@ -356,6 +359,26 @@ export function useWallet(canRead: boolean) {
     enabled: enabled && canRead, queryKey: keys.wallet, queryFn: ({ signal }) => api.getWallet({ signal }),
     refetchInterval: WALLET_POLL_MS, refetchOnWindowFocus: true,
   });
+}
+
+/** The owner's action log, a page at a time by keyset cursor (B05). Owners only. */
+export function useActionLog(allowed: boolean) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useInfiniteQuery({
+    enabled: enabled && allowed,
+    queryKey: keys.actions,
+    queryFn: ({ pageParam, signal }) => api.listActions(pageParam ? { cursor: pageParam } : {}, { signal }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last: Page<ActionLogEntry>) => last.nextCursor ?? undefined,
+  });
+}
+
+/** One action's receipt (B05). Owners only. */
+export function useActionReceipt(id: string, allowed: boolean) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({ enabled: enabled && allowed, queryKey: keys.action(id), queryFn: ({ signal }) => api.getAction(id, { signal }) });
 }
 
 /** The inbox list, a page at a time by keyset cursor (inbox-home.md I-8). */

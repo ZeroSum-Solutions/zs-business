@@ -12,6 +12,8 @@ const PAGES = [
   { path: "/agents", heading: "Agents" },
   { path: "/account/settings", heading: "Settings" },
   { path: "/account/connections", heading: "Connections" },
+  { path: "/account/activity", heading: "Activity" },
+  { path: "/account/activity/5d3f9b21-7c4e-4a6b-8f82-1e3d5c7b9f01", heading: "Receipt" },
   { path: "/account/plan", heading: "Plan" },
   { path: "/setup", heading: "Setup" },
 ];

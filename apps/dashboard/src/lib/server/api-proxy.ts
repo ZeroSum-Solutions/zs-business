@@ -28,8 +28,8 @@ export { liveSetupFromEnv } from "./live-config";
 
 const SEGMENT = /^[A-Za-z0-9_-]+$/;
 /** Areas with sub-paths, and the single-segment routes. */
-const AREAS = new Set(["booking", "crm", "contacts", "enrichment", "intake", "members", "approvals", "sources", "inbox", "home", "agents", "sites", "calendar", "transcriptions", "document-intake", "browser", "media", "setup"]);
-const SINGLE = new Set(["me", "members", "approvals", "sources", "sites", "business", "transcriptions", "browser", "setup"]);
+const AREAS = new Set(["actions", "booking", "crm", "contacts", "enrichment", "intake", "members", "approvals", "sources", "inbox", "home", "agents", "sites", "calendar", "transcriptions", "document-intake", "browser", "media", "setup"]);
+const SINGLE = new Set(["actions", "me", "members", "approvals", "sources", "sites", "business", "transcriptions", "browser", "setup"]);
 const METHODS = new Set(["GET", "POST", "PUT", "DELETE"]);
 /** Methods that carry a JSON body. */
 const WITH_BODY = new Set(["POST", "PUT"]);
