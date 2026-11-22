@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { expect, onTestFinished, vi } from "vitest";
 import { createDealOutputSchema, createOrFindContactOutputSchema } from "@zs/contracts";
 import {
   createTestDatabase,
@@ -16,6 +17,7 @@ import {
   createHs256Verifier,
   createPostgresRateLimiter,
   type App,
+  type AppConfig,
   type PublicIntakeConfig,
   type RateLimiter,
   type SignInLimitConfig,
@@ -151,6 +153,8 @@ export interface HarnessOptions {
   /** Turns the /v1/document-intake and /v1/workers/document-intake routes on over an in-memory PDF store. */
   documentIntake?: boolean;
   clock?: { now(): Date };
+  /** Request deadline and /mcp usage-write budget; tests that load the database raise them. */
+  config?: Pick<AppConfig, "requestTimeoutMs" | "usageWriteTimeoutMs">;
   /** Turns the /v1/sites routes on over this store and compiler. */
   sites?: { store: SiteObjectStore; compiler: SiteCompiler; syncTimeoutMs?: number };
   /** Turns the /v1/media routes on over this store and image config (image-port.md IM-22). */
@@ -174,7 +178,7 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
     clock: appClock,
     db: database.db,
     generateId: randomUUID,
-    config: { allowedOrigins: [ORIGIN] },
+    config: { allowedOrigins: [ORIGIN], ...options.config },
     ...(options.enrichment ? { enrichment: options.enrichment } : {}),
     ...(options.publicIntake
       ? { publicIntake: {
@@ -225,7 +229,7 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
  * statements), with the Activepieces routes and the remote MCP endpoint on. Owner tokens from
  * `ApiHarness.a.token` work on it as long as `clock` does not pass their hour.
  */
-export function appOnDatabase(db: ScopedDatabase, options: { clock?: { now(): Date }; onError?: (error: unknown) => void; activepieces?: boolean; requestTimeoutMs?: number; signInLimit?: { limiter?: RateLimiter; secrets?: SignInLimitConfig["secrets"] }; sites?: { store: SiteObjectStore; compiler: SiteCompiler } } = {}): App {
+export function appOnDatabase(db: ScopedDatabase, options: { clock?: { now(): Date }; onError?: (error: unknown) => void; activepieces?: boolean; requestTimeoutMs?: number; usageWriteTimeoutMs?: number; signInLimit?: { limiter?: RateLimiter; secrets?: SignInLimitConfig["secrets"] }; sites?: { store: SiteObjectStore; compiler: SiteCompiler } } = {}): App {
   const appClock = options.clock ?? clock;
   return createApp({
     verifier: createHs256Verifier(SECRET, { clock: appClock }),
@@ -233,7 +237,11 @@ export function appOnDatabase(db: ScopedDatabase, options: { clock?: { now(): Da
     clock: appClock,
     db,
     generateId: randomUUID,
-    config: { allowedOrigins: [ORIGIN], ...(options.requestTimeoutMs ? { requestTimeoutMs: options.requestTimeoutMs } : {}) },
+    config: {
+      allowedOrigins: [ORIGIN],
+      ...(options.requestTimeoutMs ? { requestTimeoutMs: options.requestTimeoutMs } : {}),
+      ...(options.usageWriteTimeoutMs === undefined ? {} : { usageWriteTimeoutMs: options.usageWriteTimeoutMs }),
+    },
     ...(options.activepieces === false ? {} : { activepieces: { keySecrets: { current: ACTIVEPIECES_KEY_SECRET } } }),
     ...(options.onError ? { onError: options.onError } : {}),
     ...(options.sites ? { sites: options.sites } : {}),
@@ -299,4 +307,44 @@ export async function provisionPage(
       );
   });
   return { pageId, key: signBookingKey(KEY_SECRET, { tenantId: tenant.tenantId, pageId }) };
+}
+
+/**
+ * A request deadline on a timer the test moves, so the deadline holds at any machine speed.
+ * `request` runs with setTimeout and clearTimeout faked (socket and database I/O run as usual).
+ * Once `parked` resolves (the request waits where the test wants it), the request must still be
+ * unanswered 1 ms before `deadlineMs` and answer once that passes; then real timers come back.
+ */
+export async function answeredAtDeadline<T>(request: () => Promise<T>, parked: Promise<unknown>, deadlineMs: number): Promise<T> {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  // Real timers come back even when the request hangs and the test times out.
+  onTestFinished(() => { vi.useRealTimers(); });
+  try {
+    let settled = false;
+    const pending = request().finally(() => { settled = true; });
+    pending.catch(() => undefined); // a rejection is the caller's to see; never an unhandled one
+    await Promise.race([parked, pending]);
+    await vi.advanceTimersByTimeAsync(deadlineMs - 1);
+    expect(settled, "answered before the deadline").toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    return await pending;
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
+/**
+ * Polls `condition` every 25 ms. No wall-clock cap of its own: the test's timeout bounds it.
+ * `what` names the wait in the failure when the test ends first.
+ */
+export async function waitUntil(condition: () => Promise<boolean> | boolean, what = "a condition"): Promise<void> {
+  let done = false;
+  onTestFinished(() => { done = true; });
+  const ended = () => new Error(`the test ended while waiting for ${what}`);
+  for (;;) {
+    if (done) throw ended();
+    if (await condition()) break;
+    if (done) throw ended();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
 }

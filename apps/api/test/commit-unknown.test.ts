@@ -1,30 +1,38 @@
 import { randomUUID } from "node:crypto";
 import { createServer, connect, type Socket } from "node:net";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, onTestFinished } from "vitest";
 import { apiErrorBodySchema, createOrFindContactOutputSchema, publicBookingReplySchema } from "@zs/contracts";
 import { createLocalStubSessionCheck } from "@zs/core";
 import { createRuntimePool, createScopedDatabase, DatabaseUnavailable, type ScopedDatabase, type Transaction } from "@zs/db";
 import { createApp, createHs256Verifier } from "../src/app.js";
 import {
-  call, clock, createApiHarness, KEY_SECRET, ORIGIN, provisionPage, PUBLIC_BASE_URL, SECRET, type ApiHarness,
+  answeredAtDeadline, call, clock, createApiHarness, KEY_SECRET, ORIGIN, provisionPage, PUBLIC_BASE_URL, SECRET, type ApiHarness, waitUntil,
 } from "./helpers.js";
+
+// Real Postgres I/O through a proxy on a possibly busy machine: generous budgets, nothing timed.
+const DATABASE_TEST_MS = 120_000;
 
 let h: ApiHarness;
 // Public routes on, so a public request's replay goes through the same app as an owner's.
-beforeAll(async () => { h = await createApiHarness({ publicIntake: {} }); });
+beforeAll(async () => { h = await createApiHarness({ publicIntake: {} }); }, DATABASE_TEST_MS);
 afterAll(async () => { await h?.close(); });
 
 /**
  * A TCP proxy to the test database, as the runtime login, that passes a write's COMMIT on to
  * Postgres but never passes the answer back: the commit happens and its reply is lost. Read-only
- * transactions (the membership check before the action) commit normally.
+ * transactions (the membership check before the action) commit normally. `stalled` resolves
+ * once a COMMIT's reply has been held back.
  */
 async function commitReplyLosingProxy(databaseUrl: string) {
   const target = new URL(databaseUrl);
   const sockets = new Set<Socket>();
+  let held!: () => void;
+  const stalled = new Promise<void>((resolve) => { held = resolve; });
   const server = createServer((client) => {
     let wrote = false;
     let stalled = false;
+    // The end of the previous chunk: a marker can straddle two TCP chunks.
+    let tail = Buffer.alloc(0);
     const upstream = connect(Number(target.port || 5432), target.hostname);
     for (const socket of [client, upstream]) {
       sockets.add(socket);
@@ -33,10 +41,13 @@ async function commitReplyLosingProxy(databaseUrl: string) {
     }
     client.on("data", (chunk: Buffer) => {
       upstream.write(chunk);
-      if (chunk.includes("INSERT INTO")) wrote = true;
+      const seen = Buffer.concat([tail, chunk]);
+      tail = seen.subarray(Math.max(0, seen.length - 16));
+      if (seen.includes("INSERT INTO")) wrote = true;
       // The simple-query message for COMMIT ends in its NUL; "READ COMMITTED" does not match.
-      if (wrote && chunk.includes("COMMIT\0")) stalled = true;
+      if (wrote && seen.includes("COMMIT\0")) stalled = true;
     });
+    upstream.on("data", () => { if (stalled) held(); });
     upstream.on("data", (chunk) => { if (!stalled) client.write(chunk); });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -47,12 +58,15 @@ async function commitReplyLosingProxy(databaseUrl: string) {
   url.port = String((server.address() as { port: number }).port);
   return {
     url: url.href,
+    stalled,
     close: async () => {
       for (const socket of sockets) socket.destroy();
       await new Promise((resolve) => server.close(resolve));
     },
   };
 }
+
+const DEADLINE_MS = 30_000;
 
 describe("a COMMIT whose reply is lost at the deadline", () => {
   it("answers 503, reports the outcome as unknown, and the retry with the same key replays the committed contact", async () => {
@@ -72,16 +86,19 @@ describe("a COMMIT whose reply is lost at the deadline", () => {
       clock,
       db,
       generateId: randomUUID,
-      config: { allowedOrigins: [ORIGIN], requestTimeoutMs: 500 },
+      config: { allowedOrigins: [ORIGIN], requestTimeoutMs: DEADLINE_MS },
     });
     try {
       const key = randomUUID();
       const body = { displayName: "Lost Reply", email: "lost-reply@example.com" };
-      const first = await call(stalling, "POST", "/v1/crm/contacts", { token: h.a.token, key, body });
+      const first = await answeredAtDeadline(
+        () => call(stalling, "POST", "/v1/crm/contacts", { token: h.a.token, key, body }), proxy.stalled, DEADLINE_MS);
       expect(first.status).toBe(503);
       expect(apiErrorBodySchema.parse(first.body).error.code).toBe("Unavailable");
       // The transaction says its COMMIT may have applied, not that nothing committed.
-      await expect.poll(() => failures.length, { timeout: 1000, interval: 50 }).toBe(1);
+      // The transaction reports after the response; the test's timeout bounds the wait.
+      await waitUntil(() => failures.length > 0, "the transaction to report its outcome");
+      expect(failures).toHaveLength(1);
       expect(failures[0]).toBeInstanceOf(DatabaseUnavailable);
       expect((failures[0] as DatabaseUnavailable).reason).toBe("commit_unknown");
 
@@ -106,7 +123,7 @@ describe("a COMMIT whose reply is lost at the deadline", () => {
       await proxy.close();
       await pool.end().catch(() => undefined);
     }
-  });
+  }, DATABASE_TEST_MS);
 });
 
 const publicIntake = { keySecrets: { current: KEY_SECRET }, publicBaseUrl: PUBLIC_BASE_URL };
@@ -142,16 +159,14 @@ describe("a public booking request under the request deadline", () => {
       clock,
       db: createScopedDatabase(pool),
       generateId: randomUUID,
-      config: { allowedOrigins: [ORIGIN], requestTimeoutMs: 500 },
+      config: { allowedOrigins: [ORIGIN], requestTimeoutMs: DEADLINE_MS },
       publicIntake,
     });
     try {
       const { path, body, bookings } = await bookablePage();
       const key = randomUUID();
-      const started = Date.now();
-      const first = await call(stalling, "POST", path, { key, body });
       // Before this was bounded the request waited for a reply that never came.
-      expect(Date.now() - started).toBeLessThan(5000);
+      const first = await answeredAtDeadline(() => call(stalling, "POST", path, { key, body }), proxy.stalled, DEADLINE_MS);
       expect(first.status).toBe(503);
       expect(apiErrorBodySchema.parse(first.body).error.code).toBe("Unavailable");
       expect(first.headers.get("retry-after")).toBe("1");
@@ -167,12 +182,14 @@ describe("a public booking request under the request deadline", () => {
       await proxy.close();
       await pool.end().catch(() => undefined);
     }
-  });
+  }, DATABASE_TEST_MS);
 
   it("answers a retry that times out waiting on its key with 503, and a later replay returns the booking", async () => {
     // The original request takes its idempotency key lock, then stalls until released.
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
+    // The held transaction ends however the test ends.
+    onTestFinished(() => release());
     let holding!: () => void;
     const held = new Promise<void>((resolve) => { holding = resolve; });
     const runtime = createScopedDatabase(h.database.runtimePool);
@@ -200,12 +217,14 @@ describe("a public booking request under the request deadline", () => {
       clock,
       db,
       generateId: randomUUID,
-      config: { allowedOrigins: [ORIGIN], requestTimeoutMs: 10_000 },
+      // Far past the 200 ms lock wait, so the timeout is the lock's own at any machine speed.
+      config: { allowedOrigins: [ORIGIN], requestTimeoutMs: 600_000 },
       publicIntake,
     });
     const { path, body, bookings } = await bookablePage();
     const key = randomUUID();
     const original = call(app(slow), "POST", path, { key, body });
+    original.catch(() => undefined); // awaited below; never an unhandled rejection if the test fails first
     await held;
     // A short lock wait, well inside the deadline, so the timeout is the lock's own.
     const retry = await call(app(createScopedDatabase(h.database.runtimePool, { lockTimeoutMs: 200 })), "POST", path, { key, body });
@@ -217,5 +236,5 @@ describe("a public booking request under the request deadline", () => {
     expect(replay.status).toBe(201);
     expect(replay.body).toEqual((await original).body);
     expect(await bookings()).toHaveLength(1);
-  });
+  }, DATABASE_TEST_MS);
 });

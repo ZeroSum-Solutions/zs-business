@@ -4,14 +4,20 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, onTestFailed, onTestFinished } from "vitest";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
+import { parseServerEnv } from "../src/config.js";
 import { signDevToken } from "../src/dev-token.js";
+import { createServer as createApiServer } from "../src/server.js";
 import { KEY_SECRET, signedInMember } from "./helpers.js";
 
 const SECRET = ["entry", "point", "x".repeat(32)].join("-");
 const API_DIR = fileURLToPath(new URL("..", import.meta.url));
 const TSX = fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
+// A child process starts tsx, compiles the app and checks the runtime login before it listens.
+// On a busy machine that alone can take tens of seconds, so each test gets a generous budget;
+// nothing below waits a fixed time for the child or times how long it took.
+const CHILD_TEST_MS = 180_000;
 
 let database: TestDatabase;
 let fixture: TwoTenantFixture;
@@ -34,6 +40,19 @@ interface Running {
   stop(): Promise<void>;
 }
 
+/** Ends the child: SIGTERM, then SIGKILL if it has not exited 10 s later. */
+async function kill(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = once(child, "exit");
+  child.kill("SIGTERM");
+  const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
+  try {
+    await exited;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function startApi(extraEnv: Record<string, string> = {}): Promise<Running> {
   const port = await freePort();
   const url = new URL(database.url);
@@ -52,28 +71,39 @@ async function startApi(extraEnv: Record<string, string> = {}): Promise<Running>
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
+  // Registered before anything can fail: the child never outlives its test.
+  onTestFinished(() => kill(child));
   let output = "";
   let exitCode: number | null = null;
-  child.stdout?.on("data", (chunk: Buffer) => { output += chunk.toString(); });
-  child.stderr?.on("data", (chunk: Buffer) => { output += chunk.toString(); });
-  child.on("exit", (code) => { exitCode = code ?? -1; });
-  for (let i = 0; i < 200 && !output.includes("listening") && exitCode === null; i += 1)
-    await new Promise((resolve) => setTimeout(resolve, 50));
+  let changed = () => {};
+  const onOutput = (chunk: Buffer) => { output += chunk.toString(); changed(); };
+  child.stdout?.on("data", onOutput);
+  child.stderr?.on("data", onOutput);
+  child.on("exit", (code) => { exitCode = code ?? -1; changed(); });
+  // A spawn failure ends the wait below as a failed start instead of crashing the test worker.
+  child.on("error", (error) => { output += `\nspawn error: ${error.message}`; exitCode ??= -1; changed(); });
+  // Started once it says so, or failed once it exits; the test timeout bounds the wait.
+  await new Promise<void>((resolve) => {
+    changed = () => { if (exitCode !== null || output.includes("listening")) resolve(); };
+    changed();
+  });
   if (exitCode !== null || !output.includes("listening")) throw new Error(`API did not start: ${output}`);
-  return {
-    child, port, output: () => output, exited: () => exitCode,
-    async stop() {
-      if (exitCode !== null) return;
-      child.kill("SIGTERM");
-      await once(child, "exit");
-    },
-  };
+  onTestFailed(() => { console.error(`API output on port ${port}:\n${output}`); });
+  return { child, port, output: () => output, exited: () => exitCode, stop: () => kill(child) };
 }
 
 /** A live owner of tenant A, with a token signed for the child's real clock. */
 async function memberToken(): Promise<string> {
   const member = await signedInMember(database, fixture, fixture.a.tenantId, "owner");
   return signDevToken(SECRET, member, { now: () => new Date() }, 600);
+}
+
+/** Resolves once the child's output contains `text`; rejects if the child exits first. */
+async function logged(api: Running, text: string): Promise<void> {
+  while (!api.output().includes(text)) {
+    if (api.exited() !== null) throw new Error(`API exited before logging ${text}: ${api.output()}`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
 }
 
 /**
@@ -100,65 +130,85 @@ describe("API entry point", () => {
   it("survives a terminated idle connection and serves the next request on a new one", async () => {
     const api = await startApi();
     try {
-      // Startup checked the runtime login, so the pool holds one idle connection now.
-      expect(await terminateRuntimeBackends()).toBeGreaterThan(0);
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      expect(api.exited(), api.output()).toBeNull();
-      expect(api.output()).toContain("57P01");
-
+      // Startup checked the runtime login, so the pool holds one idle connection. The pool closes
+      // a connection after 10 s idle, which a slow machine can outlast before this line runs; a
+      // read then leaves a fresh idle one to terminate. Only the count matters, not the timing.
       const token = await memberToken();
+      while (await terminateRuntimeBackends() === 0) {
+        const read = await fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, { headers: { Authorization: `Bearer ${token}` } });
+        await read.body?.cancel();
+        expect(read.status).toBe(200);
+      }
+      // The pool logs the lost connection (57P01) and the process carries on to serve below.
+      await logged(api, "57P01");
+      expect(api.exited(), api.output()).toBeNull();
+
       const response = await fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       expect(response.status).toBe(200);
-      const ready = await fetch(`http://127.0.0.1:${api.port}/readyz`);
-      expect(ready.status).toBe(200);
+      // The readiness probe has its own short budget, which a slow machine can use up: every
+      // answer must be 200 or 503, and it must reach 200. The test's timeout bounds the loop.
+      let ready = await fetch(`http://127.0.0.1:${api.port}/readyz`);
+      while (ready.status !== 200) {
+        expect(ready.status).toBe(503);
+        await ready.body?.cancel();
+        ready = await fetch(`http://127.0.0.1:${api.port}/readyz`);
+      }
       expect(await ready.json()).toEqual({ ok: true });
       // The log names the SQLSTATE but never the connection string or its credentials.
       expect(api.output()).not.toContain(database.name);
     } finally {
       await api.stop();
     }
-  }, 30_000);
+  }, CHILD_TEST_MS);
 
-  it("answers 503 within the request deadline when every connection is busy", async () => {
-    const api = await startApi({ DATABASE_POOL_MAX: "1", REQUEST_TIMEOUT_MS: "1000", DATABASE_CONNECT_TIMEOUT_MS: "500" });
-    // Hold the API's only connection: lock a row it needs, then make it wait on that lock.
+  it("builds its pool from DATABASE_POOL_MAX", async () => {
+    // In process, through the same parse and build the entry point uses: the pool's own setting
+    // is the oracle, since Postgres cannot tell a second pooled backend from an abandoned one.
+    const url = new URL(database.url);
+    url.username = "zs_runtime";
+    const env = parseServerEnv({ DATABASE_URL: url.href, JWT_VERIFIER: "hs256", JWT_SECRET: SECRET, SESSION_CHECK: "local-stub", DATABASE_POOL_MAX: "1" });
+    const { pool } = await createApiServer(env, { now: () => new Date() });
+    onTestFinished(() => pool.end());
+    expect(pool.options.max).toBe(1);
+  }, CHILD_TEST_MS);
+
+  // A saturated pool in the real process: a request that cannot get a connection answers 503,
+  // and the process lives on. deadline-database.test.ts proves in process, on fake timers, that
+  // the request deadline ends each wait.
+  it("answers 503 when every connection is busy, then serves again once the lock is gone", async () => {
+    // A 4 s deadline, below the 5 s default lock timeout, so the deadline always caps the lock wait.
+    const api = await startApi({ DATABASE_POOL_MAX: "1", REQUEST_TIMEOUT_MS: "4000" });
+    // Hold the API's only connection: lock a table it reads, then make a request wait on that lock.
     const holder = await database.pool.connect();
-    try {
-      const token = await memberToken();
-      await holder.query("BEGIN");
-      await holder.query("LOCK TABLE booking_resources IN ACCESS EXCLUSIVE MODE");
-      const headers = { Authorization: `Bearer ${token}` };
-      const first = fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, { headers });
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      const started = performance.now();
-      const second = await fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, { headers });
-      const elapsed = performance.now() - started;
-      expect(second.status).toBe(503);
-      expect(second.headers.get("retry-after")).toBe("1");
-      expect(await second.json()).toEqual({ error: { code: "Unavailable", message: "Service unavailable", details: {} } });
-      expect(elapsed).toBeLessThan(1500);
-      expect((await first).status).toBe(503);
-      // The deadline reached Postgres too: the first request's statement stopped waiting on
-      // the lock, though the lock is still held, instead of holding the connection for the
-      // 5 s lock timeout.
-      const waiting = async () => (await database.pool.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM pg_stat_activity
-          WHERE datname = current_database() AND usename = 'zs_runtime' AND wait_event_type = 'Lock'`,
-      )).rows[0]?.n;
-      await expect.poll(waiting, { timeout: 1500, interval: 100 }).toBe(0);
-      await holder.query("ROLLBACK");
-      // Once the lock is gone the same process serves again.
-      const after = await fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, { headers });
-      expect(after.status).toBe(200);
-      expect(api.exited()).toBeNull();
-    } finally {
+    onTestFinished(async () => {
       await holder.query("ROLLBACK").catch(() => undefined);
       holder.release();
-      await api.stop();
+    });
+    const token = await memberToken();
+    await holder.query("BEGIN");
+    await holder.query("LOCK TABLE booking_resources IN ACCESS EXCLUSIVE MODE");
+    const headers = { Authorization: `Bearer ${token}` };
+    const read = () => fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, { headers });
+    const [first, second] = await Promise.all([read(), read()]);
+    for (const reply of [first, second]) {
+      expect(reply.status).toBe(503);
+      expect(reply.headers.get("retry-after")).toBe("1");
+      expect(await reply.json()).toEqual({ error: { code: "Unavailable", message: "Service unavailable", details: {} } });
     }
-  }, 30_000);
+    await holder.query("ROLLBACK");
+    // Once the lock is gone the same process serves again. Its one connection may still be
+    // finishing the abandoned work, so a read may answer 503 first; the test's timeout bounds it.
+    for (;;) {
+      if (api.exited() !== null) throw new Error(`API exited: ${api.output()}`);
+      const after = await read();
+      await after.body?.cancel();
+      if (after.status === 200) break;
+      expect(after.status).toBe(503);
+    }
+    expect(api.exited()).toBeNull();
+  }, CHILD_TEST_MS);
 });
 
 // P-10 revision 6: two API processes stand in for two serverless instances on one database.
@@ -177,7 +227,7 @@ describe("public limits across API instances", () => {
     } finally {
       await Promise.all([first!.stop(), second!.stop()]);
     }
-  }, 30_000);
+  }, CHILD_TEST_MS);
 
   it("grants each instance the whole budget again with PUBLIC_RATE_LIMIT_STORE=memory", async () => {
     // Why hosted deploys refuse memory: the same four writes all pass.
@@ -189,7 +239,7 @@ describe("public limits across API instances", () => {
     } finally {
       await Promise.all([first!.stop(), second!.stop()]);
     }
-  }, 30_000);
+  }, CHILD_TEST_MS);
 });
 
 // document-intake.md DL-3, DL-5 (ZSB-17): the hosted entry point mounts the upload and worker routes when
@@ -277,7 +327,7 @@ describe("sign-in limits across API instances", () => {
     } finally {
       await Promise.all([first!.stop(), second!.stop()]);
     }
-  }, 30_000);
+  }, CHILD_TEST_MS);
 
   it("leaves the route off (404) until SIGN_IN_LIMITER_SECRET is set", async () => {
     const api = await startApi();
@@ -286,5 +336,5 @@ describe("sign-in limits across API instances", () => {
     } finally {
       await api.stop();
     }
-  }, 30_000);
+  }, CHILD_TEST_MS);
 });

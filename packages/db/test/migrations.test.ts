@@ -12,6 +12,9 @@ import { withTestDatabase } from "../src/testing.js";
 import { expectedOwner } from "./owners.js";
 
 const migrations = new URL("../../../supabase/migrations/", import.meta.url);
+// Each test below with CHAIN_MS builds at least one database and runs the whole migration chain
+// on it: real Postgres work that takes far longer than the defaults on a busy machine.
+const CHAIN_MS = 180_000;
 
 /**
  * Migrations shipped on main, with the checksum the runner records when it applies them.
@@ -160,7 +163,7 @@ it.each([
   } finally {
     await rm(atMain, { recursive: true, force: true });
   }
-}, 30000);
+}, CHAIN_MS);
 
 it("reads the functions migrations create and drop, in order, public only", () => {
   expect(functionsInMigrations([`
@@ -188,7 +191,7 @@ it("the full chain applies as a non-superuser CREATEROLE migrator and hands func
     );
     expect(tables.rows).toEqual([{ owner: database.migrator }]);
   }, undefined, { nonSuperuserMigrator: true });
-});
+}, CHAIN_MS);
 
 it("creates our roles naming NOLOGIN only, as hosted Supabase's supautils requires", async () => {
   // Each CREATE ROLE sits behind IF NOT EXISTS, so only a role's first one in migration
@@ -219,7 +222,7 @@ it("creates our roles naming NOLOGIN only, as hosted Supabase's supautils requir
       await database.pool.query(`DROP ROLE IF EXISTS ${bad}`);
     }
   });
-});
+}, CHAIN_MS);
 
 /** Applies migrations before 20261018090000, stores one resource, then runs the rest as the migrator. */
 async function migrateOverStoredZone(timeZone: string) {
@@ -259,11 +262,11 @@ async function migrateOverStoredZone(timeZone: string) {
 it("migrates over an existing booking resource whose zone is a lowercase IANA name", async () => {
   expect(await migrateOverStoredZone("america/new_york"))
     .toEqual({ rows: [{ time_zone: "america/new_york" }], force: true });
-});
+}, CHAIN_MS);
 
 it("refuses to migrate over a stored unknown zone, though forced RLS hides rows from the migrator", async () => {
   await expect(migrateOverStoredZone("Foo/Bar")).rejects.toThrow(/holds unknown time zones/);
-});
+}, CHAIN_MS);
 
 it("adds public intake over a pre-M3 database that holds bookings and contacts", async () => {
   const partial = await mkdtemp(join(tmpdir(), "zs-migrations-pre-m3-"));
@@ -308,7 +311,7 @@ it("adds public intake over a pre-M3 database that holds bookings and contacts",
   } finally {
     await rm(partial, { recursive: true, force: true });
   }
-}, 30000);
+}, CHAIN_MS);
 
 it("numbers the releases a database already holds, per site and in the order they were made", async () => {
   const numbers = "20261020710000_site_release_numbers.sql";
@@ -361,7 +364,7 @@ it("numbers the releases a database already holds, per site and in the order the
   } finally {
     await rm(partial, { recursive: true, force: true });
   }
-}, 30000);
+}, CHAIN_MS);
 
 it("a dry run rolls back, and an apply commits only the set the dry run reported", async () => {
   const atMain = await mkdtemp(join(tmpdir(), "zs-migrations-dry-"));
@@ -385,7 +388,7 @@ it("a dry run rolls back, and an apply commits only the set the dry run reported
   } finally {
     await rm(atMain, { recursive: true, force: true });
   }
-}, 30000);
+}, CHAIN_MS);
 
 const currencyIso = "20261022520000_deal_currency_iso.sql";
 const currencyPreflight = new URL("../../../supabase/preflight/20261022520000_deal_currency_iso.sql", import.meta.url);
@@ -458,12 +461,12 @@ it("upgrades over a deal with a non-ISO currency: the check stays unvalidated an
   // The migration rewrites and deletes nothing.
   expect(after.stored).toEqual([{ id: after.deals.USD, currency: "USD" }, { id: after.deals.ZZZ, currency: "ZZZ" }]);
   expect(after.write).toBe("23514");
-}, 30000);
+}, CHAIN_MS);
 
 it("validates the currency check at once when every stored deal passes", async () => {
   const after = await migrateOverStoredCurrencies(["USD", "EUR"]);
   expect(after).toMatchObject({ validated: true, notices: [], offending: [], write: "23514" });
-}, 30000);
+}, CHAIN_MS);
 
 it("the currency preflight checks the same ISO 4217 list as the contract", async () => {
   const preflight = await readFile(currencyPreflight, "utf8");

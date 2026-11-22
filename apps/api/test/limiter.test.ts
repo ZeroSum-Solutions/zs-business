@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Pool } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, onTestFinished } from "vitest";
 import { createScopedDatabase, DatabaseUnavailable, type ScopedDatabase } from "@zs/db";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import { createMemoryRateLimiter, type RateLimiter, type RateLimit } from "../src/public/limiter.js";
@@ -20,12 +20,12 @@ afterAll(async () => {
 });
 
 /** Another API instance on the same database, with its own runtime pool. */
-function instance(): ScopedDatabase {
+function instance(limits?: Parameters<typeof createScopedDatabase>[1]): ScopedDatabase {
   const pool = new Pool({ connectionString: database.runtimePool.options.connectionString, max: 10 });
   // A test terminates one of these backends; the pool reports it and replaces the client.
   pool.on("error", () => undefined);
   pools.push(pool);
-  return createScopedDatabase(pool);
+  return createScopedDatabase(pool, limits);
 }
 const bucketCount = () => fixture.service(async (tx) =>
   Number((await tx.query<{ n: string }>("SELECT count(*) AS n FROM rate_limit_buckets")).rows[0]!.n));
@@ -175,19 +175,36 @@ describe("shared Postgres limiter", () => {
 
   it("answers a lock wait past its timeout, and a lost connection, as an unavailable store", async () => {
     const holder = await database.pool.connect();
+    let held = true;
+    const release = async () => {
+      if (!held) return;
+      held = false;
+      await holder.query("ROLLBACK").catch(() => undefined);
+      holder.release();
+    };
+    // Released however the test ends, so a hung wait cannot hold the table into later tests.
+    onTestFinished(release);
+    let ended = false;
+    onTestFinished(() => { ended = true; });
     try {
       await holder.query("BEGIN");
       await holder.query("LOCK TABLE rate_limit_buckets IN EXCLUSIVE MODE");
       const impatient = createPostgresRateLimiter(createScopedDatabase(database.runtimePool, { lockTimeoutMs: 200 }), at(0));
       // Well inside the request deadline: the lock timeout, not the deadline, ends the wait.
-      const started = performance.now();
-      await expect(impatient.take([{ key: randomUUID(), rule: rule(1) }], { remainingMs: () => 10_000 }))
+      // 55P03 is the lock timeout's own error (a statement timeout would be 57014), so the
+      // code proves it without timing the wait.
+      // A far deadline: only the 200 ms lock timeout can end this wait, at any machine speed.
+      await expect(impatient.take([{ key: randomUUID(), rule: rule(1) }], { remainingMs: () => 600_000 }))
         .rejects.toMatchObject({ name: "DatabaseUnavailable", reason: "busy", cause: { code: "55P03" } });
-      expect(performance.now() - started).toBeLessThan(5000);
 
-      const waiting = createPostgresRateLimiter(instance(), at(0)).take([{ key: randomUUID(), rule: rule(1) }]);
+      // Patient limits: only the terminate below can end this wait, however long the poll takes.
+      const waiting = createPostgresRateLimiter(instance({ lockTimeoutMs: 600_000, statementTimeoutMs: 600_000 }), at(0))
+        .take([{ key: randomUUID(), rule: rule(1) }]);
+      waiting.catch(() => undefined); // asserted below; never an unhandled rejection
+      // No try cap: the test timeout bounds the wait on a busy machine.
       let pid: number | undefined;
-      for (let i = 0; i < 100 && pid === undefined; i++) {
+      while (pid === undefined) {
+        if (ended) throw new Error("the test ended while waiting for the limiter to wait on the lock");
         pid = (await database.pool.query<{ pid: number }>(
           `SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'
              AND query LIKE '%rate_limit%' LIMIT 1`)).rows[0]?.pid;
@@ -197,10 +214,9 @@ describe("shared Postgres limiter", () => {
       await database.pool.query("SELECT pg_terminate_backend($1)", [pid]);
       await expect(waiting).rejects.toMatchObject({ name: "DatabaseUnavailable", reason: "connect" });
     } finally {
-      await holder.query("ROLLBACK");
-      holder.release();
+      await release();
     }
-  });
+  }, 60_000);
 
   it("answers a backend lost between the transaction's statements as an unavailable store", async () => {
     const runtime = instance();
