@@ -192,6 +192,56 @@ describe("public limits across API instances", () => {
   }, 30_000);
 });
 
+// document-intake.md DL-3, DL-5 (ZSB-17): the hosted entry point mounts the upload and worker routes when
+// DOCUMENT_INTAKE_WORKER_TOKEN is set, behind the same member auth as the rest of /v1, and leaves them 404 otherwise.
+describe("document intake through the entry point", () => {
+  const TOKEN = ["entry", "intake", "w".repeat(32)].join("-");
+  const PDF = Buffer.from("%PDF-1.4\n% entry point upload\n%%EOF\n", "latin1");
+  const upload = (api: Running, headers: Record<string, string>) =>
+    fetch(`http://127.0.0.1:${api.port}/v1/document-intake/uploads`, {
+      method: "POST",
+      headers: { "Content-Type": "application/pdf", "X-Filename": "prices.pdf", "Idempotency-Key": crypto.randomUUID(), ...headers },
+      body: PDF,
+    });
+
+  it("queues an owner's upload, refuses one without a token, and lets only the worker's token claim it", async () => {
+    const api = await startApi({ SITES_STORE: "memory", DOCUMENT_INTAKE_WORKER_TOKEN: TOKEN });
+    try {
+      expect((await upload(api, {})).status).toBe(401);
+      const queued = await upload(api, { Authorization: `Bearer ${await memberToken()}` });
+      expect(queued.status).toBe(201);
+      const job = await queued.json() as { jobId: string; status: string };
+      expect(job.status).toBe("queued");
+      const claim = (token: string) => fetch(`http://127.0.0.1:${api.port}/v1/workers/document-intake/claim`, {
+        method: "POST", headers: { Authorization: `Bearer ${token}` },
+      });
+      expect((await claim("x".repeat(40))).status).toBe(401);
+      const claimed = await claim(TOKEN);
+      expect(claimed.status).toBe(200);
+      const lease = (await claimed.json() as { job: { id: string; leaseToken: string } | null }).job;
+      expect(lease?.id).toBe(job.jobId);
+      // The worker reads back the bytes the upload stored in the site store.
+      const file = await fetch(`http://127.0.0.1:${api.port}/v1/workers/document-intake/jobs/${job.jobId}/file`, {
+        headers: { Authorization: `Bearer ${TOKEN}`, "X-Lease-Token": lease!.leaseToken },
+      });
+      expect(file.status).toBe(200);
+      expect(Buffer.from(await file.arrayBuffer())).toEqual(PDF);
+      expect(api.output()).not.toContain(TOKEN);
+    } finally {
+      await api.stop();
+    }
+  }, 30_000);
+
+  it("leaves the routes off (404) until DOCUMENT_INTAKE_WORKER_TOKEN is set", async () => {
+    const api = await startApi({ SITES_STORE: "memory" });
+    try {
+      expect((await upload(api, { Authorization: `Bearer ${await memberToken()}` })).status).toBe(404);
+    } finally {
+      await api.stop();
+    }
+  }, 30_000);
+});
+
 // hub-launch L9: the dashboard's sign-in limits through the real entry point (env parsing, server wiring, the
 // Postgres limiter on the runtime login), with two API processes standing in for two serverless instances.
 describe("sign-in limits across API instances", () => {

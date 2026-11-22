@@ -314,6 +314,18 @@ describe("parseServerEnv", () => {
     expect(() => parseServerEnv({ ...base, SITES_STORE: "r2", ...r2, R2_ENDPOINT: "http://acct.r2.cloudflarestorage.com" })).toThrow(/R2_ENDPOINT/);
   });
 
+  it("turns document intake on with DOCUMENT_INTAKE_WORKER_TOKEN, which needs SITES_STORE and 32 characters (DL-3, DL-5)", () => {
+    const token = ["intake", "worker", "t".repeat(32)].join("-");
+    expect(parseServerEnv(base).documentIntake).toBeNull();
+    expect(parseServerEnv({ ...base, SITES_STORE: "memory" }).documentIntake).toBeNull();
+    expect(parseServerEnv({ ...base, SITES_STORE: "memory", DOCUMENT_INTAKE_WORKER_TOKEN: token }).documentIntake).toEqual({ workerToken: token });
+    expect(() => parseServerEnv({ ...base, DOCUMENT_INTAKE_WORKER_TOKEN: token })).toThrow(/DOCUMENT_INTAKE_WORKER_TOKEN: needs SITES_STORE/);
+    let message = "";
+    try { parseServerEnv({ ...base, SITES_STORE: "memory", DOCUMENT_INTAKE_WORKER_TOKEN: "short-intake-token" }); } catch (error) { message = String(error); }
+    expect(message).toMatch(/DOCUMENT_INTAKE_WORKER_TOKEN/);
+    expect(message).not.toContain("short-intake-token");
+  });
+
   it("keeps the in-memory site store to loopback databases", () => {
     const remote = { ...base, SESSION_CHECK: "supabase", SUPABASE_URL: "https://abcd.supabase.co", DATABASE_URL: "postgres://zs_runtime@db.example.com:5432/postgres", DATABASE_CA_CERT: "-----BEGIN CERTIFICATE-----x" };
     expect(() => parseServerEnv({ ...remote, SITES_STORE: "memory" })).toThrow(/SITES_STORE: memory is for local runs/);

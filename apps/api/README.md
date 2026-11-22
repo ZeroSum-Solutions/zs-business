@@ -985,6 +985,7 @@ against the pinned Supabase Root 2021 CA.
    | `TWILIO_ACCOUNT_SID`, `TWILIO_WEBHOOK_BASE_URL` | yes (webhooks, with `TWILIO_AUTH_TOKEN`) | only with `SMS_PROVIDER=twilio` (both required then) |
    | `TWILIO_AUTH_TOKEN` | yes (verifies webhooks) | only with `SMS_PROVIDER=twilio` and no `TWILIO_API_KEY_*` (an API key wins over the token) |
    | `STRIPE_*`, `TWILIO_PREVIOUS_AUTH_TOKEN`, `TWILIO_KEYWORD_REPLIES`, `SITES_STORE`, `SITE_COMPILER`, `R2_*` (the workers project holds the four `R2_*` connection variables only with `INTAKE_SWEEP_WORKER=on`), `ALLOWED_ORIGINS`, `IMAGE_ADAPTER` and the other image adapter settings (`IMAGE_ADAPTERS`, `IMAGE_ENVIRONMENT`, `IMAGE_CURRENCY`, `IMAGE_PRESETS`, `IMAGE_PRICES_MINOR`, `IMAGE_VENDOR_COST_MICROS`, `IMAGE_KEYS`), `KIE_API_KEY`, `FAL_API_KEY` (see the limit below) | yes | no |
+   | `DOCUMENT_INTAKE_WORKER_TOKEN` (32+ characters, needs `SITES_STORE`; see "Document intake") | yes | no |
    | `ENRICHMENT_PROVIDER`, `TREG_ARCHIVE_CONFIRMED_OFF`, `ENRICHMENT_DISABLED`, `ENRICHMENT_PRICE_COMPANY_CENTS`, `ENRICHMENT_TENANT_DAILY_CAP`, `ENRICHMENT_GLOBAL_DAILY_CAP` | yes (the service gate; no secret) | only if the enrichment worker ever runs there (it runs on the Mac today) |
    | `CRON_SECRET` | **no** | yes |
    | `DELIVERY_WORKER`, `DELIVERY_WORKER_ID`, `DELIVERY_DATABASE_URL`, `DELIVERY_PRICE_EMAIL`, `DELIVERY_PRICE_SMS_SEGMENT`, `DELIVERY_CURRENCY`, `DELIVERY_UNSUBSCRIBE_BASE_URL`, `DELIVERY_RUN_BUDGET_MS`, `DELIVERY_CLAIM_LIMIT`, `DELIVERY_PROVIDER_TIMEOUT_MS`, `DELIVERY_INTERVAL_MS`, `SMS_PROVIDER` | **no** | yes |
@@ -1358,6 +1359,26 @@ default `zerosum-solutions.com`). `--disconnect` clears the stored token; it can
 whose Google sign-in failed is marked `reauthorize` and reported; an unknown send outcome, a bounce-rate
 pause and a lost lease are reported to an operator (logged without a token).
 
+## Document intake (`/v1/document-intake`, `/v1/workers/document-intake`)
+
+An owner uploads a price-list PDF; the Docling worker claims the job, reads the file and posts the rows; the owner
+reviews and applies them (docs/requirements/document-intake.md). Off unless `DOCUMENT_INTAKE_WORKER_TOKEN` is set.
+
+| Variable | Meaning |
+|---|---|
+| `DOCUMENT_INTAKE_WORKER_TOKEN` | API project only. The Docling worker's bearer token, 32+ characters (generate it, keep it in ZS Vault). Set, the API mounts both route groups; unset, they are 404. It needs `SITES_STORE`: the PDFs live in the site store's bucket at `t/<tenant>/intake/<job>/<sha256>.pdf`, so `SITES_STORE=r2` with the four `R2_*` variables in a hosted deploy. |
+
+Owner routes (Bearer member token, the same auth, deadline and session check as the rest of `/v1`):
+`POST /uploads` (raw PDF body, `Content-Type: application/pdf`, `X-Filename`, `Idempotency-Key`; 201 with the
+job), `GET /jobs`, `GET /jobs/:id`, `POST /jobs/:id/apply`, `POST /jobs/:id/discard`. The upload skips the 64 KiB JSON
+limit and has its own 20 MiB limit (DL-3), but **a hosted upload is capped at about 4.5 MB**: that is the request-body
+limit of Vercel Functions, which answers 413 before the API sees the request. A larger PDF needs a presigned upload
+(later work).
+
+Worker routes (Bearer `DOCUMENT_INTAKE_WORKER_TOKEN`, never a member token): `POST /claim`,
+`GET /jobs/:id/file` and `POST /jobs/:id/result`, the last two with the claim's `X-Lease-Token`. No Docling worker
+runs against the hosted API yet (DL-6, DL-7), so a hosted upload stays `queued` until one does.
+
 ## Document intake sweep (`GET /cron/intake-sweep`)
 
 Document intake keeps an uploaded price-list PDF only while it is needed: 30 days after a job ends, the stored
@@ -1390,8 +1411,8 @@ instead of marking jobs as swept. If a delete fails (R2 down, wrong keys) the ca
 ### Turning it on
 
 Nothing here is set by the repository; an operator does it once, in the workers project only. The sweep deletes
-files the intake upload routes wrote, so it has work only where those routes run; the hosted API does not mount them
-yet (`documentIntake` is unset in `src/server.ts`), so turning the sweep on there changes nothing until it does.
+files the intake upload routes wrote, so it has work only where those routes run: the API project mounts them when
+`DOCUMENT_INTAKE_WORKER_TOKEN` is set ("Document intake"). Use the bucket that API project's `R2_BUCKET` names.
 
 1. Set `INTAKE_SWEEP_DATABASE_URL`, `INTAKE_SWEEP_SERVICE_DATABASE_URL` and the four `R2_*` variables (and `CRON_SECRET`, `DATABASE_CA_CERT`, and `OPS_ALERT_EMAIL` with `RESEND_API_KEY` and `RESEND_FROM` if you want the failure email, if not already there), with the bucket the API uploads to.
 2. Set `INTAKE_SWEEP_WORKER=on`.
