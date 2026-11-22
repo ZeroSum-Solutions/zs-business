@@ -1379,7 +1379,9 @@ limit of Vercel Functions, which answers 413 before the API sees the request. A 
 
 Worker routes (Bearer `DOCUMENT_INTAKE_WORKER_TOKEN`, never a member token): `POST /claim`,
 `GET /jobs/:id/file` and `POST /jobs/:id/result`, the last two with the claim's `X-Lease-Token`. No Docling worker
-runs against the hosted API yet (DL-6, DL-7), so a hosted upload stays `queued` until one does.
+runs against the hosted API yet (DL-6, DL-7), so a hosted upload stays `queued` until one does. The result route
+allows 32 MiB, but on Vercel the same 4.5 MB body cap applies: a hosted worker must keep a result under it (or post
+it in parts, later work), or Vercel answers 413 and the job's lease runs out.
 
 ## Document intake sweep (`GET /cron/intake-sweep`)
 

@@ -211,6 +211,8 @@ role cannot delete a `catalog_items` row.
 - A hosted upload is capped at about 4.5 MB, the request-body limit of Vercel Functions, below the 20 MiB of DL-3.
   A larger PDF needs a presigned upload, later work.
 - No Docling worker (DL-6, DL-7) runs against the hosted API yet, so a hosted upload stays `queued` until one does.
+- The same 4.5 MB cap applies to a worker's result on the hosted API (the route itself allows 32 MiB). A hosted
+  worker must keep a result under it, or Vercel answers 413 and the lease runs out.
 - An upload whose Idempotency-Key already names an action (a replay of an accepted upload, or a key another
   action used) is checked before storage is touched: it returns the stored outcome or the dispatcher's refusal
   (`IdempotencyConflict` for a changed payload or another action, `BindingMismatch` for another actor) and writes
