@@ -6,7 +6,9 @@ import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it, onTestFailed, onTestFinished } from "vitest";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
+import { parseServerEnv } from "../src/config.js";
 import { signDevToken } from "../src/dev-token.js";
+import { createServer as createApiServer } from "../src/server.js";
 import { KEY_SECRET, signedInMember } from "./helpers.js";
 
 const SECRET = ["entry", "point", "x".repeat(32)].join("-");
@@ -161,9 +163,20 @@ describe("API entry point", () => {
     }
   }, CHILD_TEST_MS);
 
-  // The entry point's wiring for a saturated pool: DATABASE_POOL_MAX and REQUEST_TIMEOUT_MS reach
-  // the app, a request that cannot get a connection answers 503, and the process lives on.
-  // deadline-database.test.ts proves in process, on fake timers, that the deadline ends each wait.
+  it("builds its pool from DATABASE_POOL_MAX", async () => {
+    // In process, through the same parse and build the entry point uses: the pool's own setting
+    // is the oracle, since Postgres cannot tell a second pooled backend from an abandoned one.
+    const url = new URL(database.url);
+    url.username = "zs_runtime";
+    const env = parseServerEnv({ DATABASE_URL: url.href, JWT_VERIFIER: "hs256", JWT_SECRET: SECRET, SESSION_CHECK: "local-stub", DATABASE_POOL_MAX: "1" });
+    const { pool } = await createApiServer(env, { now: () => new Date() });
+    onTestFinished(() => pool.end());
+    expect(pool.options.max).toBe(1);
+  }, CHILD_TEST_MS);
+
+  // A saturated pool in the real process: a request that cannot get a connection answers 503,
+  // and the process lives on. deadline-database.test.ts proves in process, on fake timers, that
+  // the request deadline ends each wait.
   it("answers 503 when every connection is busy, then serves again once the lock is gone", async () => {
     // A 4 s deadline, below the 5 s default lock timeout, so the deadline always caps the lock wait.
     const api = await startApi({ DATABASE_POOL_MAX: "1", REQUEST_TIMEOUT_MS: "4000" });
@@ -178,19 +191,7 @@ describe("API entry point", () => {
     await holder.query("LOCK TABLE booking_resources IN ACCESS EXCLUSIVE MODE");
     const headers = { Authorization: `Bearer ${token}` };
     const read = () => fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, { headers });
-    // DATABASE_POOL_MAX reached the pool: while both reads are in flight the process never holds
-    // more than one backend. Without it each read would open its own and wait on the lock.
-    let answered = false;
-    const both = Promise.all([read(), read()]).finally(() => { answered = true; });
-    let most = 0;
-    while (!answered) {
-      const { rows } = await database.pool.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND usename = 'zs_runtime'`);
-      most = Math.max(most, rows[0]!.n);
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    expect(most).toBeLessThanOrEqual(1);
-    const [first, second] = await both;
+    const [first, second] = await Promise.all([read(), read()]);
     for (const reply of [first, second]) {
       expect(reply.status).toBe(503);
       expect(reply.headers.get("retry-after")).toBe("1");
