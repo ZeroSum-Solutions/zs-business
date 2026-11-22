@@ -1,6 +1,6 @@
 # Hub plans: paid subscriptions through Stripe Billing and Shopify App Pricing
 
-Status: draft contract, revision 8 (2026-11-20: PL-10 `resolved_at` and `recovered_at` order a late failure after a resolution; PL-13 the worker key-mode check always runs). Revision 7 (2026-11-20: PL-26, the plan page names an agent feature as included only while the runtime would act on it: switches, runner heartbeats, approval, quiet hours and budget)). Revision 6 (2026-11-12: PL-25, the free-tier marker and the daily site publish limit). Revision 5
+Status: draft contract, revision 9 (2026-11-22: PL-27, the allowances of a self-signed-up tenant, and the plan gate enforces resources, model-assisted agents, the agent model cap and the email allowance for every tenant with limits). Revision 8 (2026-11-20: PL-10 `resolved_at` and `recovered_at` order a late failure after a resolution; PL-13 the worker key-mode check always runs). Revision 7 (2026-11-20: PL-26, the plan page names an agent feature as included only while the runtime would act on it: switches, runner heartbeats, approval, quiet hours and budget)). Revision 6 (2026-11-12: PL-25, the free-tier marker and the daily site publish limit). Revision 5
 (2026-11-11: PL-21..PL-24, a plan an operator grants to one tenant, which wins over
 the provider subscription). Revision 4 (2026-11-10: PL-8 also lets a customer cancel their own booking, `booking.self_cancel`,
 booking-self-service.md BS-12). Revision 3 (2026-11-07: PL-15..PL-20, Shopify merchants pay through
@@ -57,6 +57,15 @@ billing, and requiring a plan of a tenant that never had one (Known limits).
   reading subscriptions.
 - Tenants that exist today (Zero Sum, tenant 1, and the pilot tenants) never subscribed. They keep
   working as they do: this revision limits and locks only tenants that have had a subscription.
+- Free allowances (revision 9, a product call made by the builder of ZSB-44 for Devin to change): a self-signed-up
+  tenant with no paid plan gets 1 seat, 1 bookable resource, 1 managed connection, no automation tokens, no
+  model-assisted agents, no voice, an agent model cap of 5 cents a day and 100 emails in any 30 days (PL-27).
+  Reasons: the free tier sits at or below Solo on every row, so an upgrade never takes a feature away. One seat is the
+  owner alone. One resource and one connection let a single practitioner try booking and one mailbox. Tokens stay at 0
+  as on Solo, because a token opens the API to automation that the free tier cannot meter. Model-assisted agents are
+  off as on Solo, and the 5-cent cap bounds the template suggestions (the only model calls left) at about $1.50 a month
+  per tenant. 100 emails bound abuse of our sending domain while covering a small practice's booking mail. The numbers
+  are `FREE_PLAN_LIMITS` in `packages/contracts` and change with a later revision.
 
 ## Numbered rules
 
@@ -79,9 +88,10 @@ API, the worker and the dashboard). Amounts are USD cents.
 Each extra-connection add-on unit adds one managed connection. The add-on is monthly, so it is
 sold with monthly plans only (Stripe cannot mix intervals in one Checkout). Where PRICING.md is silent this
 revision picked: resources and seats count every row the tenant has; tokens count unrevoked
-tokens whose expiry has not passed. Enforced in this revision (PL-8): seats on `member.invite`,
-managed connections on `connection.connect`, tokens on `automation.token.create`. The other rows
-are stated for the dashboard and later rules (Known limits).
+tokens whose expiry has not passed. Enforced (PL-8): seats on `member.invite`,
+managed connections on `connection.connect`, tokens on `automation.token.create`; since revision 9 (PL-27) also
+bookable resources on `tenant.template.apply`, model-assisted agents, the agent daily model cap and the email
+allowance. The voice row is stated, not enforced (Known limits, revision 9).
 
 **PL-2. Stripe catalog.** Each price carries the `lookup_key` from PRICING.md section 5:
 `hub_{solo,studio,pro}_{month,year}`, `hub_{studio,pro}_founding_{month,year}` and
@@ -173,8 +183,8 @@ removals (`member.remove`, `connection.disconnect`, `calendar.google.disconnect`
 `outreach.mailbox.disconnect`) and the customer's own cancel (`booking.self_cancel`). The list
 is `READ_ONLY_ALLOWED_ACTIONS` in `packages/core/src/billing/plan-gate.ts:93-107`. Anything
 else is refused with 409 `plan_read_only`. Reads always work, so an owner can see and export the
-data. **Limits** (PL-1) apply to a tenant whose record names a plan: before `member.invite`,
-`connection.connect` and `automation.token.create`, the dispatcher takes a per-tenant transaction
+data. **Limits** (PL-1) apply to a tenant whose record names a plan, or a free tenant (PL-27): before `member.invite`,
+`connection.connect`, `automation.token.create` and `tenant.template.apply`, the dispatcher takes a per-tenant transaction
 lock, counts, and refuses at the limit with 409 `plan_limit` (`{ limit, used, resource }`). Two
 concurrent requests therefore cannot both take the last slot.
 
@@ -604,9 +614,9 @@ the free one is the hosting decision's. They are tunable by a later revision. Th
 - A shop bills one business for good: its row ID is global, so moving a shop to another tenant
   is an operator data change (PL-17 `shop_taken`).
 
-- A tenant that never subscribed is comped. Requiring a plan of new tenants needs a rule here.
-- Bookable resources, model-assisted agents, voice, the agent daily cap and the email allowance
-  are stated in PL-1 but not enforced by this revision.
+- A tenant that never subscribed is comped, unless it signed itself up (revision 9, PL-27: free allowances).
+- Bookable resources, model-assisted agents, the agent daily cap and the email allowance were stated in PL-1 but
+  not enforced by this revision; revision 9 enforces them (PL-27). Voice is still not enforced.
 - The add-on quantity is chosen at Checkout; the Portal cannot change a two-item subscription, so
   an owner with the add-on changes plan or quantity through support until a rule adds a route.
 - Messages queued before a tenant turns read-only may still be sent by the delivery worker.
@@ -621,7 +631,7 @@ the free one is the hosting decision's. They are tunable by a later revision. Th
   Stripe or Shopify. A granted tenant that never had a subscription is not billed at all.
 - A granted tenant can still start a Stripe Checkout (PL-4); the dashboard hides the prompt, the API does not refuse it.
 - When a grant ends on a tenant with no provider subscription (status `none`) the tenant is comped again, with no limits:
-  an ended grant never restricts a tenant.
+  an ended grant never restricts a tenant. Revision 9: a free tenant (PL-27) returns to the free allowances instead.
 - A new grant replaces the old one; only receipts keep the earlier terms. There is no grant history table.
 - Only plan limits and read-only come from the grant; the wallet (S-1) and usage prices are unaffected.
 
@@ -700,8 +710,8 @@ list of what is live:
 ## Known limits (revision 7)
 
 - The voice receptionist (voice-receptionist.md, a draft) has no runner and is not named on the plan page.
-- The runtime does not enforce the `modelAgents` and `voice` limits. A Solo tenant can switch follow-ups on, and
-  the follow-up agent then runs. The page follows the plan's advertised tier: the AI line is left out for a plan
+- The runtime does not enforce the `voice` limit. Revision 9 (PL-27) enforces `modelAgents`: a Solo or free tenant
+  can no longer switch follow-ups on, and the scheduler skips one that had them on before. The page follows the plan's advertised tier: the AI line is left out for a plan
   without `modelAgents`, which never claims a feature that is off, and at worst omits a line that runs. Enforcing
   those limits is a product decision and not part of this rule.
 - A heartbeat says a runner finished a clean run recently, not that it is healthy for every tenant. A runner that
@@ -723,3 +733,71 @@ list of what is live:
   until a run is refused for it.
 - Heartbeat writes are single-flight per runner and capped at 2 s on the runner's side. A write that times out can
   still land afterwards, so its claim holds for the minute. A late write only moves a beat later (`GREATEST`).
+
+## Free allowances (revision 9)
+
+Why: public sign-up (backlog B09) makes tenants that no operator created and that may never pay. Until this revision a
+tenant with no plan was comped and unlimited (Evidence and decisions), so a self-signed-up tenant would have had every
+feature for free, model calls and emails included.
+
+**PL-27. The allowances of a self-signed-up tenant.** A tenant that signs itself up is marked with `free_tier`
+(PL-25) by `markSelfSignup` (`packages/core/src/billing/free-tier.ts`, service role, under the plan lock; idempotent).
+The public sign-up calls it in the transaction that creates the tenant. An operator-created tenant is never marked and
+stays comped. The limits in force (`planStanding`, `packages/core/src/billing/plan-gate.ts`) are the first that applies:
+1. an active grant (PL-21): the granted plan's limits, never read-only;
+2. a free tenant whose plan has lapsed (`read_only_after` at or before the clock: a cancellation, or a failed payment
+   after the 7-day grace, PL-10): the free allowances, **never read-only**. It falls back to free instead of locking;
+3. a provider plan (PL-3, PL-10; the held plan of PL-2 included): that plan's limits, read-only once lapsed (PL-8);
+4. `free_tier`: the free allowances;
+5. otherwise the tenant is comped: no limits.
+
+| Allowance (`FREE_PLAN_LIMITS`) | Free | Where it is enforced |
+|---|---|---|
+| Team seats | 1 | `member.invite` (PL-8 count) |
+| Bookable resources | 1 | `tenant.template.apply` (PL-8 count of `booking_resources`) |
+| Managed connections | 1 | `connection.connect` (PL-8 count) |
+| MCP and automation tokens | 0 | `automation.token.create` (PL-8 count) |
+| Model-assisted agents | no | below |
+| Voice | no | not enforced (Known limits) |
+| Agent daily model cap, cents | 5 | below |
+| Emails in any 30 days | 100 | below |
+
+The free tier is no plan to buy: `GET /v1/billing/plan` answers status `none`, plan `null` and these limits, and the
+plan page offers the paid plans. The rules below apply to **every tenant with limits** (free, provider plan or grant),
+by the PL-1 row of the plan in force; a comped tenant has no limits and passes them all.
+- **Model-assisted agents.** When the plan does not hold `modelAgents` (Solo and free), the plan gate refuses
+  `agent.run.start`, `agent.settings.update` with `enabled: true` and `agent.kind.settings.update` with `enabled: true`
+  for a model-assisted kind (today `inquiry_followup`), with 409 `plan_limit`, `resource: "modelAgents"`, `limit: 0`,
+  `used: 0`. Switching one off, the kill switches and the templated kinds (reminders, review requests) are not
+  refused. The follow-up scheduler (`dueFollowUpTenants`) skips a tenant whose plan does not hold `modelAgents`, so a
+  tenant that switched follow-ups on before revision 9, or before a downgrade, records no refused runs.
+- **Agent daily model cap.** Each agent kind's daily model budget (agents.md G-15, `max_cost_micros_per_day`) is
+  clamped to the plan's `agentDailyCapCents` (times 10,000 micros): the reservation of a model call, the cost figures
+  on the Agents page, the start-of-run cost check, the cost warning, the PL-26 `no_budget` reason and the template
+  suggestions all read the lower of the two (`effectiveCostCap`). A tenant can set its own budget lower, never higher.
+- **Emails.** The allowance counts `message.send_requested` outbox events with `channel: "email"` that the tenant
+  queued in the 30 days before the clock (a rolling window like PL-25's, from the injected clock, never a SQL
+  interval; `outbox_tenant_type_created` serves the count, so no new table or counter can drift). After the handler,
+  before the action and its event are recorded, the dispatcher checks an action whose event is an email: at or over
+  the allowance it refuses with 409 `plan_limit`, `resource: "emailsPerMonth"`, and nothing is recorded. The actions
+  that queue email (`inbox.reply.send`, the reminder and review queue actions and the booking notices) take the plan
+  lock before the handler, any other under the gate, so two sends cannot both take the last slot. Booking notices
+  (`booking.confirmation_send`, `booking.self_cancel`, `booking.self_reschedule`, `booking.cancel`) are counted but
+  never refused: a customer's own cancel or move must not fail because the business used its mail. A templated run
+  that meets the limit stops its batch (`plan_limit` ends the run's loop, as a conflict that will not clear). Texts
+  are not emails: they stay on the wallet (S-1).
+- Rows a tenant already has above a limit (after a downgrade or a lapse to free) stay; only new ones are refused.
+- `free_tier` and a provider plan together: the paid plan wins while it is live (unchanged from revision 6), and the
+  marker decides only what happens when it lapses.
+
+## Known limits (revision 9)
+
+- The voice row is not enforced: voice needs an operator-provisioned number (twilio.md), so no free tenant can get one
+  without an operator.
+- Cold outreach (outreach.md) sends through the owner's own connected mailbox, not our sending domain, and is not
+  counted in the email allowance. A lapsed free tenant is not read-only, so its outreach keeps sending.
+- Browser tasks keep their own model caps (browser-tasks.md); the plan cap clamps only the agent kinds.
+- The plan page has no "Free" card: a free tenant sees the paid plans and its current limits.
+- Nothing in this repository calls `markSelfSignup` yet: public sign-up (B09) will. Until then an operator marks a
+  tenant in a service-role transaction.
+- The company budget (B11) will start from these allowances; it is not part of this rule.

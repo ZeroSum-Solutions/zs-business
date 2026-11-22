@@ -18,7 +18,7 @@ import {
 import type { Transaction } from "@zs/db";
 import { offsetAt } from "../booking/time-zone.js";
 import { derivedId } from "../edge/ids.js";
-import { atWarningLine, costSpent } from "./cost.js";
+import { atWarningLine, costSpent, effectiveCostCap } from "./cost.js";
 
 /**
  * G-1, G-14: the actor every action of one kind runs as, per tenant. No member has this ID.
@@ -179,7 +179,8 @@ export interface CostFigures {
 }
 export async function costFigures(tx: Transaction, tenantId: string, kind: AgentKind, controls: AgentControls, now: Date): Promise<CostFigures> {
   const spent = await costSpent(tx, tenantId, kind, now);
-  return { spent, cap: controls.maxCostMicrosPerDay, warning: atWarningLine(spent, controls.maxCostMicrosPerDay) };
+  const cap = await effectiveCostCap(tx, tenantId, controls.maxCostMicrosPerDay, now);
+  return { spent, cap, warning: atWarningLine(spent, cap) };
 }
 
 /** G-11: the status a member reads. */

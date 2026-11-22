@@ -23,7 +23,7 @@ import { isoDate, DAY_MS, offsetAt } from "../booking/time-zone.js";
 import { loadControls } from "../agents/controls.js";
 import { COST_WARN_ACTION } from "../agents/handlers.js";
 import {
-  atWarningLine, costSpent, priceFor, priceUsage, reserveModelCall, settleModelCall, worstCase, type ModelPrices,
+  atWarningLine, costSpent, effectiveCostCap, priceFor, priceUsage, reserveModelCall, settleModelCall, worstCase, type ModelPrices,
 } from "../agents/cost.js";
 import { abortable, type TextModel, type TextModelRequest } from "../agents/model.js";
 import { derivedId } from "../edge/ids.js";
@@ -160,8 +160,9 @@ export async function suggestTemplate(
 
   const figures = await read(async (tx) => {
     const controls = await loadControls(tx, tenantId, false, kind);
-    const spent = await costSpent(tx, tenantId, kind, now());
-    return { spent, cap: controls.maxCostMicrosPerDay };
+    const at = now();
+    const spent = await costSpent(tx, tenantId, kind, at);
+    return { spent, cap: await effectiveCostCap(tx, tenantId, controls.maxCostMicrosPerDay, at) };
   });
   return {
     agentKind: kind, channel, subject: checked.subject, body: checked.body, variables: [...checked.variables],

@@ -137,7 +137,7 @@ describe("createKindSiteCompiler", () => {
 });
 
 describe("sitePublishLimit", () => {
-  const base = { plan: null, free_tier: false, granted_plan: null, granted_until: null, grant_note: null, granted_at: null, granted_by: null } as const;
+  const base = { plan: null, free_tier: false, extra_connections: 0, read_only_after: null, granted_plan: null, granted_until: null, grant_note: null, granted_at: null, granted_by: null } as const;
   const now = new Date("2026-11-12T00:00:00Z");
   it("is none for a comped tenant, 20 for a free one, the plan's number for a paid one and the grant's while it holds", () => {
     expect(sitePublishLimit(null, now)).toBeNull();

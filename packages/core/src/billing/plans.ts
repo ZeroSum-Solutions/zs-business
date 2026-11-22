@@ -86,9 +86,10 @@ interface TenantPlanRow {
   shopify_shop_domain: string | null;
   granted_plan: HubPlan | null;
   granted_until: Date | null;
+  free_tier: boolean;
 }
 const PLAN_COLUMNS = `billing_provider, plan, plan_interval, founding, status, extra_connections, stripe_customer_id, trial_end, current_period_end,
-  cancel_at_period_end, trial_used, founding_invite, payment_failed_at, read_only_after, shopify_shop_domain, granted_plan, granted_until`;
+  cancel_at_period_end, trial_used, founding_invite, payment_failed_at, read_only_after, shopify_shop_domain, granted_plan, granted_until, free_tier`;
 const tenantPlan = async (tx: Transaction, tenantId: string): Promise<TenantPlanRow | null> =>
   (await tx.query<TenantPlanRow>(`SELECT ${PLAN_COLUMNS} FROM tenant_plans WHERE tenant_id=$1`, [tenantId])).rows[0] ?? null;
 

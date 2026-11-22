@@ -51,6 +51,21 @@ export const PLAN_CATALOG: Readonly<Record<HubPlan, PlanCatalogEntry>> = Object.
 });
 
 /**
+ * PL-27: the allowances of a self-signed-up tenant (`tenant_plans.free_tier`) with no grant and no paid plan in force.
+ * Conservative first numbers (plans.md revision 9, "Evidence and decisions"); tunable by a later revision.
+ */
+export const FREE_PLAN_LIMITS: PlanLimits = Object.freeze({
+  seats: 1, bookableResources: 1, managedConnections: 1, automationTokens: 0, modelAgents: false, voice: false,
+  agentDailyCapCents: 5, emailsPerMonth: 100,
+});
+
+/** PL-27: the email allowance counts the emails queued in this many elapsed days before the clock. */
+export const EMAIL_ALLOWANCE_WINDOW_DAYS = 30;
+
+/** PL-27: a plan's daily model cap per agent kind, in the micros the cost ledger uses (G-15). */
+export const planModelCapMicros = (limits: PlanLimits) => limits.agentDailyCapCents * 10_000;
+
+/**
  * PL-26: the features a plan page may name. The first three are agent kinds, so the page reads the same
  * `agent_settings` switch the runners read (agents.md G-3, G-14); `missed_call_textback` is read from the
  * `voice_numbers.textback_enabled` switch the voice webhook reads. The list is the copy; nothing else

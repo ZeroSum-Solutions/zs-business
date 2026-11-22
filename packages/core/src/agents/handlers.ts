@@ -50,7 +50,7 @@ import {
   readGlobalKilled,
   type AgentControls,
 } from "./controls.js";
-import { costSpent } from "./cost.js";
+import { costSpent, effectiveCostCap } from "./cost.js";
 import { loadDecision, loadRun } from "./records.js";
 
 export const UPDATE_SETTINGS_ACTION = "agent.settings.update";
@@ -277,7 +277,8 @@ export const startRunHandler: ActionHandler = {
     let stop: FollowUpStopReason | null = gate(controls, await readGlobalKilled(tx, false), now);
     if (!stop && (await draftsToday(tx, tenantId, now)) >= controls.settings.maxDraftsPerDay) stop = "daily_cap";
     // G-15: a kind that has spent its day's cap starts no run that would call a model.
-    if (!stop && (await costSpent(tx, tenantId, "inquiry_followup", now)) >= controls.maxCostMicrosPerDay) stop = "cost_cap";
+    if (!stop && (await costSpent(tx, tenantId, "inquiry_followup", now)) >= await effectiveCostCap(tx, tenantId, controls.maxCostMicrosPerDay, now))
+      stop = "cost_cap";
     await tx.query(
       `INSERT INTO agent_runs (tenant_id, id, requested_by, started_at, finished_at, status, stop_reason, max_decisions)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
@@ -361,7 +362,7 @@ export const costWarnHandler: ActionHandler = {
       agentKind: payload.agentKind,
       localDate: payload.localDate,
       spentMicros: await costSpent(tx, tenantId, payload.agentKind, now),
-      capMicros: controls.maxCostMicrosPerDay,
+      capMicros: await effectiveCostCap(tx, tenantId, controls.maxCostMicrosPerDay, now),
     };
     return { result, event: { type: "agent.cost_warning", payload: result } };
   },

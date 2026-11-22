@@ -6,6 +6,7 @@ import type { AgentKind, TemplatedKind } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 import { controlsFromRow, gate, readGlobalKilled, SETTINGS_COLUMNS, type SettingsRow } from "./controls.js";
 import { followUpRunId } from "./runner.js";
+import { planLimits, STANDING_COLUMNS, type PlanStandingRow } from "../billing/plan-gate.js";
 
 /** The idempotency key of a scheduled run; one run per tenant per slot. */
 export const scheduledRunKey = (slot: string) => `schedule:${slot}`;
@@ -30,12 +31,18 @@ export async function dueFollowUpTenants(tx: Transaction, now: Date, slot: strin
       ORDER BY (SELECT max(r.started_at) FROM agent_runs r WHERE r.tenant_id = s.tenant_id) ASC NULLS FIRST, s.tenant_id`,
   )).rows.filter((row) => gate(controlsFromRow(row), false, now) === null);
   if (rows.length === 0) return { globalKilled: false, tenantIds: [] };
+  // PL-27: a tenant whose plan holds no model agents is not scheduled; the plan gate would refuse its run's start.
+  const plans = new Map((await tx.query<PlanStandingRow & { tenant_id: string }>(
+    `SELECT tenant_id, ${STANDING_COLUMNS} FROM tenant_plans WHERE tenant_id = ANY($1::uuid[])`, [rows.map((row) => row.tenant_id)],
+  )).rows.map((row) => [row.tenant_id, row]));
+  const held = rows.filter((row) => planLimits(plans.get(row.tenant_id), now)?.modelAgents !== false);
+  if (held.length === 0) return { globalKilled: false, tenantIds: [] };
   const key = scheduledRunKey(slot);
   const ended = new Set((await tx.query<{ tenant_id: string }>(
     "SELECT tenant_id FROM agent_runs WHERE id = ANY($1::uuid[]) AND status <> 'running'",
-    [rows.map((row) => followUpRunId(row.tenant_id, key))],
+    [held.map((row) => followUpRunId(row.tenant_id, key))],
   )).rows.map((row) => row.tenant_id));
-  return { globalKilled: false, tenantIds: rows.map((row) => row.tenant_id).filter((id) => !ended.has(id)) };
+  return { globalKilled: false, tenantIds: held.map((row) => row.tenant_id).filter((id) => !ended.has(id)) };
 }
 
 /** G-13, G-19: a templated kind's scheduled run is named by its kind as well as the slot. */
