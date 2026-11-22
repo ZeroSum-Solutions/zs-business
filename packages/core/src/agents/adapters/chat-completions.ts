@@ -50,7 +50,9 @@ export function createChatCompletionsModel<L extends AgentLane>(config: ChatComp
     model: config.model,
     async complete(request, signal): Promise<TextModelResult> {
       const mode = config.jsonMode(request);
+      // The vendor extras come first, so they can never replace a field set here.
       const body = JSON.stringify({
+        ...config.extraBody,
         model: config.model,
         messages: [
           { role: "system", content: mode.system },
@@ -60,7 +62,6 @@ export function createChatCompletionsModel<L extends AgentLane>(config: ChatComp
         temperature: 0.2,
         stream: false,
         response_format: mode.responseFormat,
-        ...config.extraBody,
       });
       const response = await abortable(config.fetch(`${config.baseUrl}/chat/completions`, {
         method: "POST",

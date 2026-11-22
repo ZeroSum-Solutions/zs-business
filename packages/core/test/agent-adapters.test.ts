@@ -76,7 +76,7 @@ describe("Cerebras adapter (personal-data lane)", () => {
     expect(sent[0]!.body).not.toHaveProperty("max_tokens");
   });
 
-  it("asks gpt-oss models for low reasoning effort, so reasoning cannot use up the output cap, and other models for nothing extra", async () => {
+  it("asks gpt-oss models for low reasoning effort (fewer reasoning tokens under the cap), and other models for nothing extra", async () => {
     const gptOss = replay("cerebras-ok");
     await createCerebrasModel({ apiKey: "k", fetch: gptOss.fetch, model: "gpt-oss-120b" }).complete(request);
     expect(gptOss.sent[0]!.body.reasoning_effort).toBe("low");
