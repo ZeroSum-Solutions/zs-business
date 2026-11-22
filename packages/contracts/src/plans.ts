@@ -55,7 +55,7 @@ export const PLAN_CATALOG: Readonly<Record<HubPlan, PlanCatalogEntry>> = Object.
  * Conservative first numbers (plans.md revision 9, "Evidence and decisions"); tunable by a later revision.
  */
 export const FREE_PLAN_LIMITS: PlanLimits = Object.freeze({
-  seats: 1, bookableResources: 1, managedConnections: 1, automationTokens: 0, modelAgents: false, voice: false,
+  seats: 1, bookableResources: 1, managedConnections: 1, automationTokens: 1, modelAgents: false, voice: false,
   agentDailyCapCents: 5, emailsPerMonth: 100,
 });
 

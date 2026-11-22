@@ -148,8 +148,9 @@ describe("a self-signed-up tenant holds the free allowances (PL-27)", () => {
     await expect(gate(tenantId, "connection.connect")).resolves.toBeUndefined();
     await addConnection(tenantId);
     await expect(gate(tenantId, "connection.connect")).rejects.toMatchObject(limitOf("managedConnections", 1));
-    // Tokens: none.
-    await expect(createToken(tenantId)).rejects.toMatchObject(limitOf("automationTokens", 0));
+    // Tokens: one, the creator's site token (PL-25).
+    await expect(createToken(tenantId)).resolves.toBeDefined();
+    await expect(createToken(tenantId)).rejects.toMatchObject({ details: { reason: "plan_limit", resource: "automationTokens", limit: 1, used: 1 } });
     // Model agents: the follow-up agent cannot be switched on or started, by either settings route.
     await expect(gate(tenantId, "agent.kind.settings.update", enableKind("inquiry_followup"))).rejects.toMatchObject(limitOf("modelAgents", 0));
     await expect(gate(tenantId, "agent.settings.update", { enabled: true })).rejects.toMatchObject(limitOf("modelAgents", 0));

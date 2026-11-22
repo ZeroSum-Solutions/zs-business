@@ -58,11 +58,13 @@ billing, and requiring a plan of a tenant that never had one (Known limits).
 - Tenants that exist today (Zero Sum, tenant 1, and the pilot tenants) never subscribed. They keep
   working as they do: this revision limits and locks only tenants that have had a subscription.
 - Free allowances (revision 9, a product call made by the builder of ZSB-44 for Devin to change): a self-signed-up
-  tenant with no paid plan gets 1 seat, 1 bookable resource, 1 managed connection, no automation tokens, no
+  tenant with no paid plan gets 1 seat, 1 bookable resource, 1 managed connection, 1 automation token, no
   model-assisted agents, no voice, an agent model cap of 5 cents a day and 100 emails in any 30 days (PL-27).
-  Reasons: the free tier sits at or below Solo on every row, so an upgrade never takes a feature away. One seat is the
-  owner alone. One resource and one connection let a single practitioner try booking and one mailbox. Tokens stay at 0
-  as on Solo, because a token opens the API to automation that the free tier cannot meter. Model-assisted agents are
+  Reasons: the free tier sits at or below Solo on every row but one, so an upgrade takes almost nothing away. One seat is the
+  owner alone. One resource and one connection let a single practitioner try booking and one mailbox. One token,
+  because a free creator publishes its link page with a `sites:publish` token (PL-25, hosting step 5: one link-page
+  site and one token per tenant); that is the one row above Solo's 0, and a tenant that moves to Solo keeps the token
+  it holds (only a new one is refused). Model-assisted agents are
   off as on Solo, and the 5-cent cap bounds the template suggestions (the only model calls left) at about $1.50 a month
   per tenant. 100 emails bound abuse of our sending domain while covering a small practice's booking mail. The numbers
   are `FREE_PLAN_LIMITS` in `packages/contracts` and change with a later revision.
@@ -583,6 +585,7 @@ the free one is the hosting decision's. They are tunable by a later revision. Th
   `sites:publish` token. The count is not a rate limit: there is no `Retry-After`.
 - **Read-only (PL-8)** still refuses a publish first, for a tenant whose plan lapsed, in the pre-check as well
   as in the plan gate: the answer is `plan_read_only`, never `plan_limit`.
+  Revision 9: a free tenant whose plan lapsed is not read-only (PL-27) and gets the free limit.
 - **No script yet.** Nothing in this revision sets `free_tier`: the operator script and the full "Creator Free"
   plan rule (one link-page site and one token per tenant, creator identity spec D-9) are hosting step 5.
   Until then an operator sets the column in a service-role transaction.
@@ -756,7 +759,7 @@ stays comped. The limits in force (`planStanding`, `packages/core/src/billing/pl
 | Team seats | 1 | `member.invite` (PL-8 count) |
 | Bookable resources | 1 | `tenant.template.apply` (PL-8 count of `booking_resources`) |
 | Managed connections | 1 | `connection.connect` (PL-8 count) |
-| MCP and automation tokens | 0 | `automation.token.create` (PL-8 count) |
+| MCP and automation tokens | 1 | `automation.token.create` (PL-8 count) |
 | Model-assisted agents | no | below |
 | Voice | no | not enforced (Known limits) |
 | Agent daily model cap, cents | 5 | below |
