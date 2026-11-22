@@ -168,6 +168,7 @@ strict schema rejects.
 | `R2_BUCKET` | `r2` only: the bucket the dispatch Worker binds as `SITES`. |
 | `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | `r2` only: an R2 API token's S3 credentials, object read and write on that bucket only. They live on Vercel and the Mac, never in a cloud session. |
 | `IMAGE_ADAPTER` | Optional: turns image jobs on (image-port.md IM-21): `kie` or `fal`; `fake` only with `IMAGE_ENVIRONMENT=test` and a loopback `DATABASE_URL`. Needs `SITES_STORE` (images share the site store). Unset, every `/v1/media` route answers 404. See "Images". |
+| `DOCUMENT_INTAKE_WORKER_TOKEN` | Optional: turns document intake on (document-intake.md DL-3, DL-5): the Docling worker's bearer token, trimmed, 32+ characters, printable ASCII, no whitespace. Needs `SITES_STORE` (the PDFs share the site store). Unset, every `/v1/document-intake` route answers 404. See "Document intake". |
 | `PUBLIC_RATE_LIMIT_STORE` | Where the public booking and unsubscribe limits count. `postgres` (default): `public.rate_limit_buckets`, shared by every API instance on the database. `memory`: this process only, refused unless `DATABASE_URL` is a loopback host. |
 | `SIGN_IN_LIMITER_SECRET` | Optional (trimmed, 32+ characters, no whitespace; the dashboard holds the same value as `DASHBOARD_SIGN_IN_LIMITER_SECRET`): the bearer token for `POST /public/v1/sign-in/admit`, where the dashboard keeps its sign-in link limits (5 per address and 30 in total per 15 minutes, set by the dashboard) in the shared Postgres limiter so they hold across instances. One atomic call charges both buckets or neither. The route sees an address, never an email; an address it cannot read (or a value over 64 characters) is counted under one shared `direct` key instead of failing. Every answer is `no-store`. Unset, the route is off (404) and a dashboard that holds the secret sends no sign-in link (502). Fails closed: a store outage answers a retryable 503. **Deploy the API with the secret first, then the dashboard**; `pnpm check:hosted` (the `API: the sign-in limit route is deployed` probe) sends a call with no and a wrong secret and expects 401, which charges no bucket and shows the route is live. |
 | `SIGN_IN_LIMITER_PREVIOUS_SECRET` | Optional, needs `SIGN_IN_LIMITER_SECRET` and must differ from it. During a rotation the route also accepts this value: set the new secret as `SIGN_IN_LIMITER_SECRET`, put the old one here, deploy the API, switch the dashboard to the new one, then remove this variable. |
@@ -985,6 +986,7 @@ against the pinned Supabase Root 2021 CA.
    | `TWILIO_ACCOUNT_SID`, `TWILIO_WEBHOOK_BASE_URL` | yes (webhooks, with `TWILIO_AUTH_TOKEN`) | only with `SMS_PROVIDER=twilio` (both required then) |
    | `TWILIO_AUTH_TOKEN` | yes (verifies webhooks) | only with `SMS_PROVIDER=twilio` and no `TWILIO_API_KEY_*` (an API key wins over the token) |
    | `STRIPE_*`, `TWILIO_PREVIOUS_AUTH_TOKEN`, `TWILIO_KEYWORD_REPLIES`, `SITES_STORE`, `SITE_COMPILER`, `R2_*` (the workers project holds the four `R2_*` connection variables only with `INTAKE_SWEEP_WORKER=on`), `ALLOWED_ORIGINS`, `IMAGE_ADAPTER` and the other image adapter settings (`IMAGE_ADAPTERS`, `IMAGE_ENVIRONMENT`, `IMAGE_CURRENCY`, `IMAGE_PRESETS`, `IMAGE_PRICES_MINOR`, `IMAGE_VENDOR_COST_MICROS`, `IMAGE_KEYS`), `KIE_API_KEY`, `FAL_API_KEY` (see the limit below) | yes | no |
+   | `DOCUMENT_INTAKE_WORKER_TOKEN` (32+ characters, needs `SITES_STORE`; see "Document intake") | yes | no |
    | `ENRICHMENT_PROVIDER`, `TREG_ARCHIVE_CONFIRMED_OFF`, `ENRICHMENT_DISABLED`, `ENRICHMENT_PRICE_COMPANY_CENTS`, `ENRICHMENT_TENANT_DAILY_CAP`, `ENRICHMENT_GLOBAL_DAILY_CAP` | yes (the service gate; no secret) | only if the enrichment worker ever runs there (it runs on the Mac today) |
    | `CRON_SECRET` | **no** | yes |
    | `DELIVERY_WORKER`, `DELIVERY_WORKER_ID`, `DELIVERY_DATABASE_URL`, `DELIVERY_PRICE_EMAIL`, `DELIVERY_PRICE_SMS_SEGMENT`, `DELIVERY_CURRENCY`, `DELIVERY_UNSUBSCRIBE_BASE_URL`, `DELIVERY_RUN_BUDGET_MS`, `DELIVERY_CLAIM_LIMIT`, `DELIVERY_PROVIDER_TIMEOUT_MS`, `DELIVERY_INTERVAL_MS`, `SMS_PROVIDER` | **no** | yes |
@@ -1358,6 +1360,29 @@ default `zerosum-solutions.com`). `--disconnect` clears the stored token; it can
 whose Google sign-in failed is marked `reauthorize` and reported; an unknown send outcome, a bounce-rate
 pause and a lost lease are reported to an operator (logged without a token).
 
+## Document intake (`/v1/document-intake`, `/v1/workers/document-intake`)
+
+An owner uploads a price-list PDF; the Docling worker claims the job, reads the file and posts the rows; the owner
+reviews and applies them (docs/requirements/document-intake.md). Off unless `DOCUMENT_INTAKE_WORKER_TOKEN` is set.
+
+| Variable | Meaning |
+|---|---|
+| `DOCUMENT_INTAKE_WORKER_TOKEN` | API project only. The Docling worker's bearer token: trimmed, 32+ characters, printable ASCII, no whitespace (generate it, keep it in ZS Vault). Set, the API mounts both route groups. Unset, the owner routes are 404, and a worker call falls under the member auth of `/v1` and gets 401. It needs `SITES_STORE`: the PDFs live in the site store's bucket at `t/<tenant>/intake/<job>/<sha256>.pdf`, so `SITES_STORE=r2` with the four `R2_*` variables in a hosted deploy. |
+
+Owner routes (Bearer member token, the same auth, deadline and session check as the rest of `/v1`):
+`POST /uploads` (raw PDF body, `Content-Type: application/pdf`, `X-Filename`, `Idempotency-Key`; 201 with the
+job), `GET /jobs`, `GET /jobs/:id`, `POST /jobs/:id/apply` (201: only proposes the apply, as a pending approval an
+owner then approves at `POST /v1/approvals/:id/approve`; the catalog changes on that approval), `POST /jobs/:id/discard`. The upload skips the 64 KiB JSON
+limit and has its own 20 MiB limit (DL-3), but **a hosted upload is capped at about 4.5 MB**: that is the request-body
+limit of Vercel Functions, which answers 413 before the API sees the request. A larger PDF needs a presigned upload
+(later work).
+
+Worker routes (Bearer `DOCUMENT_INTAKE_WORKER_TOKEN`, never a member token): `POST /claim`,
+`GET /jobs/:id/file` and `POST /jobs/:id/result`, the last two with the claim's `X-Lease-Token`. No Docling worker
+runs against the hosted API yet (DL-6, DL-7), so a hosted upload stays `queued` until one does. The result route
+allows 32 MiB, but on Vercel the same 4.5 MB body cap applies: a hosted worker must keep a result under it (or post
+it in parts, later work), or Vercel answers 413 and the job's lease runs out.
+
 ## Document intake sweep (`GET /cron/intake-sweep`)
 
 Document intake keeps an uploaded price-list PDF only while it is needed: 30 days after a job ends, the stored
@@ -1390,8 +1415,8 @@ instead of marking jobs as swept. If a delete fails (R2 down, wrong keys) the ca
 ### Turning it on
 
 Nothing here is set by the repository; an operator does it once, in the workers project only. The sweep deletes
-files the intake upload routes wrote, so it has work only where those routes run; the hosted API does not mount them
-yet (`documentIntake` is unset in `src/server.ts`), so turning the sweep on there changes nothing until it does.
+files the intake upload routes wrote, so it has work only where those routes run: the API project mounts them when
+`DOCUMENT_INTAKE_WORKER_TOKEN` is set ("Document intake"). Use the bucket that API project's `R2_BUCKET` names.
 
 1. Set `INTAKE_SWEEP_DATABASE_URL`, `INTAKE_SWEEP_SERVICE_DATABASE_URL` and the four `R2_*` variables (and `CRON_SECRET`, `DATABASE_CA_CERT`, and `OPS_ALERT_EMAIL` with `RESEND_API_KEY` and `RESEND_FROM` if you want the failure email, if not already there), with the bucket the API uploads to.
 2. Set `INTAKE_SWEEP_WORKER=on`.

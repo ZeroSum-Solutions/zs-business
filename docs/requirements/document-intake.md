@@ -1,8 +1,11 @@
 # Document intake: PDF to catalog and agent knowledge
 
 Status: first slice built (2026-10-24, PR #57: DL-1, DL-2, DL-4, DL-5 and DL-8 to DL-15 for the `catalog`
-target; DL-3 for uploaded bytes only and DL-16 as a tested sweep that no scheduler calls yet, with the fake port only; `packages/core/src/document-intake/`,
-`supabase/migrations/20261024100000_document_intake.sql`). Not built: the Python Docling
+target; DL-3 for uploaded bytes only and DL-16 as a tested sweep, with the fake port only; `packages/core/src/document-intake/`,
+`supabase/migrations/20261024100000_document_intake.sql`). Hosted (2026-11-21, ZSB-17, Devin's decision): the hosted
+API mounts the upload and worker routes when `DOCUMENT_INTAKE_WORKER_TOKEN` is set, with the PDFs in R2, and the
+workers project runs the 30-day sweep where an operator sets `INTAKE_SWEEP_WORKER=on` and the build-time
+`INTAKE_SWEEP_CRON_SCHEDULE` (apps/api/README.md, "Document intake" and "Document intake sweep"). Not built: the Python Docling
 service (DL-6, DL-7) and the `knowledge` target. Code follows this file; a change to a
 numbered rule needs a new revision of this file first.
 
@@ -202,9 +205,14 @@ role cannot delete a `catalog_items` row.
 - The first slice takes uploaded bytes only (`source` `upload`). The `{ browserRunId, artifactId }` input
   of DL-3 waits for `browser-tasks.md` BT-13: no browser run or artifact store exists yet to copy from.
 - `sweepFiles()` implements the 30-day deletion of DL-16. `GET /cron/intake-sweep` in the workers project
-  calls it once per run with a bounded batch (default 50, at most 200). It is off by default: it needs
-  `INTAKE_SWEEP_WORKER=on` and a build-time `INTAKE_SWEEP_CRON_SCHEDULE`, and nothing sets either until an
-  operator does (apps/api/README.md, "Document intake sweep", says how). Until then, stored PDFs stay.
+  calls it once per run with a bounded batch (default 50, at most 200). The repository turns nothing on: it needs
+  `INTAKE_SWEEP_WORKER=on` and a build-time `INTAKE_SWEEP_CRON_SCHEDULE`, set by an operator
+  (apps/api/README.md, "Document intake sweep", says how). Where they are unset, stored PDFs stay.
+- A hosted upload is capped at about 4.5 MB, the request-body limit of Vercel Functions, below the 20 MiB of DL-3.
+  A larger PDF needs a presigned upload, later work.
+- No Docling worker (DL-6, DL-7) runs against the hosted API yet, so a hosted upload stays `queued` until one does.
+- The same 4.5 MB cap applies to a worker's result on the hosted API (the route itself allows 32 MiB). A hosted
+  worker must keep a result under it, or Vercel answers 413 and the lease runs out.
 - An upload whose Idempotency-Key already names an action (a replay of an accepted upload, or a key another
   action used) is checked before storage is touched: it returns the stored outcome or the dispatcher's refusal
   (`IdempotencyConflict` for a changed payload or another action, `BindingMismatch` for another actor) and writes

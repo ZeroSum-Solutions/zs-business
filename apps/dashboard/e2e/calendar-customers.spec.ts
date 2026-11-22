@@ -1,11 +1,20 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 // UI audit U2: what only a browser shows on Calendar and Customers. Focus after an action
 // removed the focused control, layout at 390px, and the offline note.
 
+/** The Day view. The calendar opens on Week when today has no bookings (calendar-view.tsx openingView), so the
+ * day buttons these tests use exist only after the owner picks Day; that depends on the date the suite runs. */
+async function openDayView(page: Page) {
+  await page.goto("/calendar");
+  const day = page.getByRole("group", { name: "View" }).getByRole("button", { name: "Day" });
+  await day.click();
+  await expect(day).toHaveAttribute("aria-pressed", "true");
+}
+
 test.describe("calendar", () => {
   test("after booking an open time, focus lands on the Booked heading, not the page (U2-3)", async ({ page }) => {
-    await page.goto("/calendar");
+    await openDayView(page);
     await expect(page.getByRole("heading", { level: 1, name: "Calendar" })).toBeVisible();
     const open = page.getByRole("region", { name: "Open times" }).getByRole("button", { name: /^Book / });
     // Today may be closed or fully booked.
@@ -24,7 +33,7 @@ test.describe("calendar", () => {
   });
 
   test("the booking sheet never offers a past day first (U2-12)", async ({ page }) => {
-    await page.goto("/calendar");
+    await openDayView(page);
     await page.getByRole("button", { name: "Previous day" }).click();
     await page.getByRole("button", { name: "Book appointment" }).click();
     const dialog = page.getByRole("dialog", { name: "Book an appointment" });
@@ -39,7 +48,7 @@ test.describe("calendar", () => {
   });
 
   test("shows the offline note as soon as the browser is offline, not loading bars (V-5)", async ({ page, context }) => {
-    await page.goto("/calendar");
+    await openDayView(page);
     await expect(page.getByRole("heading", { level: 2, name: "Booked" })).toBeVisible();
     await context.setOffline(true);
     // A day not read yet: its reads wait for the network.
@@ -52,7 +61,7 @@ test.describe("calendar", () => {
 
   test("keeps the date on one line beside the day buttons, and the embed code uncut (V-6, V-11)", async ({ page }, info) => {
     test.skip(info.project.name !== "phone", "phone layout");
-    await page.goto("/calendar");
+    await openDayView(page);
     await page.getByRole("button", { name: "Previous day" }).click();
     const today = page.getByRole("button", { name: "Today" });
     await expect(today).toBeVisible();
