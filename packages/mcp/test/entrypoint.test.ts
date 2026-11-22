@@ -74,7 +74,9 @@ it("keeps serving tools after its idle database connection is terminated", async
   // Closing the client ends the child, however the test ends.
   onTestFinished(() => client.close());
   onTestFailed(() => { console.error(`MCP child stderr:\n${stderr}`); });
-  await client.connect(transport);
+  // The SDK's own 60 s request timeout could end a slow start; the test's timeout bounds it instead.
+  const slow = { timeout: 170_000 };
+  await client.connect(transport, slow);
   // Only the child logs in as the runtime role in this database; end its idle connection. The
   // pool closes a connection after 10 s idle, which a slow machine can outlast between the call
   // and the terminate, so call again until a terminate finds one. Only the count matters.
@@ -83,7 +85,7 @@ it("keeps serving tools after its idle database connection is terminated", async
       WHERE datname = current_database() AND usename = 'zs_runtime'`,
   )).rows[0]?.n ?? 0;
   do {
-    const first = await client.callTool({ name: "list_resources", arguments: {} }) as CallToolResult;
+    const first = await client.callTool({ name: "list_resources", arguments: {} }, undefined, slow) as CallToolResult;
     expect(first.isError, JSON.stringify(first)).toBeFalsy();
   } while (await terminate() === 0);
   // The pool logs the lost connection (57P01) and the child carries on to serve below.
@@ -92,7 +94,7 @@ it("keeps serving tools after its idle database connection is terminated", async
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   expect(closed, stderr).toBe(false);
-  const second = await client.callTool({ name: "list_resources", arguments: {} }) as CallToolResult;
+  const second = await client.callTool({ name: "list_resources", arguments: {} }, undefined, slow) as CallToolResult;
   expect(second.isError, JSON.stringify(second)).toBeFalsy();
   // Starting tsx and the child takes tens of seconds on a busy machine; nothing here is timed.
 }, 180_000);

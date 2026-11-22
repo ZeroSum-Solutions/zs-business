@@ -54,15 +54,20 @@ describe("request deadline over the database", () => {
     const release = () => { if (!released) { released = true; busy.release(); } };
     onTestFinished(release);
     // setImmediate stays real under the fake setTimeout, so this poll runs while time stands still.
+    // It stops when the test ends, however it ends.
+    let ended = false;
+    onTestFinished(() => { ended = true; });
     const parked = (async () => {
-      while (pool.waitingCount === 0) await new Promise((resolve) => setImmediate(resolve));
+      while (pool.waitingCount === 0 && !ended) await new Promise((resolve) => setImmediate(resolve));
     })();
     const answered = await answeredAtDeadline(() => call(app, "GET", "/v1/booking/resources", { token: h.a.token }), parked, DEADLINE_MS);
     expect(answered.status, JSON.stringify(answered.body)).toBe(503);
     expect(answered.headers.get("retry-after")).toBe("1");
     release();
-    // The abandoned checkout gives its client back: the same pool serves the next request.
-    const after = await call(app, "GET", "/v1/booking/resources", { token: h.a.token });
+    // The abandoned checkout gives its client back: the same pool serves the next request. A
+    // patient app reads it, so no real-time deadline can fail the read on a slow machine.
+    const recovery = appOnDatabase(createScopedDatabase(pool, PATIENT), { requestTimeoutMs: 600_000 });
+    const after = await call(recovery, "GET", "/v1/booking/resources", { token: h.a.token });
     expect(after.status, JSON.stringify(after.body)).toBe(200);
   }, DATABASE_TEST_MS);
 });

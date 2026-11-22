@@ -40,12 +40,15 @@ const DATABASE_TEST_MS = 120_000;
 beforeAll(async () => { h = await createApiHarness({ clock, activepieces: {} }); }, DATABASE_TEST_MS);
 /** Lock and statement timeouts, and a deadline, far past any test run: only the test ends a wait. */
 const PATIENT = { lockTimeoutMs: 600_000, statementTimeoutMs: 600_000 };
-const patientApp = () => appOnDatabase(createScopedDatabase(h.database.runtimePool, PATIENT), { clock, requestTimeoutMs: 600_000 });
+const patientDatabase = () => createScopedDatabase(h.database.runtimePool, PATIENT);
+const patientApp = () => appOnDatabase(patientDatabase(), { clock, requestTimeoutMs: 600_000 });
 afterAll(async () => { await h?.close(); });
 
 /** The 20-active-token limit (W-15) is per tenant: each test's tokens are revoked when it ends. */
 const minted: { owner: MemberSetup; id: string }[] = [];
 afterEach(async () => {
+  // A test that timed out mid-shift leaves the shared clock moved; later tests get it back.
+  clockMs = Date.parse(NOW);
   for (const { owner, id } of minted.splice(0))
     await call(h.app, "POST", `/v1/integrations/activepieces/tokens/${id}/revoke`, { token: owner.token, key: randomUUID(), body: {} });
 });
@@ -109,13 +112,14 @@ async function holdTokenRow(tokenId: string) {
   await client.query("BEGIN");
   await client.query("SELECT 1 FROM automation_tokens WHERE id=$1 FOR UPDATE", [tokenId]);
   let done = false;
-  return {
-    async release() {
-      if (done) return;
-      done = true;
-      try { await client.query("ROLLBACK"); } finally { client.release(); }
-    },
+  const release = async () => {
+    if (done) return;
+    done = true;
+    try { await client.query("ROLLBACK"); } finally { client.release(); }
   };
+  // Released however the test ends, so a hung test cannot hold the row into later tests.
+  onTestFinished(release);
+  return { release };
 }
 /** The app's database with every statement logged, passed through unchanged below the scoped layer's checks. */
 function recording(base: ScopedDatabase = h.database.db) {
@@ -556,7 +560,8 @@ describe("usage record and the owner route (H-8)", () => {
 
 describe("deadline, disconnect and outage (H-5)", () => {
   /** A database that holds the first statement matching `pattern` until `release()`, and logs what became of it. */
-  function holding(pattern: RegExp, onStatement?: (sql: string) => Error | undefined) {
+  /** `base` is patient in the race tests, so only the test's own release ends the held statement. */
+  function holding(pattern: RegExp, onStatement?: (sql: string) => Error | undefined, base: ScopedDatabase = h.database.db) {
     let reached!: () => void;
     const atStatement = new Promise<void>((resolve) => { reached = resolve; });
     let release!: () => void;
@@ -565,8 +570,8 @@ describe("deadline, disconnect and outage (H-5)", () => {
     onTestFinished(() => release());
     const outcomes: string[] = [];
     const db: ScopedDatabase = {
-      ...h.database.db,
-      tenant: (tenantId, work, options) => h.database.db.tenant(tenantId, (tx) => work({
+      ...base,
+      tenant: (tenantId, work, options) => base.tenant(tenantId, (tx) => work({
         query: (async (sql: string, params?: unknown[]) => {
           const failure = onStatement?.(sql);
           if (failure) throw failure;
@@ -589,8 +594,9 @@ describe("deadline, disconnect and outage (H-5)", () => {
 
   it("cancels the request's database work when the client disconnects", async () => {
     const { secret } = await mint(owner(h.a), ["contacts:read"]);
-    const held = holding(/FROM crm_contacts/i);
-    const app = appOnDatabase(held.db, { clock });
+    // Patient limits and deadline: only the client's disconnect can end the held request.
+    const held = holding(/FROM crm_contacts/i, undefined, patientDatabase());
+    const app = appOnDatabase(held.db, { clock, requestTimeoutMs: 600_000 });
     const gone = new AbortController();
     const pending = app.fetch(new Request(URL_BASE, {
       method: "POST", headers: headersFor(secret), body: JSON.stringify(callTool("list_contacts")), signal: gone.signal,
@@ -645,22 +651,26 @@ describe("deadline, disconnect and outage (H-5)", () => {
     expect(seen.sqls.filter((sql) => /crm_contacts/i.test(sql))).toEqual([]);
   });
 
-  it("cancels a request that waits on a lock when the client disconnects: the wait ends, nothing is written, the connection is free", async () => {
+  it("ends a request that waits on a lock when the client disconnects, while the lock is still held; nothing is written and the connection is free", async () => {
     const { secret, token } = await mint(owner(h.a), ["contacts:propose"]);
     const approvals = () => queryCount("SELECT count(*) AS n FROM approvals WHERE tenant_id=$1", [h.a.tenantId]);
     const before = await approvals();
     const lock = await holdTokenRow(token.id);
     try {
       const gone = new AbortController();
-      // Patient limits: only the client's disconnect can end the wait the test observes.
+      // Patient limits: no lock or statement timeout can end the request, so only the client's
+      // disconnect can answer it while the lock is still held.
       const pending = Promise.resolve(patientApp().fetch(new Request(URL_BASE, {
         method: "POST", headers: headersFor(secret), signal: gone.signal,
         body: JSON.stringify(callTool("propose_contact_upsert", { idempotencyKey: randomUUID(), email: `gone-${randomUUID().slice(0, 6)}@haldenrowe.example` })),
       }))).then((reply) => reply.status, () => 0);
       await waitUntil(async () => (await lockWaiters("automation_tokens")) > 0, "the proposal to wait on the token row");
       gone.abort();
-      await waitUntil(async () => (await lockWaiters("automation_tokens")) === 0, "the lock wait to be cancelled");
       expect([0, 503]).toContain(await pending);
+      // The abandoned transaction runs no statement after its wait: once the lock goes, it rolls
+      // back and gives its connection back.
+      await lock.release();
+      await waitUntil(async () => (await lockWaiters("automation_tokens")) === 0, "the lock wait to end");
       await waitUntil(async () => h.database.runtimePool.totalCount === h.database.runtimePool.idleCount, "the pool to get its connections back");
       expect(await queryCount(
         `SELECT count(*) AS n FROM pg_stat_activity WHERE datname=current_database() AND usename='zs_runtime' AND state LIKE 'idle in transaction%'`, [])).toBe(0);
@@ -696,8 +706,9 @@ describe("deadline, disconnect and outage (H-5)", () => {
   it("lets an in-flight read finish and stops the next one when an owner revokes meanwhile", async () => {
     const { secret, token } = await mint(owner(h.a), ["contacts:read"]);
     const seeded = await seedContact(h.a, "Inflight");
-    const held = holding(/FROM crm_contacts/i);
-    const app = appOnDatabase(held.db, { clock });
+    // Patient on both sides: only the test's release ends the held read, at any machine speed.
+    const held = holding(/FROM crm_contacts/i, undefined, patientDatabase());
+    const app = appOnDatabase(held.db, { clock, requestTimeoutMs: 600_000 });
     const pending = rpc(app, secret, callTool("list_contacts", { search: seeded.email }));
     await held.atStatement;
     let revoked = false;
@@ -715,8 +726,9 @@ describe("deadline, disconnect and outage (H-5)", () => {
 
   it("lets an in-flight proposal commit, then refuses its replay and any new proposal after a revoke", async () => {
     const { secret, token } = await mint(owner(h.a), ["contacts:propose"]);
-    const held = holding(/INSERT INTO approvals/i);
-    const app = appOnDatabase(held.db, { clock });
+    // Patient on both sides: only the test's release ends the held proposal, at any machine speed.
+    const held = holding(/INSERT INTO approvals/i, undefined, patientDatabase());
+    const app = appOnDatabase(held.db, { clock, requestTimeoutMs: 600_000 });
     const proposal = callTool("propose_contact_upsert", {
       idempotencyKey: randomUUID(), email: `race-${randomUUID().slice(0, 6)}@haldenrowe.example`,
     });
@@ -911,9 +923,10 @@ describe("usage under pressure and by definition (H-8)", () => {
     const { secret, token } = await mint(owner(h.a), ["business:read"]);
     await h.database.pool.query(
       `INSERT INTO automation_token_usage (tenant_id,token_id,hour,requests)
-       SELECT $1, $2, date_trunc('hour', now()) - interval '90 days' - n * interval '1 hour', 1 FROM generate_series(0, 4) n`,
-      [h.a.tenantId, token.id]);
-    const old = () => queryCount("SELECT count(*) AS n FROM automation_token_usage WHERE token_id=$1 AND hour < now() - interval '60 days'", [token.id]);
+       SELECT $1, $2, date_trunc('hour', $3::timestamptz) - interval '90 days' - n * interval '1 hour', 1 FROM generate_series(0, 4) n`,
+      [h.a.tenantId, token.id, NOW]);
+    // Old by the app's fixed clock, not the host's date, so the fixture never ages out of range.
+    const old = () => queryCount("SELECT count(*) AS n FROM automation_token_usage WHERE token_id=$1 AND hour < $2::timestamptz - interval '60 days'", [token.id, NOW]);
     expect(await old()).toBe(5);
     const fresh = appOnDatabase(h.database.db, { clock });
     expect((await rpc(fresh, secret, callTool("get_business"))).status).toBe(200);

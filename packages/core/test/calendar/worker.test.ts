@@ -73,23 +73,28 @@ function parkedCall(answerAfterMs?: number) {
 
 /**
  * Runs `start` with setTimeout faked, waits until the run is parked in a Google call, and shows
- * that the worker ends that call exactly when the run's `leftMs` are used up: its signal is not
- * aborted one fake millisecond earlier, and is aborted at the deadline. The manual clock moves to
- * the deadline with the timers, so later calls see no time left. No wall clock is read.
+ * that the worker ends that call exactly when its `leftMs` (the run's time left, or the request
+ * timeout) are used up: its signal is not aborted one fake millisecond earlier, and is aborted
+ * then. The manual clock moves with the timers, so later calls see the time as spent. No wall
+ * clock is read.
  */
 async function endsAtDeadline<T>(clock: ManualClock, start: () => Promise<T>, parked: Promise<AbortSignal>, leftMs: number): Promise<T> {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  // Real timers come back even when the run hangs and the test times out.
   onTestFinished(() => { vi.useRealTimers(); });
-  const pending = start();
-  pending.catch(() => undefined);
-  const signal = await Promise.race([parked, pending.then(() => { throw new Error("the run ended before the call parked"); })]);
-  await vi.advanceTimersByTimeAsync(leftMs - 1);
-  expect(signal.aborted, "the call ended before the run's deadline").toBe(false);
-  clock.advance(leftMs);
-  await vi.advanceTimersByTimeAsync(1);
-  expect(signal.aborted, "the call outlived the run's deadline").toBe(true);
-  vi.useRealTimers();
-  return pending;
+  try {
+    const pending = start();
+    pending.catch(() => undefined);
+    const signal = await Promise.race([parked, pending.then(() => { throw new Error("the run ended before the call parked"); })]);
+    await vi.advanceTimersByTimeAsync(leftMs - 1);
+    expect(signal.aborted, "the call ended before the run's deadline").toBe(false);
+    clock.advance(leftMs);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(signal.aborted, "the call outlived the run's deadline").toBe(true);
+    return await pending;
+  } finally {
+    vi.useRealTimers();
+  }
 }
 
 async function world(options: { pageSize?: number; delayMs?: number; timeZone?: string } = {}): Promise<World> {
@@ -372,7 +377,7 @@ describe("sync (G-6, G-7)", () => {
     });
     await holding;
     let finished = false;
-    const run = h.worker(w.google, w.clock).runOnce().then((counts) => { finished = true; return counts; });
+    const run = h.worker(w.google, w.clock).runOnce().finally(() => { finished = true; });
     // The worker's apply transaction waits on the same advisory lock. No try cap: on a busy
     // machine the worker can take seconds to get there, and the test timeout bounds the wait.
     let waiting = 0;
@@ -442,11 +447,12 @@ describe("sync (G-6, G-7)", () => {
     expect(row.last_error).toBe("google_network");
     expect(row.next_sync_at.getTime()).toBe(START + 16 * MINUTE + 15 * MINUTE);
     expect((await h.blocks(w.resource.tenantId)).length).toBe(1);
-    // A hanging call times out instead of holding the pass.
+    // A hanging call times out instead of holding the pass: at exactly the 50 ms request timeout.
     w.clock.advance(15 * MINUTE);
-    w.google.fail("listEvents", () => new Promise<void>(() => undefined));
+    const hanging = parkedCall();
+    w.google.fail("listEvents", hanging.hook);
     const timedOut = h.worker(w.google, w.clock, { requestTimeoutMs: 50, leaseMs: 1000 });
-    expect((await timedOut.runOnce()).syncFailed).toBe(1);
+    expect((await endsAtDeadline(w.clock, () => timedOut.runOnce(), hanging.parked, 50)).syncFailed).toBe(1);
     expect((await h.connectionRow(w.resource.tenantId, w.connectionId)).last_error).toBe("google_timeout");
   });
 

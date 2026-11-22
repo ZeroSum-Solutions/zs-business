@@ -224,6 +224,7 @@ describe("a public booking request under the request deadline", () => {
     const { path, body, bookings } = await bookablePage();
     const key = randomUUID();
     const original = call(app(slow), "POST", path, { key, body });
+    original.catch(() => undefined); // awaited below; never an unhandled rejection if the test fails first
     await held;
     // A short lock wait, well inside the deadline, so the timeout is the lock's own.
     const retry = await call(app(createScopedDatabase(h.database.runtimePool, { lockTimeoutMs: 200 })), "POST", path, { key, body });

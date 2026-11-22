@@ -340,8 +340,11 @@ export async function answeredAtDeadline<T>(request: () => Promise<T>, parked: P
 export async function waitUntil(condition: () => Promise<boolean> | boolean, what = "a condition"): Promise<void> {
   let done = false;
   onTestFinished(() => { done = true; });
-  while (!(await condition())) {
-    if (done) throw new Error(`the test ended while waiting for ${what}`);
+  const ended = () => new Error(`the test ended while waiting for ${what}`);
+  for (;;) {
+    if (done) throw ended();
+    if (await condition()) break;
+    if (done) throw ended();
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
 }

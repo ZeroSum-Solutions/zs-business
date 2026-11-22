@@ -78,6 +78,8 @@ async function startApi(extraEnv: Record<string, string> = {}): Promise<Running>
   child.stdout?.on("data", onOutput);
   child.stderr?.on("data", onOutput);
   child.on("exit", (code) => { exitCode = code ?? -1; changed(); });
+  // A spawn failure ends the wait below as a failed start instead of crashing the test worker.
+  child.on("error", (error) => { output += `\nspawn error: ${error.message}`; exitCode ??= -1; changed(); });
   // Started once it says so, or failed once it exits; the test timeout bounds the wait.
   await new Promise<void>((resolve) => {
     changed = () => { if (exitCode !== null || output.includes("listening")) resolve(); };
@@ -143,8 +145,14 @@ describe("API entry point", () => {
         headers: { Authorization: `Bearer ${token}` },
       });
       expect(response.status).toBe(200);
-      const ready = await fetch(`http://127.0.0.1:${api.port}/readyz`);
-      expect(ready.status).toBe(200);
+      // The readiness probe has its own short budget, which a slow machine can use up: every
+      // answer must be 200 or 503, and it must reach 200. The test's timeout bounds the loop.
+      let ready = await fetch(`http://127.0.0.1:${api.port}/readyz`);
+      while (ready.status !== 200) {
+        expect(ready.status).toBe(503);
+        await ready.body?.cancel();
+        ready = await fetch(`http://127.0.0.1:${api.port}/readyz`);
+      }
       expect(await ready.json()).toEqual({ ok: true });
       // The log names the SQLSTATE but never the connection string or its credentials.
       expect(api.output()).not.toContain(database.name);
@@ -157,8 +165,8 @@ describe("API entry point", () => {
   // the app, a request that cannot get a connection answers 503, and the process lives on.
   // deadline-database.test.ts proves in process, on fake timers, that the deadline ends each wait.
   it("answers 503 when every connection is busy, then serves again once the lock is gone", async () => {
-    // A 5 s deadline: on a busy machine a healthy read still fits, and the busy ones end at it.
-    const api = await startApi({ DATABASE_POOL_MAX: "1", REQUEST_TIMEOUT_MS: "5000" });
+    // A 4 s deadline, below the 5 s default lock timeout, so the deadline always caps the lock wait.
+    const api = await startApi({ DATABASE_POOL_MAX: "1", REQUEST_TIMEOUT_MS: "4000" });
     // Hold the API's only connection: lock a table it reads, then make a request wait on that lock.
     const holder = await database.pool.connect();
     onTestFinished(async () => {
@@ -170,11 +178,23 @@ describe("API entry point", () => {
     await holder.query("LOCK TABLE booking_resources IN ACCESS EXCLUSIVE MODE");
     const headers = { Authorization: `Bearer ${token}` };
     const read = () => fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, { headers });
-    const [first, second] = await Promise.all([read(), read()]);
-    for (const answered of [first, second]) {
-      expect(answered.status).toBe(503);
-      expect(answered.headers.get("retry-after")).toBe("1");
-      expect(await answered.json()).toEqual({ error: { code: "Unavailable", message: "Service unavailable", details: {} } });
+    // DATABASE_POOL_MAX reached the pool: while both reads are in flight the process never holds
+    // more than one backend. Without it each read would open its own and wait on the lock.
+    let answered = false;
+    const both = Promise.all([read(), read()]).finally(() => { answered = true; });
+    let most = 0;
+    while (!answered) {
+      const { rows } = await database.pool.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND usename = 'zs_runtime'`);
+      most = Math.max(most, rows[0]!.n);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(most).toBeLessThanOrEqual(1);
+    const [first, second] = await both;
+    for (const reply of [first, second]) {
+      expect(reply.status).toBe(503);
+      expect(reply.headers.get("retry-after")).toBe("1");
+      expect(await reply.json()).toEqual({ error: { code: "Unavailable", message: "Service unavailable", details: {} } });
     }
     await holder.query("ROLLBACK");
     // Once the lock is gone the same process serves again. Its one connection may still be
