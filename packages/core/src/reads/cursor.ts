@@ -5,7 +5,7 @@ import { validationError } from "../edge/errors.js";
 
 /** Which list and order a cursor belongs to; a cursor from another one is refused. */
 export type CursorKind =
-  | "contacts.recent" | "contacts.name" | "deals.recent" | "bookings.start" | "intake.recent" | "inbox.recent" | "approvals.recent" | "agents.runs"
+  | "contacts.recent" | "contacts.name" | "deals.recent" | "bookings.start" | "intake.recent" | "inbox.recent" | "approvals.recent" | "agents.runs" | "actions.recent"
   // outreach-sequencer.md OS-22: prospects in address order; the sort value is the address.
   | "outreach.prospects";
 
