@@ -1200,7 +1200,7 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
     },
 
     /** plans.md PL-7: the plan, its limits and what can be bought. */
-    getBillingPlan: (options: { readonly features?: boolean } = {}): Promise<BillingPlan> => {
+    getBillingPlan: (options: { readonly features?: boolean; readonly freeTier?: boolean } = {}): Promise<BillingPlan> => {
       const plans = deps.billing?.plans;
       // PL-26: the plan row, the runners' heartbeats, the agent switches and the template approval are read as one
       // snapshot, so a change that lands between two statements cannot show a feature against a state that never was.
@@ -1208,6 +1208,7 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
         now: new Date(readClock(deps.clock)), trialDays: plans?.config.trialDays ?? 0, checkoutEnabled: plans !== undefined,
         shopifyAppHandle: deps.shopifyBilling?.appHandle ?? null,
         features: options.features === true,
+        freeTier: options.freeTier === true,
         deploy: { voiceWebhook: deps.voiceWebhook === true },
       }));
     },

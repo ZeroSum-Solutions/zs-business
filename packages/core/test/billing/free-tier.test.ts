@@ -308,10 +308,15 @@ describe("the edges of the allowances (PL-27)", () => {
     await lockTaken;
     let settled = false;
     const reservation = reserve(tenantId, free + 1).finally(() => { settled = true; });
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    expect(settled).toBe(false);
-    release();
-    await change;
+    reservation.catch(() => undefined);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(settled).toBe(false);
+    } finally {
+      // Released whatever happens, so a regression fails this test instead of hanging the pool's shutdown.
+      release();
+      await change;
+    }
     expect(await reservation).toMatchObject({ status: "cost_cap", capMicros: free });
   });
 
@@ -332,10 +337,13 @@ describe("the edges of the allowances (PL-27)", () => {
     let settled = false;
     const enable = gate(tenantId, "agent.kind.settings.update", enableKind("inquiry_followup")).finally(() => { settled = true; });
     enable.catch(() => undefined);
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    expect(settled).toBe(false);
-    release();
-    await change;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(settled).toBe(false);
+    } finally {
+      release();
+      await change;
+    }
     await expect(enable).rejects.toMatchObject(limitOf("modelAgents", 0));
   });
 
@@ -366,13 +374,26 @@ describe("the edges of the allowances (PL-27)", () => {
     await b.h.service((tx) => tx.query(
       `INSERT INTO runner_heartbeats (runner, beat_at, fresh_for_seconds) VALUES ('followup',$1,3600)
        ON CONFLICT (runner) DO UPDATE SET beat_at=$1, fresh_for_seconds=3600`, [b.h.clock.now()]));
-    const view = await (await planSession(tenantId)).getBillingPlan({ features: true });
+    const view = await (await planSession(tenantId)).getBillingPlan({ features: true, freeTier: true });
     expect(view.freeTier).toBe(true);
     const studio = view.catalog.find((offer) => offer.plan === "studio")!;
     expect(studio.features?.find((feature) => feature.kind === "inquiry_followup")?.offReason).not.toBe("no_budget");
-    expect((await (await planSession(await b.tenant())).getBillingPlan({ features: true })).freeTier).toBe(false);
-    // Without `features` the key is left out, as PL-26's are.
+    expect((await (await planSession(await b.tenant())).getBillingPlan({ features: true, freeTier: true })).freeTier).toBe(false);
+    // Spend that Studio's own cap would refuse keeps Studio's budget block, while Pro's larger cap has room.
+    await setKindCap(tenantId, "inquiry_followup", 2_000_000, true);
+    await b.h.service((tx) => tx.query(
+      `INSERT INTO agent_model_calls (tenant_id, id, call_key, run_id, agent_kind, subject_id, lane, model,
+         input_tokens, output_tokens, cost_micros, outcome, created_at)
+       VALUES ($1, gen_random_uuid(), 'test-spend', NULL, 'inquiry_followup', NULL, 'no_personal_data', 'fake-model', 1, 1, 1200000, 'ok', $2)`,
+      [tenantId, b.h.clock.now()]));
+    const spent = await (await planSession(tenantId)).getBillingPlan({ features: true });
+    const offerReason = (plan: string) => spent.catalog.find((offer) => offer.plan === plan)!.features
+      ?.find((feature) => feature.kind === "inquiry_followup")?.offReason;
+    expect(offerReason("studio")).toBe("no_budget");
+    expect(offerReason("pro")).not.toBe("no_budget");
+    // Without its own opt-in the key is left out, so a dashboard built before it still parses the answer.
     expect(await (await planSession(tenantId)).getBillingPlan()).not.toHaveProperty("freeTier");
+    expect(await (await planSession(tenantId)).getBillingPlan({ features: true })).not.toHaveProperty("freeTier");
   });
 });
 

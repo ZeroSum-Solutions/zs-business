@@ -9,7 +9,9 @@ import {
   planFeatureBlock,
   planFeatureRunners,
   planFeatureSwitch,
+  planModelCapMicros,
   type PlanFeatureBlock,
+  type PlanLimits,
   type PlanFeatureKind,
   type PlanFeatureSwitch,
   type PlanRunner,
@@ -27,10 +29,10 @@ export interface PlanFeatureFacts {
   readonly approved: boolean;
   readonly equipped: boolean;
   /**
-   * PL-27: the budget block comes from the current plan's daily model cap alone (the kind's own cap has room). The
-   * offers drop it: each other plan has its own cap.
+   * PL-27: a model-assisted kind's spend in the last 24 hours and its own daily cap, set when the budget blocks it.
+   * Each offer decides the block again against the lower of its own plan's cap and the kind's own.
    */
-  readonly planCapOnly?: boolean;
+  readonly budget?: { readonly spentMicros: number; readonly ownCapMicros: number };
 }
 
 /** What only the API process knows, passed in by the session: the routes this deploy mounts. */
@@ -66,8 +68,9 @@ export async function planFeatureFacts(
     const status = await agentKindStatus(tx, tenantId, kind, now);
     const blockedBy = planFeatureBlock(status.blockedBy);
     if (kind === "inquiry_followup") {
-      const planCapOnly = status.blockedBy === "cost_cap" && status.costSpentMicros < status.settings.maxCostMicrosPerDay;
-      facts[kind] = { running: live(kind, null), blockedBy, approved: true, equipped: true, planCapOnly };
+      const budget = status.blockedBy === "cost_cap"
+        ? { spentMicros: status.costSpentMicros, ownCapMicros: status.settings.maxCostMicrosPerDay } : undefined;
+      facts[kind] = { running: live(kind, null), blockedBy, approved: true, equipped: true, ...(budget ? { budget } : {}) };
       continue;
     }
     // A run queues only from the current revision, under a standing approval that names its digest (G-19, A-15).
@@ -99,12 +102,17 @@ export async function planFeatureFacts(
   return facts;
 }
 
-/** PL-26: every feature's switch from its facts; `readOnly` (PL-8) puts the whole list off, the runtime refusing every run. */
+/**
+ * PL-26: every feature's switch from its facts; `readOnly` (PL-8) puts the whole list off, the runtime refusing every
+ * run. With `offer`, the switches as that plan would have them (PL-27): a budget block holds only when the spend
+ * reaches the lower of the offer's daily model cap and the kind's own.
+ */
 export function planFeatureSwitches(
-  facts: Readonly<Record<PlanFeatureKind, PlanFeatureFacts>>, readOnly: boolean, offer = false,
+  facts: Readonly<Record<PlanFeatureKind, PlanFeatureFacts>>, readOnly: boolean, offer?: PlanLimits,
 ): Record<PlanFeatureKind, PlanFeatureSwitch> {
   return Object.fromEntries(PLAN_FEATURE_KINDS.map((kind) => {
-    const { planCapOnly, ...fact } = facts[kind];
-    return [kind, planFeatureSwitch({ readOnly, ...fact, ...(offer && planCapOnly ? { blockedBy: null } : {}) })];
+    const { budget, ...fact } = facts[kind];
+    const room = offer && budget && budget.spentMicros < Math.min(budget.ownCapMicros, planModelCapMicros(offer));
+    return [kind, planFeatureSwitch({ readOnly, ...fact, ...(room ? { blockedBy: null } : {}) })];
   })) as Record<PlanFeatureKind, PlanFeatureSwitch>;
 }

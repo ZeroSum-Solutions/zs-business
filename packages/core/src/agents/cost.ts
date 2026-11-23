@@ -110,7 +110,7 @@ async function runIsOpen(tx: Transaction, tenantId: string, runId: string | null
  * caller has it: nothing is written, and the caller must not call the model a second time.
  */
 export async function reserveModelCall(
-  tx: Transaction, tenantId: string, call: ModelCallRef, worst: WorstCase, now: Date,
+  tx: Transaction, tenantId: string, call: ModelCallRef, worst: WorstCase, clock: Date | (() => Date),
 ): Promise<Reservation> {
   // PL-27: the plan lock (shared) before the settings lock, so a plan change cannot commit between the cap read and
   // the insert. A caller that writes the settings row first takes it before that write (one lock order).
@@ -120,6 +120,9 @@ export async function reserveModelCall(
   )).rows[0];
   // The run's row second, as the draft decision does (settings, then run): one lock order, no deadlock.
   if (!(await runIsOpen(tx, tenantId, call.runId))) return { status: "run_closed" };
+  // PL-27: the instant is read after the locks, so a wait on a plan change cannot decide at a time that has passed
+  // (a grant that ended meanwhile). A caller with a clock passes it; a fixed instant is used as it is.
+  const now = typeof clock === "function" ? clock() : clock;
   // A kind that reaches a model call has a row (the gate stops a kind that is off); no row reads as the default cap.
   // PL-27: never above the plan's daily model cap.
   const capMicros = await effectiveCostCap(tx, tenantId, call.kind, settings?.max_cost_micros_per_day ?? 1_000_000, now);

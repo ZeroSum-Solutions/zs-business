@@ -773,9 +773,12 @@ comped. No code set `free_tier` before this revision (PL-25 "No script yet"), so
 
 The free tier is no plan to buy. `GET /v1/billing/plan` answers these limits; for a tenant that never subscribed
 status is `none` and plan `null`, and after a lapse status and plan stay those of the ended subscription (its
-history), with the free limits. With `?features=1` (PL-26) it adds `freeTier: true` for a marked tenant. The plan page
-then shows a **Free allowances** card with the limits above the paid plans, and its billing banner says that an ended
-or unpaid plan moves the business to the free allowances, never that it turns read-only.
+history), with the free limits. With `?features=1&free=1` it adds `freeTier` (true for a marked tenant); the key has
+its own opt-in for the reason `features` has one (PL-26): the response schema is strict, so a dashboard built before
+it would refuse an answer that carries it. The plan page then shows a **Free allowances** card with the limits above
+the paid plans, and its billing banner says that an ended or unpaid plan moves the business to the free allowances,
+never that it turns read-only. Once an unpaid plan's grace has passed the status still says `past_due`; the banner
+then says the business has the free allowances until the card is updated, and the plan card says the same.
 The native Shopify link (connections.md C-21) is the hub's own store, not a managed connection: the
 `connection.connect` count leaves out `tier = 'native'` for every plan, so a merchant's one free connection is free
 for a mailbox. The rules below apply to **every tenant with limits** (free, provider plan or grant),
@@ -795,8 +798,9 @@ by the PL-1 row of the plan in force; a comped tenant has no limits and passes t
   The cap is 0 for a model-assisted kind on a plan without `modelAgents`, so a run that was open before a downgrade
   reserves no further call, and 0 for every kind while the tenant is read-only (PL-8), which stops the template
   suggestions too. A reservation takes the plan lock in shared mode before the kind's settings lock, so a plan change
-  cannot commit between its cap read and its insert. The plan page's offers (PL-26) leave out a `no_budget` reason that
-  only the current plan's cap causes: each offered plan has its own cap.
+  cannot commit between its cap read and its insert, and it reads the clock after its locks, so a wait cannot decide at
+  an instant that has passed. Each offer on the plan page (PL-26) decides `no_budget` again: the kind's spend against the
+  lower of that plan's cap and the kind's own cap.
 - **Emails.** The allowance counts `message.send_requested` outbox events with `channel: "email"` that the tenant
   queued in the 30 days before the clock (a rolling window like PL-25's, from the injected clock, never a SQL
   interval; `outbox_tenant_type_created` serves the count, so no new table or counter can drift). After the handler,

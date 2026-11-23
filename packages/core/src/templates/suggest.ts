@@ -112,7 +112,7 @@ export async function suggestTemplate(
     const reserved = await reserveModelCall(tx, tenantId, {
       callKeyBase: `agent:${kind}:suggestion:${key}`, runId: null, kind,
       subjectId, lane: TEMPLATE_SUGGESTION_LANE, model: deps.model.model,
-    }, worst, now());
+    }, worst, now);
     if (reserved.status !== "reserved") return reserved;
     // A key whose call already came back was answered once: a replay never pays for a second call.
     // Checked under the settings lock, so a replay racing the first call sees its settled row.

@@ -63,6 +63,10 @@ describe("GET /v1/billing/plan (PL-7)", () => {
     // The test database has no runner beat: whatever a tenant switched on, no feature reads as included.
     expect(view.features!.every((feature) => feature.state === "off" && feature.offReason === "not_running")).toBe(true);
     expect(view.catalog.every((offer) => offer.features!.every((feature) => feature.state === "off"))).toBe(true);
+    // PL-27: `freeTier` has its own opt-in, so a dashboard that asks only for features never meets the key.
+    expect(Object.keys(asked.body as object)).not.toContain("freeTier");
+    const free = await call(app, "GET", "/v1/billing/plan?features=1&free=1", { token: h.a.token });
+    expect(billingPlanSchema.parse(free.body).freeTier).toBe(false);
   });
 });
 
