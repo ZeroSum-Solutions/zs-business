@@ -4,7 +4,7 @@ import { createElement as h } from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ROLE_PERMISSIONS, roleCan, type ReplyRecord } from "@zs/contracts";
-import { DraftActions, QUEUED_MESSAGE, REPLY_STATUS } from "../src/components/inbox/inbox-view";
+import { DraftActions, QUEUED_MESSAGE, RedraftAction, REPLY_STATUS } from "../src/components/inbox/inbox-view";
 import { APPROVE_REPLIES } from "../src/lib/session";
 
 const reply: ReplyRecord = {
@@ -33,6 +33,13 @@ describe("draft actions", () => {
     expect(html).not.toContain("Approve and queue");
     expect(html).toContain(">Discard<");
     expect(html).toContain("Waiting for an owner to approve it before it is queued to send.");
+  });
+
+  it("offers a reply stopped for a changed address a way to draft it again (approvals.md A-16)", () => {
+    const html = renderToString(h(RedraftAction, { busy: false, onRedraft: () => undefined })).replaceAll("<!-- -->", "");
+    expect(html).toContain("Draft again for the new address");
+    expect(html).not.toContain('disabled=""');
+    expect(renderToString(h(RedraftAction, { busy: true, onRedraft: () => undefined }))).toContain('disabled=""');
   });
 
   it("never says an approved reply was sent", () => {

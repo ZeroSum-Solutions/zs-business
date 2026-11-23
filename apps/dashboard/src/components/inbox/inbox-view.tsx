@@ -281,7 +281,7 @@ function ThreadEntries({ thread, zone }: { thread: ThreadDetail; zone: string })
   const step = useMutation({
     mutationFn: (input: Step) => {
       const options = { idempotencyKey: intents.keyFor(input) };
-      return input.kind === "approve" ? api.approveReply(input.replyId, options) : api.discardReply(input.replyId, options);
+      return input.kind === "approve" ? api.approveReply(input.replyId, options, thread.email) : api.discardReply(input.replyId, options);
     },
     onSettled: async (_reply, error, input) => {
       intents.settle(input, error);
@@ -333,6 +333,11 @@ function ThreadEntries({ thread, zone }: { thread: ThreadDetail; zone: string })
                 busy={step.isPending && step.variables?.replyId === entry.reply.id}
                 onStep={(kind) => step.mutate({ kind, replyId: entry.reply.id })}
               />
+            ) : canApprove && entry.reply.status === "failed" && entry.reply.deliveryReason === "destination_changed" ? (
+              <RedraftAction
+                busy={step.isPending && step.variables?.replyId === entry.reply.id}
+                onRedraft={() => step.mutate({ kind: "approve", replyId: entry.reply.id })}
+              />
             ) : null}
           </ReplyBubble>
         ))}
@@ -381,6 +386,22 @@ export function DraftActions({ reply, canApprove, canDiscard, noEmailRecord = nu
           </Button>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+/**
+ * approvals.md A-16: a reply that was not sent because the customer's address changed after
+ * approval. The owner drafts the same words again for the new address; the server answers that
+ * it was proposed (409 `destination_changed`), the thread reloads, and the new draft waits for
+ * an approval like any other.
+ */
+export function RedraftAction({ busy, onRedraft }: { busy: boolean; onRedraft: () => void }) {
+  return (
+    <div className="mt-2 flex max-w-[85%] flex-col items-end gap-2">
+      <Button variant="secondary" disabled={busy} aria-busy={busy} onClick={onRedraft}>
+        <PaperPlaneTilt aria-hidden />Draft again for the new address
+      </Button>
     </div>
   );
 }

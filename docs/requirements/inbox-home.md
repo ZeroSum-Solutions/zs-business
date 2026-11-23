@@ -107,7 +107,10 @@ action row carries the stored approval as its approval reference, so `approvalFo
 (A-10) finds it.
 Nothing in M3c sends. The delivery worker (M3d) reads the event, takes the address from the
 contact at delivery time (and stops the send `destination_changed` when it is no longer the
-bound one; the reply read then shows `deliveryReason`), re-checks the approval (A-10), consent and suppression, and settles the reply
+bound one; the reply read then shows `deliveryReason`, and an owner sees "Not sent: the customer's
+address changed after approval" with a "Draft again for the new address" button that calls
+`approveReply` on it and reloads the thread with the new draft to approve; the approve button
+sends the address the thread showed, so a stale screen gets 409 `destination_changed`), re-checks the approval (A-10), consent and suppression, and settles the reply
 once through its settle hook, `settleReplyDelivery(tx, tenantId, messageId, outcome, at)`
 (`approved` to `sent` or `failed`; a no-op for any other message or a settled reply). Whatever
 runs the worker passes it as `onSettled`, with `approvalsFromRecords(approvalForAction, clock)`

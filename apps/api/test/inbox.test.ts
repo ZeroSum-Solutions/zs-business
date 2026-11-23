@@ -256,6 +256,23 @@ describe("replies (I-4..I-7)", () => {
     expect(await outbox(h.a)).toEqual(before);
   });
 
+  it("answers a changed address with 409 destination_changed, the current address and the new proposal (A-16)", async () => {
+    const { contactId } = await websiteRequest({ notes: "Is my ring ready?" });
+    const reply = replyOutputSchema.parse((await draft({ contactId, body: "It is ready." })).body).result;
+    const stale = await call(h.app, "POST", `/v1/inbox/replies/${reply.id}/approve`, {
+      token: h.a.token, key: randomUUID(), body: { destination: "someone-else@haldenrowe.example" } });
+    expect(stale.status).toBe(409);
+    expect(errorOf(stale)).toMatchObject({ code: "Conflict", details: {
+      reason: "destination_changed", destination: expect.stringMatching(/@haldenrowe\.example$/) } });
+    const moved = `moved-${randomUUID().slice(0, 8)}@haldenrowe.example`;
+    await h.fixture.service((tx) => tx.query("UPDATE crm_contacts SET normalized_email=$3 WHERE tenant_id=$1 AND id=$2", [h.a.tenantId, contactId, moved]));
+    const rebound = await step(reply.id, "approve");
+    expect(rebound.status).toBe(409);
+    expect(errorOf(rebound).details).toEqual({ reason: "destination_changed", destination: moved, approvalId: expect.stringMatching(/^[0-9a-f-]{36}$/) });
+    const approved = await call(h.app, "POST", `/v1/inbox/replies/${reply.id}/approve`, { token: h.a.token, key: randomUUID(), body: { destination: moved } });
+    expect(approved.status).toBe(200);
+  });
+
   it("refuses to approve a reply to a customer without an email address", async () => {
     const contactId = await ownerContact(h.a.token, { displayName: "Desmond Lyle", phone: "+12025550104" });
     const reply = replyOutputSchema.parse((await draft({ contactId, body: "Your repair is ready." })).body).result;

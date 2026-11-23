@@ -97,6 +97,8 @@ export interface DeliveryHarness {
     body?: string;
     subject?: string;
     messageId?: string;
+    /** approvals.md A-16: the address the send was approved for. */
+    destination?: string;
     approve?: boolean;
     raw?: Record<string, unknown>;
   }): Promise<{ messageId: string; approvalId: string }>;
@@ -171,6 +173,7 @@ export async function createDeliveryHarness(): Promise<DeliveryHarness> {
         messageId, contactId: input.contactId, channel, purpose: input.purpose ?? "transactional",
         ...(channel === "email" ? { subject: input.subject ?? "Your booking" } : {}),
         body: input.body ?? "Thanks for booking with Halden & Rowe.",
+        ...(input.destination === undefined ? {} : { destination: input.destination }),
       };
       if (!input.raw && input.approve !== false) {
         const parsed = messageSendRequestedSchema.parse(payload);

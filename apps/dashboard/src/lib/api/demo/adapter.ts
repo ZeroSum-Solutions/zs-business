@@ -894,13 +894,16 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
       });
     },
 
-    approveReply(replyId, options) {
-      return idempotent("inbox.reply.approve", { replyId }, options, () => {
+    approveReply(replyId, options, destination) {
+      return idempotent("inbox.reply.approve", { replyId, destination: destination ?? null }, options, () => {
         // Only owners decide a send (I-6): staff get the API's 403.
         if (actor.role !== "owner") throw demoError("Forbidden");
         const draft = draftOrThrow(replyId);
         // I-6: email is the only channel, so the customer needs an address. Nothing sends here.
-        if (!contacts.get(draft.contactId)?.email) throw demoError("Conflict", { reason: "no_email" });
+        const email = contacts.get(draft.contactId)?.email;
+        if (!email) throw demoError("Conflict", { reason: "no_email" });
+        // approvals.md A-16: the owner approves the address they saw, and no other.
+        if (destination && destination !== email) throw demoError("Conflict", { reason: "destination_changed" });
         const approved: ReplyRecord = { ...draft, status: "approved", approvedBy: DEMO_OWNER, approvedAt: nowIso() };
         replies.set(replyId, approved);
         return approved;

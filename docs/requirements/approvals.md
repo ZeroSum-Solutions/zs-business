@@ -1,12 +1,12 @@
 # M3b: approval and source records
 
-Status: contract for M3b (2026-10-20), revision 5 (2026-10-22). Revision 2 (review round 1):
+Status: contract for M3b (2026-10-20), revision 6 (2026-11-22). Revision 2 (review round 1):
 A-2, A-6, A-7, A-14, F-5. Revision 3 (audit B1): F-4 limits `observedAt` to UTC years 0001
 through 9999, the range CRM consent (crm.md C-9) and booking instants also apply. Records and
 replays accept any stored UTC ISO instant, and a derived `fresh_until` or a clock outside the
 range fails with `ValidationFailed`. Revision 4 (audit B3-01): A-6. Revision 5 (phase 2 specs):
 adds A-15, a standing approval of one message template revision, for the templated agent kinds
-(`agents.md` G-19, G-20). A-1..A-14 and F-1..F-8 are unchanged. A-15 is not built yet.
+(`agents.md` G-19, G-20). A-1..A-14 and F-1..F-8 are unchanged. A-15 is built (`template-approvals.test.ts`).
 Revision 6 (2026-11-22, ZSB-41): adds A-16, an approved send binds the normalized destination
 and the rendered subject and body as shown to the approver, and a change of address voids it.
 A-11 reads gain the `send` view. A-1..A-15 are otherwise unchanged.
@@ -218,19 +218,26 @@ message to one address, not to whatever address the contact has when the worker 
 - Templated sends (A-15). The queue action's payload carries `destination`, the contact's
   current address for the revision's channel (email or E.164 phone), and the send digest the
   standing check compares covers it, so an event naming another address answers
-  `approval_missing`. When the address changed between the run's read and the queue action,
+  `approval_missing`. When the address changed (or was cleared) after the run's read,
   the action refuses `Conflict` `destination_changed` and records nothing, so a later run
   queues the message for the new address.
 - Delivery. The worker stores the bound address on the delivery and blocks
-  `destination_changed` when the contact's current address for the channel differs
-  (`delivery.md` D-6). The provider is never called and the reservation is released.
+  `destination_changed` when the contact's current address for the channel differs or was
+  cleared (`delivery.md` D-6). No new send is made and the reservation is released. A send
+  whose earlier attempt has an unknown outcome is not repeated: the worker asks the provider
+  (D-8), and only a "not found" answer ends it `destination_changed`.
 - Re-approve. `approveReply` on a draft whose open proposal is bound to another address (or to
   none, made before revision 6) withdraws it (A-8, note `destination_changed`), proposes the
   send again for the current address, and answers 409 `destination_changed` with the new
   `approvalId`, so the owner approves the new address only after seeing it. On a reply whose
   delivery ended `destination_changed` it drafts the same subject and body again as a new
-  reply, proposes that, and answers 409 `destination_changed` with the copy's `replyId`. A
-  retry of either call with the same key gives the same answer and creates nothing more.
+  reply, proposes that, and answers 409 `destination_changed` with the copy's `replyId`; one
+  failed reply gets one copy, whatever key asks. With no open proposal, one whose last proposal
+  was bound to another address is proposed again with the same 409 before any approval. A
+  retry of either call with the same key gives the same answer and creates nothing more; the
+  key cannot be reused on another reply (`IdempotencyConflict`). The call may name the address
+  the owner saw (`{ destination }`); when it is not the current one, the answer is 409
+  `destination_changed` and nothing is recorded.
   An approval another owner decided stays theirs (409 `approved_by_other`) before any of this.
 - Read. A-11 records of `inbox.reply.send` carry `send: {contactId, channel, destination,
   subject, body}`: the bound address from the stored payload and the reply's words, so the
@@ -299,7 +306,7 @@ recently observed first, each with `fresh`. Same permission as F-2.
 - `packages/core/test/sources.test.ts`: observe, monotonic replays, freshness edges, subject
   ownership, permission per subject, `requireFresh`, lock order that differs from clock order.
 - API and MCP tests cover the routes and tools.
-- A-15 (not built): `packages/core/test/template-approvals.test.ts` under the runtime role: a
+- A-15: `packages/core/test/template-approvals.test.ts` under the runtime role: a
   send before the grant runs is refused `template_not_approved`; an owner's grant covers many
   sends; staff cannot approve the grant; a grant whose digest no longer matches is
   `template_changed`; a new revision revokes the old approval, a send from the old revision is
@@ -311,9 +318,13 @@ recently observed first, each with `fresh`. Same permission as F-2.
 - A-16: `packages/core/test/m3-reply-delivery.test.ts` (owner draft: the approval read shows
   the bound address and words; a changed email after approval blocks `destination_changed`
   with no provider call, the reply shows why, and re-approving drafts a copy for the new
-  address that then sends; a stale proposal is proposed again; a changed phone does not stop
-  an email), `agents.test.ts` (agent draft, email and phone changed), `template-approvals.test.ts`
-  (email and SMS reminders, and an event naming another address answers `approval_missing`),
+  address that then sends; a stale proposal is proposed again, also with no open one; a retry
+  replays the same `approvalId`; a named stale address is refused; a cleared email blocks
+  `destination_changed`; an owner's own draft is bound; a requester cannot name the address; a
+  changed phone does not stop an email), `delivery/worker.test.ts` (a bound send with an unknown
+  outcome is looked up, not repeated), `agents.test.ts` (agent draft, email and phone changed), `template-approvals.test.ts`
+  (email and SMS reminders, an event naming another address answers `approval_missing`, and a
+  message queued before revision 6 still sends unbound),
   `inbox.test.ts` (the 409 and its replay) and `delivery/policy.test.ts` (the digest covers the
   destination).
 
@@ -330,3 +341,18 @@ owner approves revision 2; a reminder from revision 1 still in the outbox is not
   An owner then approves the same revision again. Whether standing approvals may live longer is
   an open question.
 - A-15 covers message templates only. Standing approvals of other actions need their own rule.
+
+## Known limits (A-16)
+
+- Rows queued before revision 6 have no bound address (`bound_address` null) and keep the old
+  rule: they go to the contact's current address. Only sends approved after the deploy are bound.
+- The API and the delivery worker deploy together (both are `apps/api`). An older worker
+  rejects an event with `destination` and an older one ignores `bound_address`, so revision 6
+  must not run beside an older worker. The dashboard's strict schemas see the new `send` and
+  `deliveryReason` fields, so the dashboard deploys with the API.
+- Before deploying, check that no approval-coupled send is still queued (no unprocessed
+  `message.send_requested` event and no unfinished delivery for a reply or template): those
+  carry no binding and keep the old rule.
+- A standing template approval (A-15) approves a template revision, not an address. A templated
+  send binds the address when its action is queued, and a change before delivery voids it.
+- Booking and voice notices are not owner-approved sends and stay unbound (`destination` null).

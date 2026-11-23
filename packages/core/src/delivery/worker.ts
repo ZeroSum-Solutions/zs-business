@@ -314,16 +314,33 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
     return { outcome: "dead", reason };
   }
 
+  /** A-10: the approval behind this delivery, checked against the content it carries. */
+  function approvalStanding(tx: Transaction, row: DeliveryRow) {
+    return deps.approvals.check(tx, {
+      tenantId: row.tenant_id,
+      actionId: row.action_id,
+      messageId: row.message_id,
+      contentDigest: deliveryContentDigest({
+        messageId: row.message_id, contactId: row.contact_id, channel: row.channel, purpose: row.purpose,
+        subject: row.subject, body: row.body, destination: row.bound_address,
+      }),
+    });
+  }
+
   /** D-6: the first reason the send may not happen now, or null. */
   async function recheck(tx: Transaction, row: DeliveryRow): Promise<{ reason: DeliveryFinalReason | null; address: string | null }> {
+    // FOR SHARE: an address change waits until this attempt has started (or ended), so the
+    // address checked here is the one the attempt records and the provider gets.
     const contact = (await tx.query<{ normalized_email: string | null; e164_phone: string | null; display_name: string | null }>(
-      "SELECT normalized_email, e164_phone, display_name FROM crm_contacts WHERE tenant_id=$1 AND id=$2",
+      "SELECT normalized_email, e164_phone, display_name FROM crm_contacts WHERE tenant_id=$1 AND id=$2 FOR SHARE",
       [row.tenant_id, row.contact_id])).rows[0];
     const address = contact ? channelDestination(row.channel, contact) : null;
-    if (!contact || !address) return { reason: "no_address", address: null };
     // D-6 revision 6: a send goes only to the address it was approved for. The approver saw that
-    // address; any other one ends the send with no provider call, and the owner approves again.
-    if (row.bound_address !== null && row.bound_address !== address) return { reason: "destination_changed", address: null };
+    // address; any other one (a cleared address too) ends the send with no provider call, and
+    // the owner approves again. A withdrawn approval still says so: the owner meant it not to go.
+    if (row.bound_address !== null && row.bound_address !== address)
+      return { reason: (await approvalStanding(tx, row)) === "revoked" ? "approval_revoked" : "destination_changed", address: null };
+    if (!contact || !address) return { reason: "no_address", address: null };
     // D-1: the contact's current address, except that a send whose outcome is unknown may only
     // be repeated to the recipient it went to; if that changed, the provider is asked instead.
     if (row.outcome_unknown && row.recipient_address !== null && row.recipient_address !== address)
@@ -337,15 +354,7 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
     const consent = consentRow?.status ?? null;
     const blocked = consentBlock({ channel: row.channel, purpose: row.purpose, consent, suppressed, source: consentRow?.source ?? null, address, name: contact.display_name });
     if (blocked) return { reason: blocked, address };
-    const standing = await deps.approvals.check(tx, {
-      tenantId: row.tenant_id,
-      actionId: row.action_id,
-      messageId: row.message_id,
-      contentDigest: deliveryContentDigest({
-        messageId: row.message_id, contactId: row.contact_id, channel: row.channel, purpose: row.purpose,
-        subject: row.subject, body: row.body, destination: row.bound_address,
-      }),
-    });
+    const standing = await approvalStanding(tx, row);
     if (standing === "revoked") return { reason: "approval_revoked", address };
     if (standing !== "approved") return { reason: "approval_missing", address };
     // booking.md B-43: a review request goes only for a booking that is still confirmed and marked completed. This covers a

@@ -597,6 +597,22 @@ describe("appointment reminders (G-19)", () => {
       expect(calls()).toBe(before);
       expect(await deliveryOf(s.bookingId)).toMatchObject({ status: "blocked", final_reason: "approval_missing" });
     });
+
+    it("a message queued before revision 6 (no destination in the event or the action) still sends, unbound", async () => {
+      const s = await booked();
+      await ready("appointment_reminder");
+      await runNow("appointment_reminder");
+      await service(async (tx) => {
+        const scope = `tenant_id=$1 AND event_type='message.send_requested' AND payload->>'messageId' IN
+          (SELECT message_id::text FROM agent_decisions WHERE tenant_id=$1 AND subject_id=$2)`;
+        await tx.query(`UPDATE actions SET payload = payload - 'destination'
+          WHERE tenant_id=$1 AND id IN (SELECT action_id FROM outbox WHERE ${scope})`, [tenantId, s.bookingId]);
+        await tx.query(`UPDATE outbox SET payload = payload - 'destination' WHERE ${scope}`, [tenantId, s.bookingId]);
+      });
+      now += 60_000;
+      await worker().runOnce();
+      expect(await deliveryOf(s.bookingId)).toMatchObject({ status: "sent" });
+    });
   });
 
   it("holds the revision's own timing: a longer lead time reaches a booking further ahead", async () => {

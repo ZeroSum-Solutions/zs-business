@@ -15,11 +15,12 @@ import {
 import type { Transaction } from "@zs/db";
 import { queueActionKind } from "@zs/contracts";
 import { sendDigest } from "../templates/render.js";
+import { deliveryContentDigest } from "../delivery/policy.js";
+import { decodeCursor, encodeCursor, microsToTimestamp, timestampToMicros } from "../reads/cursor.js";
+import { page } from "../reads/page.js";
 
 /** inbox-home.md I-6; spelled here so this module needs no import of the inbox handlers. */
 const SEND_REPLY_ACTION = "inbox.reply.send";
-import { decodeCursor, encodeCursor, microsToTimestamp, timestampToMicros } from "../reads/cursor.js";
-import { page } from "../reads/page.js";
 
 export interface ApprovalRow {
   id: string;
@@ -156,7 +157,11 @@ export async function resolveStoredApproval(
 
 /** A-10: what a delivery re-checks before it sends. Direct approvals have no record. */
 export type ApprovalCheck =
-  | { readonly kind: "stored"; readonly standing: ApprovalStanding; readonly approval: ApprovalRecord; readonly binding: ActionBinding | null }
+  | {
+      readonly kind: "stored"; readonly standing: ApprovalStanding; readonly approval: ApprovalRecord; readonly binding: ActionBinding | null;
+      /** A-16: false when the delivery is not the reply send this approval covers (its words or address differ). */
+      readonly contentMatches: boolean;
+    }
   | { readonly kind: "direct" }
   /**
    * A-15: a templated send runs under the standing approval of one template revision. It stands only
@@ -166,11 +171,23 @@ export type ApprovalCheck =
    */
   | { readonly kind: "standing"; readonly standing: ApprovalStanding; readonly current: boolean; readonly contentMatches: boolean };
 
-export async function checkApproval(tx: Transaction, tenantId: string, approvalId: string, now: Date): Promise<ApprovalCheck> {
+export async function checkApproval(
+  tx: Transaction, tenantId: string, approvalId: string, now: Date, content?: DeliveredContent,
+): Promise<ApprovalCheck> {
   const row = await loadApproval(tx, tenantId, approvalId);
   if (!row) return { kind: "direct" };
   const current = standing(row, now);
-  return { kind: "stored", standing: current, approval: approvalRecord(row, now), binding: current === "approved" ? approvedBinding(row) : null };
+  // A-16: a reply's send event must carry the words and the address the approver saw.
+  const send = row.action_type === SEND_REPLY_ACTION ? sendView(row) : null;
+  const replyId = row.payload !== null && typeof row.payload === "object" && !Array.isArray(row.payload) ? row.payload.replyId : undefined;
+  const contentMatches = !content || !send || typeof replyId !== "string" || content.contentDigest === deliveryContentDigest({
+    messageId: replyId, contactId: send.contactId, channel: send.channel, purpose: "transactional",
+    subject: send.subject, body: send.body, destination: send.destination,
+  });
+  return {
+    kind: "stored", standing: current, approval: approvalRecord(row, now), binding: current === "approved" ? approvedBinding(row) : null,
+    contentMatches,
+  };
 }
 
 /** The delivery a templated send is checked against (A-15, D-6). */
@@ -218,7 +235,7 @@ export async function approvalForAction(
   if (!action) return null;
   if (queueActionKind(action.action_type)) return standingCheck(tx, tenantId, action.payload, now, content);
   if (action.approval_id === null) return { kind: "direct" };
-  return checkApproval(tx, tenantId, action.approval_id, now);
+  return checkApproval(tx, tenantId, action.approval_id, now, content);
 }
 
 /** A-11: newest first. `requestedBy` limits the list to one requester's approvals. */

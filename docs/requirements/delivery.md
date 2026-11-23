@@ -110,9 +110,11 @@ worker re-checks, for every attempt:
   mark to `no_show`, one queued before outcomes existed (its booking is unmarked), and one queued before a cancel
   (`booking.md` B-43, B-44, B-46). It reads the booking row inside the same transaction and runs after the approval
   checks, so a revoked approval still reports `approval_revoked`;
-- a usable address (`no_address`), then the bound address (revision 6): a delivery with a
+- the bound address (revision 6), then a usable address (`no_address`): a delivery with a
   `bound_address` blocks `destination_changed` when the contact's current address for its
-  channel differs from it, and the provider is never called. The owner sees the reason on the
+  channel differs from it or was cleared, and no new send is made (an unknown outcome is
+  looked up first, D-8). The contact row is read `FOR SHARE`, so an address change waits for
+  the attempt that checked it. The owner sees the reason on the
   reply and approves again for the new address (`approvals.md` A-16). A delivery with no bound
   address (null) skips this check. The send goes to the contact's current address, except
   that while an outcome is unknown it may only be repeated to the address it went to; if the

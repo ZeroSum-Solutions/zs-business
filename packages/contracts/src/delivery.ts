@@ -22,9 +22,10 @@ export const EMAIL_SUBJECT_MAX = 998;
 export const SMS_BODY_MAX = 1530;
 
 /**
- * D-1: the event payload. It names the contact, never an address: the worker resolves the
- * address at delivery time and re-checks consent and suppression for it (D-6). It names no
- * approval either: the worker re-checks the approval of the action that committed the event.
+ * D-1: the event payload. It names the contact; the worker resolves the address at delivery time
+ * and re-checks consent and suppression for it (D-6). Since revision 6 it may also name the
+ * address the send was approved for (`destination`, below), which only narrows where it may go.
+ * It names no approval: the worker re-checks the approval of the action that committed the event.
  */
 /**
  * D-6 revision 6: the normalized address the send was approved for (a lowercased email or an

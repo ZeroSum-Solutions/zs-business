@@ -119,6 +119,12 @@ export const draftReplyRequestSchema = z.strictObject({
 });
 export type DraftReplyRequest = z.input<typeof draftReplyRequestSchema>;
 export const replyStepRequestSchema = z.strictObject({});
+/**
+ * I-6, approvals.md A-16: the approve step may name the address the owner saw. When it does, the
+ * send is approved only while it is bound to that address; otherwise 409 `destination_changed`.
+ */
+export const approveReplyRequestSchema = z.strictObject({ destination: z.lazy(() => sendDestinationSchema).optional() });
+export type ApproveReplyRequest = z.infer<typeof approveReplyRequestSchema>;
 
 export const threadSummarySchema = z.strictObject({
   id: z.string(),
