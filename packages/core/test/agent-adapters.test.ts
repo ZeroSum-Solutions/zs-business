@@ -1,6 +1,6 @@
 // G-17, G-18: the real model adapters against recorded vendor-shaped responses. No test reaches a vendor:
 // the adapters take an injected fetch that replays a fixture. The fixtures are hand-built to the vendors'
-// documented chat-completions shape; they are not live recordings (the vendor price and model ID are unverified).
+// documented chat-completions shape; they are not live recordings. The Cerebras ID and price were checked on 2026-11-22.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -20,6 +20,7 @@ import {
   type FetchLike,
   type TextModelRequest,
 } from "../src/index.js";
+import { createChatCompletionsModel } from "../src/agents/adapters/chat-completions.js";
 
 const fixture = (name: string) =>
   JSON.parse(readFileSync(fileURLToPath(new URL(`./fixtures/model/${name}.json`, import.meta.url)), "utf8")) as { status: number; body: unknown };
@@ -83,6 +84,24 @@ describe("Cerebras adapter (personal-data lane)", () => {
     const other = replay("cerebras-ok");
     await createCerebrasModel({ apiKey: "k", fetch: other.fetch, model: "qwen-3.8-27b" }).complete(request);
     expect(other.sent[0]!.body).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("never lets a vendor extra replace a fixed request field", async () => {
+    const { fetch, sent } = replay("cerebras-ok");
+    const collide = {
+      model: "other", messages: "x", max_completion_tokens: "9999", temperature: "2", stream: "true",
+      response_format: "text", reasoning_effort: "low",
+    };
+    await createChatCompletionsModel({
+      lane: "personal_data", vendor: "test", baseUrl: "https://api.cerebras.ai/v1", apiKey: "k", model: "gpt-oss-120b", fetch,
+      maxTokensParameter: "max_completion_tokens", extraBody: collide,
+      jsonMode: (r) => ({ responseFormat: { type: "json_object" }, system: r.system }),
+    }).complete(request);
+    expect(sent[0]!.body).toMatchObject({
+      model: "gpt-oss-120b", max_completion_tokens: 600, temperature: 0.2, stream: false,
+      response_format: { type: "json_object" }, reasoning_effort: "low",
+    });
+    expect(Array.isArray(sent[0]!.body.messages)).toBe(true);
   });
 
   it("returns an answer that is not JSON as raw text for the caller to refuse", async () => {

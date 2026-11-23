@@ -15,15 +15,17 @@ and so are `agent_followups` and the M6 tests; where a new rule replaces part of
 Build state (checked against the code on 2026-11-22, ZSB-45; this note changes no rule):
 - Built: G-14 (kinds, per-kind settings, kills and actors; `agent_decisions`), G-15
   (`agent_model_calls`, the daily cost cap, `agent.cost.warn`), G-16 (`agent.run.stall`), G-17
-  (the abort signal and usage on the port), G-18 (the Cerebras and DeepSeek adapters,
-  `AGENT_KIND_LANES`, the lane guard at start) and G-20 (review requests under marketing
-  consent).
-- Built in part: G-19. Templates, revisions, standing approvals and the reminder and review
-  queue actions run. The wording-suggestion route exists, but no hosted entry point passes a
+  (the abort signal and usage on the port) and G-20 (review requests under marketing consent).
+- Built in part: G-18. The Cerebras and DeepSeek adapters, `AGENT_KIND_LANES` and the lane
+  guard at start run, but no hosted entry point uses the no-personal-data lane yet:
+  `AGENT_MODEL_NO_PERSONAL_DATA` is parsed and then ignored. G-19: templates, revisions,
+  standing approvals and the reminder and review queue actions run. The wording-suggestion route exists, but no hosted entry point passes a
   suggestion model, so it answers 404 on preview and production (`apps/api/README.md`).
 - Not built: G-21. `document_intake` cannot be turned on (`Conflict` `kind_not_available`).
-- Hosted: the personal-data lane runs on Cerebras `gpt-oss-120b` on the workers project; the
-  first preview draft through it was recorded for the demo tenant on 2026-11-22 (ZSB-45).
+- Hosted: the workers project sets `FOLLOWUP_AGENT`, `AGENT_MODEL_PERSONAL_DATA=cerebras` and
+  `CEREBRAS_API_KEY` for both preview and production (production since 2026-11-11). The first
+  preview draft through Cerebras `gpt-oss-120b` was recorded for the demo tenant on 2026-11-22
+  (ZSB-45).
 
 Scope: one agent. It finds website inquiries nobody has answered, asks a model port for a
 follow-up email, and leaves it in the Inbox as a draft with a pending send proposal. An owner
@@ -393,7 +395,7 @@ the `document-intake.md` DL-8 limit, default 20; a longer document is skipped `t
 - A standing template approval expires within 30 days (`approvals.md` A-5); templated sends
   then skip `template_not_approved` until an owner approves the revision again.
 - `document_intake` depends on `document-intake.md` for the document, the diff schema and its
-  approval; G-21 can land only after that contract's first slice.
+  approval; G-21 is not built yet.
 
 ## First slice (revision 4)
 
