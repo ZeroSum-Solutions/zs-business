@@ -218,7 +218,8 @@ describe("the profile record (BP-5)", () => {
   it("carries the values and the revision, and nothing else about the tenant", () => {
     const profile = {
       displayName: "Halden & Rowe", legalName: null, phoneE164: null, timeZone: null, currency: "USD", postalAddress: null,
-      description: null, services: [], revision: 1, updatedAt: "2026-10-23T08:00:00.000Z",
+      description: null, services: [], hours: null, tone: null, policies: [], factMarks: {},
+      revision: 1, updatedAt: "2026-10-23T08:00:00.000Z",
     };
     expect(businessProfileSchema.parse(profile)).toEqual(profile);
     // BP-13, BP-14: a profile always carries both fields.

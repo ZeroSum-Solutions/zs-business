@@ -25,6 +25,7 @@ import {
 import type { ActionLogEntry, BillingPlan, BookingRecord, BusinessProfile, ImageVariant, SlotsResponse, TemplatedKind } from "@zs/contracts";
 import { preferNewerDeals } from "./deal-merge";
 import { newerProfile } from "./business-profile";
+import type { BusinessProfileView } from "./api/types";
 
 /** Key suffixes. Queries and invalidations go through `useKeys`, which puts the tenant first. */
 export const keys = {
@@ -521,7 +522,7 @@ export function useBusinessProfile() {
     // A read that started before a save can land after it: never replace a newer cached revision with an older one.
     queryFn: async ({ signal }) => {
       const read = await api.getBusiness({ signal });
-      return newerProfile(queryClient.getQueryData<BusinessProfile>(keys.business), read);
+      return newerProfile(queryClient.getQueryData<BusinessProfileView>(keys.business), read);
     },
     staleTime: 60_000,
   });

@@ -2,11 +2,11 @@
 // `changes` a save sends: only what changed, a phone in E.164, an address all or nothing.
 import { describe, expect, it } from "vitest";
 import type { BusinessProfile } from "@zs/contracts";
-import { countryChoices, fieldFromIssuePath, newerProfile, readBusinessForm, toBusinessForm } from "../src/lib/business-profile";
+import { countryChoices, draftForm, factProvenance, fieldFromIssuePath, newerProfile, normalizedForm, readBusinessForm, toBusinessForm } from "../src/lib/business-profile";
 
 const profile = (change: Partial<BusinessProfile> = {}): BusinessProfile => ({
   displayName: "Halden & Rowe", legalName: null, phoneE164: null, timeZone: null, currency: "USD", postalAddress: null,
-  description: null, services: [], revision: 1, updatedAt: "2026-10-23T10:00:00.000Z", ...change,
+  description: null, services: [], hours: null, tone: null, policies: [], factMarks: {}, revision: 1, updatedAt: "2026-10-23T10:00:00.000Z", ...change,
 });
 const address = { line1: "12 Mill Lane", city: "Leeds", country: "GB" } as const;
 
@@ -15,6 +15,8 @@ describe("toBusinessForm", () => {
     expect(toBusinessForm(profile())).toEqual({
       displayName: "Halden & Rowe", legalName: "", phone: "", timeZone: "", currency: "USD",
       line1: "", line2: "", city: "", region: "", postalCode: "", country: "", description: "", services: "",
+      hours: Object.fromEntries(["mon", "tue", "wed", "thu", "fri", "sat", "sun"].map((day) => [day, { isOpen: false, open: "", close: "" }])),
+      tone: "", policies: [],
     });
   });
 
@@ -164,5 +166,119 @@ describe("newerProfile", () => {
     expect(newerProfile(profile({ revision: 2 }), incoming)).toBe(incoming);
     expect(newerProfile(profile({ revision: 3 }), incoming)).toBe(incoming);
     expect(newerProfile(undefined, incoming)).toBe(incoming);
+  });
+
+  it("keeps the cached facts on a tie when an older API answered the refetch without them", () => {
+    const cached = profile({ revision: 3, tone: "Warm." });
+    const older = { ...profile({ revision: 3 }), factsUnavailable: true as const };
+    expect(newerProfile(cached, older)).toBe(cached);
+    expect(newerProfile(older, cached)).toBe(cached);
+  });
+});
+
+describe("draftForm", () => {
+  it("gives a draft begun while the facts were locked the stored facts once they load, so a save cannot send blanks", () => {
+    const locked = toBusinessForm({ ...profile({ revision: 3 }), factsUnavailable: true } as BusinessProfile);
+    const draft = { form: { ...locked, legalName: "New Ltd" }, factsLocked: true };
+    const loaded = toBusinessForm(profile({ revision: 3, tone: "Warm.", policies: [{ title: "Refunds", text: "Ten days.", setBy: "m", setAt: "2026-11-22T10:00:00.000Z", revision: 3 }] }));
+    const form = draftForm(draft, loaded, false);
+    expect(form).toMatchObject({ legalName: "New Ltd", tone: "Warm.", hours: loaded.hours, policies: loaded.policies });
+    expect(readBusinessForm(profile({ revision: 3, tone: "Warm.", policies: [{ title: "Refunds", text: "Ten days.", setBy: "m", setAt: "2026-11-22T10:00:00.000Z", revision: 3 }] }), form))
+      .toEqual({ ok: true, changes: { legalName: "New Ltd" } });
+    expect(draftForm(draft, loaded, true)).toBe(draft.form);
+    expect(draftForm({ form: draft.form, factsLocked: false }, loaded, false)).toBe(draft.form);
+    expect(draftForm(null, loaded, false)).toBe(loaded);
+  });
+});
+
+describe("company facts (BP-16..BP-20)", () => {
+  const CLOSED = { mon: null, tue: null, wed: null, thu: null, fri: null, sat: null, sun: null };
+  const mark = { setBy: "a1b2c3d4-1a3f-4b5c-9d7e-000000000001", setAt: "2026-11-22T10:00:00.000Z", revision: 2 };
+
+  it("sends the open days' hours, 00:00 closing as midnight, and null when every day is off", () => {
+    const form = toBusinessForm(profile());
+    form.hours.mon = { isOpen: true, open: "09:00", close: "17:30" };
+    form.hours.sat = { isOpen: true, open: "18:00", close: "00:00" };
+    expect(readBusinessForm(profile(), form)).toEqual({ ok: true, changes: {
+      hours: { ...CLOSED, mon: { open: "09:00", close: "17:30" }, sat: { open: "18:00", close: "24:00" } },
+    } });
+    const saved = profile({ hours: { ...CLOSED, sat: { open: "18:00", close: "24:00" } } });
+    const shown = toBusinessForm(saved);
+    expect(shown.hours.sat).toEqual({ isOpen: true, open: "18:00", close: "00:00" });
+    expect(readBusinessForm(saved, shown)).toEqual({ ok: true, changes: {} });
+    shown.hours.sat = { ...shown.hours.sat, isOpen: false };
+    expect(readBusinessForm(saved, shown)).toEqual({ ok: true, changes: { hours: null } });
+  });
+
+  it("refuses an open day with a missing time or a closing time before the opening time", () => {
+    const form = toBusinessForm(profile());
+    form.hours.tue = { isOpen: true, open: "10:00", close: "" };
+    expect(readBusinessForm(profile(), form)).toMatchObject({ ok: false, errors: { hours: expect.any(String) } });
+    form.hours.tue = { isOpen: true, open: "17:00", close: "09:00" };
+    expect(readBusinessForm(profile(), form)).toMatchObject({ ok: false, errors: { hours: expect.any(String) } });
+  });
+
+  it("sends the tone trimmed, null when emptied, and refuses one over 500 characters", () => {
+    expect(readBusinessForm(profile(), { ...toBusinessForm(profile()), tone: "  Warm.  " })).toEqual({ ok: true, changes: { tone: "Warm." } });
+    const saved = profile({ tone: "Warm." });
+    expect(readBusinessForm(saved, { ...toBusinessForm(saved), tone: "" })).toEqual({ ok: true, changes: { tone: null } });
+    expect(readBusinessForm(profile(), { ...toBusinessForm(profile()), tone: "x".repeat(501) })).toMatchObject({ ok: false, errors: { tone: expect.any(String) } });
+  });
+
+  it("sends the policies trimmed with empty rows dropped, and nothing when they did not change", () => {
+    const form = { ...toBusinessForm(profile()), policies: [{ title: " Refunds ", text: " Within 14 days. " }, { title: "", text: " " }] };
+    expect(readBusinessForm(profile(), form)).toEqual({ ok: true, changes: { policies: [{ title: "Refunds", text: "Within 14 days." }] } });
+    const saved = profile({ policies: [{ title: "Refunds", text: "Within 14 days.", ...mark }] });
+    expect(readBusinessForm(saved, toBusinessForm(saved))).toEqual({ ok: true, changes: {} });
+    expect(readBusinessForm(saved, { ...toBusinessForm(saved), policies: [] })).toEqual({ ok: true, changes: { policies: [] } });
+  });
+
+  it("refuses a policy without a title or text, a title twice, a two-line title and more than 10", () => {
+    const read = (policies: { title: string; text: string }[]) => readBusinessForm(profile(), { ...toBusinessForm(profile()), policies });
+    expect(read([{ title: "Refunds", text: "" }])).toMatchObject({ ok: false, errors: { policies: expect.any(String) } });
+    expect(read([{ title: "Refunds", text: "a" }, { title: "refunds", text: "b" }])).toMatchObject({ ok: false });
+    expect(read([{ title: "Re\nfunds", text: "a" }])).toMatchObject({ ok: false });
+    expect(read(Array.from({ length: 11 }, (_, i) => ({ title: `P${i}`, text: "a" })))).toMatchObject({ ok: false });
+  });
+
+  it("reads who set a fact, and a fact nobody set as not known", () => {
+    expect(factProvenance(profile(), "hours")).toEqual({ known: false });
+    expect(factProvenance(profile(), "policies")).toEqual({ known: false });
+    expect(factProvenance(profile({ tone: "Warm." }), "tone")).toEqual({ known: true, mark: null });
+    expect(factProvenance(profile({ tone: "Warm.", factMarks: { tone: mark } }), "tone")).toEqual({ known: true, mark: { setBy: mark.setBy, setAt: mark.setAt } });
+  });
+
+  it("reads a cleared fact as not known even with its mark, and the policies from the list's own mark", () => {
+    expect(factProvenance(profile({ tone: null, factMarks: { tone: mark } }), "tone")).toEqual({ known: false });
+    const later = { ...mark, setAt: "2026-11-23T10:00:00.000Z", revision: 3 };
+    const listed = profile({ policies: [{ title: "Refunds", text: "Within 14 days.", ...mark }], factMarks: { policies: later } });
+    expect(factProvenance(listed, "policies")).toEqual({ known: true, mark: { setBy: later.setBy, setAt: later.setAt } });
+    expect(factProvenance({ ...listed, factMarks: {} }, "policies")).toEqual({ known: true, mark: { setBy: mark.setBy, setAt: mark.setAt } });
+  });
+
+  it("compares hours by their times, not by the order of their keys", () => {
+    const saved = profile({ hours: { ...CLOSED, mon: { open: "09:00", close: "17:00" } } });
+    const reordered = { ...saved, hours: { ...saved.hours!, mon: { close: "17:00", open: "09:00" } } };
+    expect(readBusinessForm(reordered, toBusinessForm(saved))).toEqual({ ok: true, changes: {} });
+  });
+
+  it("does not count a closed day's old times or an empty policy row as a change", () => {
+    const saved = toBusinessForm(profile());
+    const touched = { ...saved, hours: { ...saved.hours, mon: { isOpen: false, open: "09:00", close: "17:00" } }, policies: [{ title: " ", text: "" }] };
+    expect(normalizedForm(touched)).toEqual(normalizedForm(saved));
+    expect(normalizedForm({ ...saved, policies: [{ title: "Refunds", text: "" }] })).not.toEqual(normalizedForm(saved));
+  });
+
+  it("never sends the facts when the API could not give them, so a save cannot wipe them", () => {
+    const unavailable = { ...profile(), factsUnavailable: true as const };
+    const form = { ...toBusinessForm(unavailable), legalName: "Halden Ltd", tone: "", policies: [], hours: toBusinessForm(profile()).hours };
+    form.hours.mon = { isOpen: true, open: "", close: "" };
+    expect(readBusinessForm(unavailable, form)).toEqual({ ok: true, changes: { legalName: "Halden Ltd" } });
+  });
+
+  it("maps the API's issue paths for the facts to their fields", () => {
+    expect(fieldFromIssuePath("changes.hours.mon.close")).toBe("hours");
+    expect(fieldFromIssuePath("changes.tone")).toBe("tone");
+    expect(fieldFromIssuePath("changes.policies.0.title")).toBe("policies");
   });
 });

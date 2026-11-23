@@ -24,6 +24,11 @@ import {
   bookingPageSchema,
   bookingPageSummarySchema,
   businessProfileReadSchema,
+  MARKED_FACTS,
+  businessHoursSchema,
+  businessPolicySchema,
+  factMarkSchema,
+  type FactMarks,
   contactEnrichmentSchema,
   enrichmentProposalListSchema,
   enrichmentRequestRecordSchema,
@@ -127,6 +132,7 @@ import {
   type ActionLogApi,
   ACTION_PAGE_SIZE,
   type WriteOptions,
+  type BusinessProfileView,
 } from "./types";
 
 export interface HttpClientConfig {
@@ -187,11 +193,38 @@ const NOTHING_CANCELLED = { cancelled: false, revokeFailed: false };
 /** POST /v1/enrichment/requests answers the action and the request as it is now. */
 const enrichmentOutputSchema = z.object({ actionId: uuidSchema, result: enrichmentRequestRecordSchema });
 /** BP-10: an API that predates the description and services fields omits them; they read as empty. */
-function withContent<T extends { description?: string | null | undefined; services?: string[] | undefined }>(
-  profile: T,
-): Omit<T, "description" | "services"> & { description: string | null; services: string[] } {
-  const { description, services, ...rest } = profile;
-  return { ...rest, description: description ?? null, services: services ?? [] };
+/**
+ * The profile as the dashboard holds it (BP-10, BP-16..BP-19). An older API leaves the company facts out
+ * and a newer one may send a shape this client does not know: either way `factsUnavailable` is set, the
+ * facts read as not known, and Settings shows them read-only and never sends them, so a save cannot wipe
+ * stored hours, tone or policies it could not read.
+ */
+const policiesRead = z.array(businessPolicySchema);
+/** Hours, tone and policies carry their marks; a mark this client cannot read makes those facts unavailable too. */
+const COMPANY_FACT_KEYS = ["hours", "tone", "policies"] as const;
+function withContent(profile: z.output<typeof businessProfileReadSchema>): BusinessProfileView {
+  const { description, services, hours, tone, policies, factMarks, ...rest } = profile;
+  const week = businessHoursSchema.nullable().safeParse(hours);
+  const note = z.string().nullable().safeParse(tone);
+  const list = policiesRead.safeParse(policies);
+  const rawMarks = factMarks !== null && typeof factMarks === "object" && !Array.isArray(factMarks) ? (factMarks as Record<string, unknown>) : null;
+  const marks: FactMarks = {};
+  for (const fact of MARKED_FACTS) {
+    const mark = factMarkSchema.safeParse(rawMarks?.[fact]);
+    if (mark.success) marks[fact] = mark.data;
+  }
+  const marksRead = rawMarks !== null && COMPANY_FACT_KEYS.every((fact) => rawMarks[fact] === undefined || marks[fact] !== undefined);
+  const factsUnavailable = !week.success || !note.success || !list.success || !marksRead;
+  return {
+    ...rest,
+    description: description ?? null,
+    services: services ?? [],
+    hours: factsUnavailable ? null : week.data,
+    tone: factsUnavailable ? null : note.data,
+    policies: factsUnavailable ? [] : list.data,
+    factMarks: factsUnavailable ? Object.fromEntries(Object.entries(marks).filter(([fact]) => !(COMPANY_FACT_KEYS as readonly string[]).includes(fact))) : marks,
+    ...(factsUnavailable ? { factsUnavailable: true as const } : {}),
+  };
 }
 const businessOutputSchema = z.object({ actionId: uuidSchema, result: businessProfileReadSchema });
 /** POST /v1/agents/:agentKind/runs answers the run with each booking's decision (G-14). */

@@ -553,10 +553,16 @@ export interface BrowserApi {
  */
 export interface BusinessApi {
   /** Throws `not_found` on an API older than the profile (BP-10). */
-  getBusiness(options?: ReadOptions): Promise<BusinessProfile>;
+  getBusiness(options?: ReadOptions): Promise<BusinessProfileView>;
   /** Only the fields in `changes`. A conflict with reason `stale_revision` when someone saved since `expectedRevision`. */
-  updateBusiness(input: UpdateBusinessProfileRequest, options: WriteOptions): Promise<BusinessProfile>;
+  updateBusiness(input: UpdateBusinessProfileRequest, options: WriteOptions): Promise<BusinessProfileView>;
 }
+
+/**
+ * The profile as the dashboard reads it. `factsUnavailable` is set when the API sent no company facts or
+ * a shape this client does not know (BP-16..BP-19): they then read as not known and are never sent back.
+ */
+export type BusinessProfileView = BusinessProfile & { factsUnavailable?: true };
 
 /**
  * Company details for one customer (enrichment.md E-4, E-14, E-17). Anyone with `customers` reads;

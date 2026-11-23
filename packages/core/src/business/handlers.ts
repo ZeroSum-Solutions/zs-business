@@ -7,8 +7,12 @@ import {
   NotFound,
   updateBusinessProfileCommandSchema,
   ValidationFailed,
+  MARKED_FACTS,
+  type BusinessPolicy,
   type BusinessProfile,
   type BusinessProfileChanges,
+  type FactMark,
+  type FactMarks,
   type JsonValue,
   type Target,
 } from "@zs/contracts";
@@ -29,16 +33,22 @@ interface ProfileRow {
   postal_address: BusinessProfile["postalAddress"];
   description: string | null;
   services: string[];
+  hours: BusinessProfile["hours"];
+  tone: string | null;
+  policies: BusinessPolicy[];
+  fact_marks: FactMarks;
   revision: number;
   updated_at: Date;
 }
-const columns = "display_name,legal_name,phone_e164,time_zone,currency,postal_address,description,services,revision,updated_at";
+const columns = "display_name,legal_name,phone_e164,time_zone,currency,postal_address,description,services,hours,tone,policies,fact_marks,revision,updated_at";
 
 function profileRecord(row: ProfileRow): BusinessProfile {
   return {
     displayName: row.display_name, legalName: row.legal_name, phoneE164: row.phone_e164, timeZone: row.time_zone,
     currency: row.currency, postalAddress: row.postal_address,
-    description: row.description, services: row.services, revision: row.revision, updatedAt: iso(row.updated_at),
+    description: row.description, services: row.services,
+    hours: row.hours, tone: row.tone, policies: row.policies, factMarks: row.fact_marks,
+    revision: row.revision, updatedAt: iso(row.updated_at),
   };
 }
 
@@ -66,18 +76,54 @@ const FIELDS: readonly { key: keyof BusinessProfileChanges; column: string; cast
   { key: "postalAddress", column: "postal_address", cast: "::jsonb" },
   { key: "description", column: "description", cast: "" },
   { key: "services", column: "services", cast: "::jsonb" },
+  { key: "hours", column: "hours", cast: "::jsonb" },
+  { key: "tone", column: "tone", cast: "" },
+  { key: "policies", column: "policies", cast: "::jsonb" },
 ];
+
+// jsonb returns object keys in its own order, so values compare with their keys sorted.
+const canonical = (value: unknown): unknown =>
+  Array.isArray(value) ? value.map(canonical)
+    : value !== null && typeof value === "object"
+      ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical((value as Record<string, unknown>)[key])]))
+      : value ?? null;
+const sameValue = (a: unknown, b: unknown) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+
+/**
+ * BP-19: the marks after a save. A fact the save changes, clearing included, is marked with the saving
+ * owner, the instant and the new revision; one it leaves alone keeps the mark it had. The database refuses a
+ * change to hours, tone or policies that carries no new owner mark (BP-20).
+ */
+function nextMarks(current: ProfileRow, changes: BusinessProfileChanges, mark: FactMark): FactMarks {
+  const marks = { ...current.fact_marks } as Record<string, FactMark>;
+  const before: Record<(typeof MARKED_FACTS)[number], unknown> = {
+    displayName: current.display_name, description: current.description, services: current.services,
+    timeZone: current.time_zone, hours: current.hours, tone: current.tone,
+    policies: current.policies.map(({ title, text }) => ({ title, text })),
+  };
+  for (const key of MARKED_FACTS) {
+    if (!(key in changes)) continue;
+    if (!sameValue(changes[key], before[key])) marks[key] = mark;
+  }
+  return marks as FactMarks;
+}
+
+/** BP-18: the stored list after a save. A policy whose title and text are unchanged keeps its mark. */
+function nextPolicies(current: BusinessPolicy[], next: readonly { title: string; text: string }[], mark: FactMark): BusinessPolicy[] {
+  return next.map(({ title, text }) =>
+    current.find((policy) => policy.title === title && policy.text === text) ?? { title, text, ...mark });
+}
 
 export const updateBusinessHandler: ActionHandler = {
   resolveTarget: resolveProfile,
-  // BP-13, BP-14: a save stored before the two fields existed replays with them empty, not as an invalid result.
+  // BP-13, BP-14, BP-21: a save stored before these fields existed replays with them empty, not as an invalid result.
   async upgradeStoredResult(_tx, result) {
     return result !== null && typeof result === "object" && !Array.isArray(result)
-      ? { description: null, services: [], ...result }
+      ? { description: null, services: [], hours: null, tone: null, policies: [], factMarks: {}, ...result }
       : result;
   },
   async handle({ tx, command, binding, now }) {
-    await requireMember(tx, binding.tenantId, binding.actorId, "business");
+    const access = await requireMember(tx, binding.tenantId, binding.actorId, "business");
     const { payload } = parseOrFail(updateBusinessProfileCommandSchema, command);
     const at = clockInstant(now);
     const current = (await tx.query<ProfileRow>(
@@ -92,14 +138,21 @@ export const updateBusinessHandler: ActionHandler = {
     if (typeof timeZone === "string" && !(await zoneKnown(tx, timeZone)))
       throw validationError("Unknown time zone", [{ path: ["changes", "timeZone"], message: "Expected UTC or an IANA time zone name" }]);
 
+    // BP-19, BP-20: only an owner reaches here (the `business` permission); the marks name that owner.
+    const mark: FactMark = { setBy: access.memberId, setAt: at, revision: current.revision + 1 };
+    const stored: Record<string, unknown> = { ...payload.changes };
+    if (payload.changes.policies) stored.policies = nextPolicies(current.policies, payload.changes.policies, mark);
+
     const sets: string[] = [];
     const values: unknown[] = [];
     for (const { key, column, cast } of FIELDS) {
-      if (!(key in payload.changes)) continue;
-      const value = payload.changes[key];
+      if (!(key in stored)) continue;
+      const value = stored[key];
       values.push(value !== null && typeof value === "object" ? JSON.stringify(value) : value ?? null);
       sets.push(`${column}=$${values.length}${cast}`);
     }
+    values.push(JSON.stringify(nextMarks(current, payload.changes, mark)));
+    sets.push(`fact_marks=$${values.length}::jsonb`);
     values.push(binding.actorId, at, binding.tenantId);
     const updated = await tx.query<ProfileRow>(
       `UPDATE business_profiles SET ${sets.join(", ")}, updated_by=$${values.length - 2}, updated_at=$${values.length - 1}, revision=revision+1

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { actionCommandSchema, actionResultSchema, targetSchema, uuidSchema, ValidationFailed } from "./index.js";
 import { bookingTimeZoneSchema } from "./booking.js";
+import { companyFactsPromptSchema } from "./company-facts.js";
 import { replyBodySchema, replySubjectSchema } from "./inbox.js";
 import { isPostgresText } from "./json.js";
 import { pageQuerySchema, pageSchema } from "./page.js";
@@ -322,7 +323,8 @@ export const costWarnOutputSchema = z.lazy(() => actionResultSchema.extend({ res
 
 /** G-9: what the model sees about one inquiry, and nothing else. */
 export const followUpPromptSchema = z.strictObject({
-  businessName: z.string(),
+  /** business-profile.md BP-21: the company facts, from the one read every prompt builder uses. */
+  company: companyFactsPromptSchema,
   customerName: z.string(),
   requestedAt: instantSchema,
   notes: z.string().nullable(),

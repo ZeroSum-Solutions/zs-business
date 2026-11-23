@@ -2,27 +2,35 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState, type FormEvent, type ReactNode } from "react";
-import { ACTIVE_CURRENCIES, currencyLabel, type BusinessProfile, type UpdateBusinessProfileRequest } from "@zs/contracts";
+import { ACTIVE_CURRENCIES, BUSINESS_POLICIES_MAX, WEEKDAYS, currencyLabel, type BusinessProfile, type UpdateBusinessProfileRequest, type Weekday } from "@zs/contracts";
+import type { BusinessProfileView } from "@/lib/api/types";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input, Label, Select, Textarea } from "@/components/ui/input";
 import { DisabledReason } from "@/components/ui/disabled-reason";
 import { ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import { Segmented } from "@/components/ui/segmented";
+import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/toast";
 import { isApiError, isSettingsChanged } from "@/lib/api";
 import { useApi, useApiRuntime } from "@/lib/api/react";
 import { timeZoneChoices, zoneName } from "@/lib/agents";
 import {
+  WEEKDAY_NAMES,
   countryChoices,
+  draftForm,
+  factProvenance,
   fieldFromIssuePath,
   newerProfile,
+  normalizedForm,
   readBusinessForm,
   serverFieldMessage,
   toBusinessForm,
   type BusinessField,
   type BusinessForm,
   type BusinessFormErrors,
+  type BusinessTextField,
+  type DayHours,
 } from "@/lib/business-profile";
 import { useIntentKey } from "@/lib/intent-key";
 import { useBusinessProfile, useKeys } from "@/lib/queries";
@@ -44,6 +52,11 @@ export const BUSINESS_UNCHANGED = "Nothing to save yet. Change a detail first.";
 export const BUSINESS_SAVED = "Business details saved.";
 /** BP-11: the demo keeps the profile in memory, so a save must not look stored. */
 export const BUSINESS_DEMO_SAVED = "Saved in this demo only. It is sample data and resets when you reload the page.";
+/** BP-21: a fact nobody set is "not known" to the agents, never guessed. */
+export const FACT_NOT_SET = "Not set. Agents say this is not known and do not guess.";
+export const FACT_SET_UNRECORDED = "Set before who set it was recorded.";
+/** The API sent no company facts, or a shape this screen does not know: they cannot be changed here yet. */
+export const FACTS_UNAVAILABLE = "Can't be shown or changed until the server is updated. Agents treat it as not known.";
 export const BUSINESS_DEMO_NOTE = "This is sample data. Saving works here, but nothing is stored: it resets when you reload the page.";
 
 const FIELD_IDS: Record<BusinessField, string> = {
@@ -60,9 +73,31 @@ const FIELD_IDS: Record<BusinessField, string> = {
   country: "biz-country",
   description: "biz-description",
   services: "biz-services",
+  hours: "biz-hours",
+  tone: "biz-tone",
+  policies: "biz-policies",
 };
 
-const sameForm = (a: BusinessForm, b: BusinessForm) => (Object.keys(a) as BusinessField[]).every((field) => a[field] === b[field]);
+// A closed day's old times and an empty policy row are not changes (normalizedForm).
+const sameForm = (a: BusinessForm, b: BusinessForm) => {
+  const [left, right] = [normalizedForm(a), normalizedForm(b)];
+  return (Object.keys(left) as BusinessField[]).every((field) => JSON.stringify(left[field]) === JSON.stringify(right[field]));
+};
+
+const setAtLabel = (setAt: string) => {
+  const date = new Date(setAt);
+  return Number.isNaN(date.getTime()) ? null : date.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+};
+
+/** BP-19, BP-21: who set a company fact and when, or that agents treat it as not known. */
+function provenanceLine(profile: BusinessProfileView, fact: "hours" | "tone" | "policies"): string {
+  if (profile.factsUnavailable) return FACTS_UNAVAILABLE;
+  const read = factProvenance(profile, fact);
+  if (!read.known) return FACT_NOT_SET;
+  if (!read.mark) return FACT_SET_UNRECORDED;
+  const date = setAtLabel(read.mark.setAt);
+  return date ? `Set by an owner on ${date}.` : "Set by an owner.";
+}
 
 /** Reads the API's validation issues as form fields; a path it does not know shows under the name. */
 function serverErrors(error: unknown): BusinessFormErrors | null {
@@ -114,7 +149,8 @@ function BusinessCard() {
     // The currency is not known (empty), so the form says "Not available" rather than inventing one.
     const known: BusinessProfile = {
       displayName: identity?.businessName ?? "", legalName: null, phoneE164: null, timeZone: null, currency: "",
-      postalAddress: null, description: null, services: [], revision: 1, updatedAt: "",
+      postalAddress: null, description: null, services: [], hours: null, tone: null, policies: [], factMarks: {},
+      revision: 1, updatedAt: "",
     };
     body = <BusinessFormBody profile={known} reload={async () => undefined} lockedReason={BUSINESS_NOT_AVAILABLE} />;
   } else if (profile.isError) {
@@ -137,7 +173,7 @@ function BusinessCard() {
 }
 
 function BusinessFormBody({ profile, reload, lockedReason }: {
-  profile: BusinessProfile;
+  profile: BusinessProfileView;
   reload: () => Promise<void>;
   /** Why the form cannot be changed, or null when the person may save. */
   lockedReason: string | null;
@@ -149,13 +185,15 @@ function BusinessFormBody({ profile, reload, lockedReason }: {
   const intents = useIntentKey();
   const { setBusinessName } = useSession();
   const demo = useApiRuntime().mode === "demo";
-  const [draft, setDraft] = useState<{ revision: number; form: BusinessForm } | null>(null);
+  const [draft, setDraft] = useState<{ revision: number; form: BusinessForm; factsLocked: boolean } | null>(null);
   const [errors, setErrors] = useState<BusinessFormErrors>({});
   const [stale, setStale] = useState(false);
   const [saveOnce] = useState(singleFlight);
 
   const saved = useMemo(() => toBusinessForm(profile), [profile]);
-  const form = draft?.form ?? saved;
+  // BP-16..BP-19: facts this screen could not read stay read-only and are never sent.
+  const factsLocked = profile.factsUnavailable === true;
+  const form = draftForm(draft, saved, factsLocked);
   const revision = draft?.revision ?? profile.revision;
   const dirty = !sameForm(form, saved);
   const zones = useMemo(() => timeZoneChoices(form.timeZone).filter((zone) => zone !== ""), [form.timeZone]);
@@ -163,7 +201,7 @@ function BusinessFormBody({ profile, reload, lockedReason }: {
   const locked = lockedReason !== null;
   const unchanged = !locked && !dirty;
 
-  const edit = (patch: Partial<BusinessForm>) => setDraft({ revision, form: { ...form, ...patch } });
+  const edit = (patch: Partial<BusinessForm>) => setDraft({ revision, form: { ...form, ...patch }, factsLocked });
 
   const save = useMutation({
     mutationFn: (input: UpdateBusinessProfileRequest) => api.updateBusiness(input, { idempotencyKey: intents.keyFor(input) }),
@@ -172,7 +210,7 @@ function BusinessFormBody({ profile, reload, lockedReason }: {
     onSettled: (_profile, error, input) => intents.settle(input, error),
     onSuccess: (next) => {
       // A replayed answer can be older than what is cached: never move the cache back a revision.
-      const latest = newerProfile(queryClient.getQueryData<BusinessProfile>(keys.business), next);
+      const latest = newerProfile(queryClient.getQueryData<BusinessProfileView>(keys.business), next);
       queryClient.setQueryData(keys.business, latest);
       setBusinessName(latest.displayName);
       setDraft(null);
@@ -219,7 +257,20 @@ function BusinessFormBody({ profile, reload, lockedReason }: {
       {hint ? <p id={`${FIELD_IDS[field]}-hint`} className="mt-1 text-xs text-meta">{hint}</p> : null}
     </>
   );
-  const text = (field: BusinessField, label: string, extra: { hint?: string; type?: string; autoComplete?: string } = {}) => (
+  const provenance = (fact: "hours" | "tone" | "policies") => (
+    <p data-testid={`provenance-${fact}`} className="mt-1 text-xs text-meta">{provenanceLine(profile, fact)}</p>
+  );
+  // BP-18: a saved policy shows its own mark; a new or edited one has none until it is saved.
+  const savedPolicyLine = (draft: { title: string; text: string }) => {
+    const saved = factsLocked ? undefined : profile.policies.find((policy) => policy.title === draft.title.trim() && policy.text === draft.text.trim());
+    const date = saved ? setAtLabel(saved.setAt) : null;
+    if (!saved) return null;
+    return <p className="text-xs text-meta">{date ? `Set by an owner on ${date}.` : "Set by an owner."}</p>;
+  };
+  const editDay = (day: Weekday, patch: Partial<DayHours>) => edit({ hours: { ...form.hours, [day]: { ...form.hours[day], ...patch } } });
+  const editPolicy = (index: number, patch: Partial<BusinessForm["policies"][number]>) =>
+    edit({ policies: form.policies.map((policy, at) => (at === index ? { ...policy, ...patch } : policy)) });
+  const text = (field: BusinessTextField, label: string, extra: { hint?: string; type?: string; autoComplete?: string } = {}) => (
     <div>
       <Label htmlFor={FIELD_IDS[field]}>{label}</Label>
       <Input
@@ -250,6 +301,69 @@ function BusinessFormBody({ profile, reload, lockedReason }: {
           <Textarea {...props("services", true)} rows={4} value={form.services} onChange={(event) => edit({ services: event.target.value })} />
           {note("services", "One service per line, like Bridal consultation.")}
         </div>
+        <fieldset id={FIELD_IDS.hours} tabIndex={-1} disabled={factsLocked} className="space-y-2" aria-describedby={[errors.hours ? errorId("hours") : null, `${FIELD_IDS.hours}-hint`].filter(Boolean).join(" ")}>
+          <legend className="mb-1.5 text-sm font-semibold text-fg-2">Opening hours</legend>
+          {WEEKDAYS.map((day) => {
+            const entry = form.hours[day];
+            const name = WEEKDAY_NAMES[day];
+            return (
+              <div key={day} className="flex min-h-11 flex-wrap items-center gap-x-3 gap-y-2" data-testid={`hours-${day}`}>
+                <div className="flex w-36 items-center gap-1">
+                  <Switch
+                    id={`biz-hours-${day}`}
+                    aria-label={`Open on ${name}`}
+                    checked={entry.isOpen}
+                    onCheckedChange={(isOpen) => editDay(day, isOpen ? { isOpen } : { isOpen, open: "", close: "" })}
+                  />
+                  <label htmlFor={`biz-hours-${day}`} className="text-sm text-fg">{name}</label>
+                </div>
+                {entry.isOpen ? (
+                  <div className="flex min-w-0 flex-1 items-center gap-2">
+                    <Input type="time" aria-label={`${name} opens`} aria-invalid={errors.hours ? true : undefined} className="min-w-0 flex-1" value={entry.open} onChange={(event) => editDay(day, { open: event.target.value })} />
+                    <span className="text-sm text-meta" aria-hidden>to</span>
+                    <Input type="time" aria-label={`${name} closes`} aria-invalid={errors.hours ? true : undefined} className="min-w-0 flex-1" value={entry.close} onChange={(event) => editDay(day, { close: event.target.value })} />
+                  </div>
+                ) : <span className="text-sm text-meta">Closed</span>}
+              </div>
+            );
+          })}
+          {note("hours", "Turn on the days you open and give each one its times. Days left off are saved as closed. To close at midnight, set the closing time to 00:00 (12:00 AM). With every day off, the hours are not set.")}
+          {provenance("hours")}
+        </fieldset>
+        <div>
+          <Label htmlFor={FIELD_IDS.tone}>Tone of voice</Label>
+          <Textarea {...props("tone", true)} rows={3} disabled={factsLocked} value={form.tone} onChange={(event) => edit({ tone: event.target.value })} />
+          {note("tone", "How agents should sound when they write for you, like Warm and plain, no exclamation marks. Agents read this, so leave customer details out.")}
+          {provenance("tone")}
+        </div>
+        <fieldset id={FIELD_IDS.policies} tabIndex={-1} disabled={factsLocked} className="space-y-3" aria-describedby={[errors.policies ? errorId("policies") : null, `${FIELD_IDS.policies}-hint`].filter(Boolean).join(" ")}>
+          <legend className="mb-1.5 text-sm font-semibold text-fg-2">Policies</legend>
+          {form.policies.map((policy, index) => (
+            <div key={index} className="space-y-2 rounded-md bg-inset p-3" data-testid="policy-row">
+              <div>
+                <Label htmlFor={`biz-policy-title-${index}`}>Title</Label>
+                <Input id={`biz-policy-title-${index}`} aria-invalid={errors.policies ? true : undefined} value={policy.title} placeholder="Cancellation" onChange={(event) => editPolicy(index, { title: event.target.value })} />
+              </div>
+              <div>
+                <Label htmlFor={`biz-policy-text-${index}`}>Policy</Label>
+                <Textarea id={`biz-policy-text-${index}`} aria-invalid={errors.policies ? true : undefined} rows={3} value={policy.text} onChange={(event) => editPolicy(index, { text: event.target.value })} />
+              </div>
+              {savedPolicyLine(policy)}
+              <Button
+                variant="ghost"
+                aria-label={`Remove ${policy.title.trim() === "" ? "this policy" : policy.title.trim()}`}
+                onClick={() => edit({ policies: form.policies.filter((_, at) => at !== index) })}
+              >
+                Remove
+              </Button>
+            </div>
+          ))}
+          <Button variant="secondary" disabled={form.policies.length >= BUSINESS_POLICIES_MAX} onClick={() => edit({ policies: [...form.policies, { title: "", text: "" }] })}>
+            Add a policy
+          </Button>
+          {note("policies", `Rules customers ask about, like cancellation, refunds or deposits. Up to ${BUSINESS_POLICIES_MAX}. Agents read these, so leave customer details out.`)}
+          {provenance("policies")}
+        </fieldset>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           {text("phone", "Business phone", { type: "tel", autoComplete: "tel", hint: "With country code, like +1 212 555 0142." })}
           <div>

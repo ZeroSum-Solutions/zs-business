@@ -5,7 +5,7 @@ import { createElement as h, type ReactNode } from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { billingNotice, featureLines, grantSummary, onFreeFallback, PLAN_BADGE, planDateLine, PlanView, planFeaturesFresh, SHOPIFY_ADMIN_HINT } from "../src/components/account/plan-view";
-import { BUSINESS_DEMO_NOTE, BUSINESS_NOT_AVAILABLE, BUSINESS_OWNER_ONLY, SettingsView } from "../src/components/account/settings-view";
+import { BUSINESS_DEMO_NOTE, BUSINESS_NOT_AVAILABLE, BUSINESS_OWNER_ONLY, FACTS_UNAVAILABLE, SettingsView } from "../src/components/account/settings-view";
 import { ToastProvider } from "../src/components/ui/toast";
 import { PLAN_CATALOG, PLAN_FEATURE_OFF_REASONS, planFeatures, type BillingPlan, type BusinessProfile } from "@zs/contracts";
 import { ApiError, createApi } from "../src/lib/api";
@@ -222,7 +222,7 @@ describe("plan", () => {
 
 const BUSINESS: BusinessProfile = {
   displayName: DEMO_BUSINESS, legalName: "Halden & Rowe Ltd", phoneE164: "+442079460000", timeZone: "Europe/London", currency: "EUR",
-  postalAddress: { line1: "12 Mill Lane", city: "Leeds", country: "GB" }, description: null, services: [], revision: 2, updatedAt: "2026-10-23T10:00:00.000Z",
+  postalAddress: { line1: "12 Mill Lane", city: "Leeds", country: "GB" }, description: null, services: [], hours: null, tone: null, policies: [], factMarks: {}, revision: 2, updatedAt: "2026-10-23T10:00:00.000Z",
 };
 const seedBusiness = (client: QueryClient) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).business, BUSINESS);
 const escaped = (text: string) => text.replaceAll("&", "&amp;");
@@ -272,6 +272,16 @@ describe("settings", () => {
     expect(html).not.toMatch(/<option value="USD" selected="">/);
     expect(html).toMatch(/<fieldset[^>]*disabled=""/);
     expect(html).toMatch(/<button[^>]*type="submit"[^>]*disabled=""/);
+  });
+
+  it("keeps the company facts read-only, not the rest, when the API could not give them (BP-16..BP-19)", () => {
+    const html = render(h(SettingsView), "demo", (client) =>
+      client.setQueryData(scopeKeys(DEMO_TENANT_ID).business, { ...BUSINESS, factsUnavailable: true }));
+    for (const fact of ["hours", "tone", "policies"]) expect(html).toContain(`data-testid="provenance-${fact}" class="mt-1 text-xs text-meta">${FACTS_UNAVAILABLE.replaceAll("'", "&#x27;")}`);
+    expect(html).toMatch(/<fieldset id="biz-hours"[^>]*disabled=""/);
+    expect(html).toMatch(/<fieldset id="biz-policies"[^>]*disabled=""/);
+    expect(html).toMatch(/<textarea[^>]*id="biz-tone"[^>]*disabled=""|<textarea[^>]*disabled=""[^>]*id="biz-tone"/);
+    expect(html).not.toMatch(/<input[^>]*id="biz-name"[^>]*disabled=""/);
   });
 
   it("shows no notification settings, since nothing sends them", () => {

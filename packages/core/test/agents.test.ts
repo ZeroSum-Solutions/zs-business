@@ -6,7 +6,7 @@
 // starts a month after the last, so earlier inquiries fall out of the lookback window.
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { ActionError, TenantDenied, type ActionCommand, type FollowUpPrompt, type FollowUpSettings, type MemberRole } from "@zs/contracts";
+import { ActionError, NOT_KNOWN, TenantDenied, type ActionCommand, type FollowUpPrompt, type FollowUpSettings, type MemberRole } from "@zs/contracts";
 import { asService, DatabaseUnavailable, type Transaction } from "@zs/db";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import {
@@ -160,9 +160,14 @@ describe("drafts but never sends (G-6, G-12)", () => {
     const [decision] = run.decisions;
     expect(decision).toMatchObject({ intakeItemId: itemId, contactId, outcome: "drafted", reason: null });
 
-    // G-9: the model saw this inquiry and nothing about other customers.
+    // G-9: the model saw this inquiry and nothing about other customers. BP-20: facts the owner never
+    // set read as "not known".
     expect(model.prompts).toEqual([{
-      businessName: "Tenant A", customerName: "Mara Quill", requestedAt: new Date(now - 25 * HOUR).toISOString(),
+      company: {
+        name: "Tenant A", description: NOT_KNOWN, services: NOT_KNOWN, timeZone: NOT_KNOWN,
+        hours: NOT_KNOWN, tone: NOT_KNOWN, policies: NOT_KNOWN,
+      },
+      customerName: "Mara Quill", requestedAt: new Date(now - 25 * HOUR).toISOString(),
       notes: "Can I bring my dog?", booking: { startsAt: expect.any(String), endsAt: expect.any(String), timeZone: "UTC" },
     } satisfies FollowUpPrompt]);
     expect(JSON.stringify(model.prompts)).not.toContain(email);

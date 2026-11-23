@@ -30,7 +30,8 @@ const profile = {
   postalAddress: { line1: "12 Mill Lane", city: "Leeds", country: "GB" }, revision: 2, updatedAt: "2026-10-23T10:00:00.000Z",
 };
 
-const withContent = { ...profile, description: "Fine jewelry since 1952.", services: ["Repairs", "Resizing"] };
+const NO_FACTS = { hours: null, tone: null, policies: [], factMarks: {} };
+const withContent = { ...profile, description: "Fine jewelry since 1952.", services: ["Repairs", "Resizing"], ...NO_FACTS };
 
 describe("http client: business profile", () => {
   it("reads GET /v1/business and drops keys it does not know", async () => {
@@ -41,11 +42,33 @@ describe("http client: business profile", () => {
     expect(calls[0]!.init.method).toBe("GET");
   });
 
-  it("reads an older API's profile, which has no description or services (BP-10), as none", async () => {
+  it("reads an older API's profile, which has no description, services or company facts (BP-10), as none, with the facts unavailable", async () => {
     const { api } = client([json(200, profile), json(200, { actionId: ACTION, result: profile })]);
-    expect(await api.getBusiness()).toEqual({ ...profile, description: null, services: [] });
+    expect(await api.getBusiness()).toEqual({ ...profile, description: null, services: [], ...NO_FACTS, factsUnavailable: true });
     expect(await api.updateBusiness({ expectedRevision: 1, changes: { currency: "EUR" } }, { idempotencyKey: "key-0" }))
-      .toEqual({ ...profile, description: null, services: [] });
+      .toEqual({ ...profile, description: null, services: [], ...NO_FACTS, factsUnavailable: true });
+  });
+
+  it("reads the company facts with their marks, and a shape it does not know as not set and unavailable, so a save cannot wipe them (BP-16..BP-19)", async () => {
+    const mark = { setBy: ACTION, setAt: "2026-11-22T10:00:00.000Z", revision: 3 };
+    const hours = { mon: { open: "09:00", close: "17:00" }, tue: null, wed: null, thu: null, fri: null, sat: null, sun: null };
+    const facts = { hours, tone: "Warm.", policies: [{ title: "Refunds", text: "Within 14 days.", ...mark }], factMarks: { hours: mark, tone: mark, color: mark } };
+    const { api } = client([
+      json(200, { ...withContent, ...facts }),
+      json(200, { ...withContent, ...facts, hours: { mon: null } }),
+      json(200, { ...withContent, ...facts, policies: { list: [] } }),
+      // A time, a week or a mark this client cannot read locks the facts too, rather than blocking every save.
+      json(200, { ...withContent, ...facts, hours: { ...hours, mon: { open: "9:00", close: "17:00" } } }),
+      json(200, { ...withContent, ...facts, hours: { ...hours, mon: null } }),
+      json(200, { ...withContent, ...facts, factMarks: { ...facts.factMarks, tone: { setBy: ACTION } } }),
+      json(200, { ...withContent, ...facts, factMarks: undefined }),
+    ]);
+    const read = await api.getBusiness();
+    expect(read).toEqual({ ...withContent, ...facts, factMarks: { hours: mark, tone: mark } });
+    expect(read).not.toHaveProperty("factsUnavailable");
+    for (let i = 0; i < 6; i++) {
+      expect(await api.getBusiness()).toMatchObject({ hours: null, tone: null, policies: [], factsUnavailable: true });
+    }
   });
 
   it("reports an API without the route as not_found", async () => {

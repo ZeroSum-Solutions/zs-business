@@ -4,7 +4,7 @@
 // bookings fall out of every window. Models are fakes: no test reaches a vendor.
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { ActionError, type AgentKind, type MemberRole, type TemplatedKind } from "@zs/contracts";
+import { ActionError, companyFactsForPrompt, NOT_KNOWN, type AgentKind, type MemberRole, type TemplatedKind } from "@zs/contracts";
 import { asService, type Transaction } from "@zs/db";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import {
@@ -27,6 +27,7 @@ import {
   type TemplatedAgents,
 } from "../src/index.js";
 import { suggestionRequest } from "../src/templates/suggest.js";
+import { readCompanyFacts } from "../src/business/facts.js";
 import { loadBookingFact, templatedSettings } from "../src/templates/send.js";
 import { controlsFromRow } from "../src/agents/controls.js";
 
@@ -924,6 +925,7 @@ describe("turning kinds on (G-21)", () => {
 
 describe("wording suggestions (G-19, G-15, G-18)", () => {
   const tenantName = async () => (await rows<{ name: string }>("SELECT name FROM tenants WHERE tenant_id=$1", [tenantId]))[0]!.name;
+  const companyPrompt = async () => companyFactsForPrompt(await database.db.tenant(tenantId, (tx) => readCompanyFacts(tx, tenantId)));
   const actual = Math.ceil((120 * 350_000 + 60 * 750_000) / 1_000_000);
 
   it("sends the model only the business name, kind, channel and variables, and writes a call row without a run", async () => {
@@ -934,7 +936,7 @@ describe("wording suggestions (G-19, G-15, G-18)", () => {
     expect(suggestion).toMatchObject({ agentKind: "appointment_reminder", channel: "email", costWarning: false });
     expect(suggestion.body).toContain("{customer_first_name}");
     expect(suggestionModelCalls).toEqual([{
-      businessName: await tenantName(), kind: "appointment_reminder", channel: "email",
+      company: expect.objectContaining({ name: await tenantName(), tone: NOT_KNOWN }), kind: "appointment_reminder", channel: "email",
       variables: ["booking_link", "booking_start_local", "business_name", "customer_first_name"],
     }]);
     const calls = await rows<{ call_key: string; run_id: string | null; lane: string; outcome: string; cost_micros: string; model: string }>(
@@ -947,7 +949,7 @@ describe("wording suggestions (G-19, G-15, G-18)", () => {
   });
 
   it("refuses at the daily cap before any provider call, and warns once at 80% as the kind's principal", async () => {
-    const worst = worstCase(FAKE_MODEL_PRICES, FAKE_MODEL_ID, suggestionRequest(await tenantName(), "review_request", "email")).costMicros;
+    const worst = worstCase(FAKE_MODEL_PRICES, FAKE_MODEL_ID, suggestionRequest(await companyPrompt(), "review_request", "email")).costMicros;
     // Room for one call at its worst case, and not for a second.
     await enable("review_request", { cost: worst + 5 });
     suggestionModelCalls.length = 0;
