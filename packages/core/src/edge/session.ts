@@ -184,7 +184,7 @@ import { intakeHandlers, linkIntakeItem, rejectIntakeItem, signBookingKey } from
 import { listBookingPages, listIntakeItems } from "../reads/intake.js";
 import { getContact, listContacts, listDeals, listPipelines } from "../reads/crm.js";
 import { homeResults } from "../reads/home.js";
-import { getThread, listThreads, loadReply } from "../reads/inbox.js";
+import { getThread, listThreads, loadReply, type InboxReadOptions } from "../reads/inbox.js";
 import { findSlots, getBooking, listBookings, listResources } from "../reads/booking.js";
 import { memberProfile, requireMember } from "../members/access.js";
 import { listMembers, memberHandlers } from "../members/handlers.js";
@@ -876,14 +876,17 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       }
       return discarded;
     },
-    listThreads: (query: unknown) => {
+    /**
+     * IE-24: sender threads and email entries are read only when the caller asks, which only the
+     * member HTTP routes do. The stdio MCP server shares this session and leaves them out (IE-33).
+     */
+    listThreads: (query: unknown, options: InboxReadOptions = {}) => {
       const parsed = parseInput(listThreadsQuerySchema, query, "query");
-      // IE-24: a member session sees sender threads and email entries; MCP and tokens do not (IE-33).
-      return read("inbox.drafts", (tx) => listThreads(tx, tenantId, parsed, { includeEmail: true }));
+      return read("inbox.drafts", (tx) => listThreads(tx, tenantId, parsed, { includeEmail: options.includeEmail === true }));
     },
-    getThread: (threadId: unknown) => {
+    getThread: (threadId: unknown, options: InboxReadOptions = {}) => {
       const id = parseInput(threadIdSchema, threadId, "thread ID");
-      return read("inbox.drafts", (tx) => getThread(tx, tenantId, id, { includeEmail: true }));
+      return read("inbox.drafts", (tx) => getThread(tx, tenantId, id, { includeEmail: options.includeEmail === true }));
     },
     /** H-3: the clock is read once, here, so both weeks come from the same instant. */
     homeResults: (query: unknown) => {

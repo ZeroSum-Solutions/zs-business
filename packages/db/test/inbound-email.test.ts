@@ -37,6 +37,11 @@ async function receive(tx: Transaction, tenantId: string, addressId: string, ema
 }
 const SETTLE = `status='ready', kind='message', body_state='full', body_text='Hi', from_name='Mira', auth='pass', match='none',
   review='unmatched', settled_at='${T1}'`;
+/** SETTLE with some of its columns replaced: `extra` is one `column=value`. */
+const settleWith = (extra: string) => {
+  const column = extra.slice(0, extra.indexOf("=")).trim();
+  return [...SETTLE.split(",").map((part) => part.trim()).filter((part) => !part.startsWith(`${column}=`)), extra].join(", ");
+};
 const ERASE = `body_text=NULL, from_name=NULL, subject=NULL, attachments=NULL, in_reply_to=NULL, "references"=NULL,
   body_state='erased', erased_at='${T1}'`;
 
@@ -115,6 +120,13 @@ describe("routing a handle (IE-3, test 1)", () => {
     expect(await route("aaaaaaaaaaaaaaaa")).toEqual([]);
     expect((await fixture.a.run((tx) => tx.query("SELECT * FROM inbound_email_route($1)", [active.handle]))).rows)
       .toEqual([{ tenant_id: tenantId, address_id: active.id }]);
+    // A Data API caller holds authenticated too; the function refuses anyone but the API runtime login.
+    expect(await denied(() => database.db.withoutTenant(async (tx) => {
+      await tx.query("SELECT set_config('request.jwt.claims', '{\"sub\":\"x\"}', true)");
+      return tx.query("SELECT * FROM inbound_email_route($1)", [active.handle]);
+    }))).toMatchObject({ code: "42501" });
+    expect(await denied(() => fixture.service((tx) => tx.query("SELECT * FROM inbound_email_route($1)", [active.handle]))))
+      .toMatchObject({ code: "42501" });
     // Without the function, the runtime role sees no other tenant's handle.
     expect((await database.db.withoutTenant((tx) => tx.query("SELECT 1 FROM inbound_email_addresses"))).rowCount).toBe(0);
   });
@@ -169,13 +181,13 @@ describe("the content guard (IE-35)", () => {
   const asRuntime = (sql: string, id: string) => fixture.a.run(async (tx) => (await tx.query(sql, [id])).rowCount);
   const asServiceRole = (sql: string, id: string) => fixture.service(async (tx) => (await tx.query(sql, [id])).rowCount);
   const asOwner = async (sql: string, id: string) => (await database.pool.query(sql, [id])).rowCount;
-  const roles = [["runtime", asRuntime], ["service role", asServiceRole], ["table owner", asOwner]] as const;
+  const roles = [["runtime", asRuntime], ["table owner", asOwner]] as const;
 
   it("never changes a receive column, for any role", async () => {
     const id = await fresh();
     for (const [set, who] of [
-      ["from_address='other@example.com'", asServiceRole], ["received_at=now()", asServiceRole], ["sender_key=gen_random_uuid()", asOwner],
-      ["provider_email_id='other'", asOwner], ["reply_ref='aaaaaaaaaaaaaaaa'", asServiceRole],
+      ["from_address='other@example.com'", asOwner], ["received_at=now()", asOwner], ["sender_key=gen_random_uuid()", asOwner],
+      ["provider_email_id='other'", asOwner], ["reply_ref='aaaaaaaaaaaaaaaa'", asOwner],
     ] as const)
       expect(await denied(() => who(`UPDATE inbound_emails SET ${set} WHERE id=$1`, id)), set)
         .toMatchObject({ code: "23514", constraint: "inbound_emails_guard" });
@@ -192,6 +204,13 @@ describe("the content guard (IE-35)", () => {
         expect(await denied(() => run(`UPDATE inbound_emails SET ${set} WHERE id=$1`, id)), `${who}: ${set}`)
           .toMatchObject({ code: "23514", constraint: "inbound_emails_guard" });
     }
+  });
+
+  it("lets the service role neither receive, settle nor link (IE-9: those run through the action path)", async () => {
+    const id = await fresh();
+    for (const set of [SETTLE, "status='ready', settled_at=now()", "review='rejected'", "kind='spam'"])
+      expect(await denied(() => asServiceRole(`UPDATE inbound_emails SET ${set} WHERE id=$1`, id)), set).toMatchObject({ code: "42501" });
+    expect(await denied(() => fixture.service((tx) => receive(tx, fixture.a.tenantId, address.id)))).toMatchObject({ code: "42501" });
   });
 
   it("changes the lease only while the row is received", async () => {
@@ -232,17 +251,88 @@ describe("the content guard (IE-35)", () => {
     expect(await denied(() => asRuntime(`UPDATE inbound_emails SET ${ERASE} WHERE id=$1`, id))).toMatchObject({ code: "42501" });
     expect(await denied(() => asOwner(`UPDATE inbound_emails SET ${ERASE} WHERE id=$1`, id))).toMatchObject({ code: "42501" });
     // An erasure that also changes something else is not the erasure.
-    expect(await denied(() => asServiceRole(`UPDATE inbound_emails SET ${ERASE}, kind='spam' WHERE id=$1`, id)))
+    expect(await denied(() => asServiceRole(`UPDATE inbound_emails SET ${ERASE}, attempts=1 WHERE id=$1`, id)))
       .toMatchObject({ code: "23514", constraint: "inbound_emails_guard" });
     expect(await asServiceRole(`UPDATE inbound_emails SET ${ERASE} WHERE id=$1`, id)).toBe(1);
     expect(await denied(() => asServiceRole(`UPDATE inbound_emails SET erased_at='${T0}' WHERE id=$1`, id)))
       .toMatchObject({ code: "23514", constraint: "inbound_emails_guard" });
   });
 
-  it("lets only the service role delete", async () => {
+  it("lets only the service role delete, and nobody truncate", async () => {
     const id = await fresh();
     expect(await denied(() => asOwner("DELETE FROM inbound_emails WHERE id=$1", id))).toMatchObject({ code: "42501" });
+    expect(await denied(() => database.pool.query("TRUNCATE inbound_emails CASCADE"))).toMatchObject({ code: "42501" });
     expect(await asServiceRole("DELETE FROM inbound_emails WHERE id=$1", id)).toBe(1);
+  });
+
+  it("a link names contact, actor and time; a reject writes no link audit", async () => {
+    const contactId = randomUUID();
+    await fixture.service((tx) => tx.query(
+      "INSERT INTO crm_contacts (tenant_id,id,display_name,normalized_email,created_at,updated_at) VALUES ($1,$2,'Ravi','ravi@example.com',$3,$3)",
+      [fixture.a.tenantId, contactId, T0]));
+    const id = await fresh();
+    expect(await asRuntime(`UPDATE inbound_emails SET ${SETTLE} WHERE id=$1`, id)).toBe(1);
+    expect(await denied(() => asRuntime(`UPDATE inbound_emails SET review='linked', contact_id='${contactId}' WHERE id=$1`, id)))
+      .toMatchObject({ code: "23514", constraint: "inbound_emails_guard" });
+    expect(await denied(() => asRuntime("UPDATE inbound_emails SET review='rejected', linked_by=gen_random_uuid(), linked_at=now() WHERE id=$1", id)))
+      .toMatchObject({ code: "23514", constraint: "inbound_emails_guard" });
+    // Tenant B cannot link A's row, nor link its own row to A's contact.
+    expect((await fixture.b.run((tx) => tx.query(
+      `UPDATE inbound_emails SET review='linked', contact_id=$2, linked_by=gen_random_uuid(), linked_at=now() WHERE id=$1`, [id, contactId]))).rowCount).toBe(0);
+    const addressB = await addressOf(fixture.b.tenantId);
+    const own = await fixture.b.run((tx) => receive(tx, fixture.b.tenantId, addressB.id));
+    await fixture.b.run((tx) => tx.query(`UPDATE inbound_emails SET ${SETTLE} WHERE id=$1`, [own]));
+    expect(await denied(() => fixture.b.run((tx) => tx.query(
+      `UPDATE inbound_emails SET review='linked', contact_id=$2, linked_by=gen_random_uuid(), linked_at=now() WHERE id=$1`, [own, contactId]))))
+      .toMatchObject({ code: "23503" });
+  });
+
+  it("a settle never links or rejects, and only a ready row is linked or rejected", async () => {
+    for (const review of ["linked", "rejected"]) {
+      const id = await fresh();
+      expect(await denied(() => asRuntime(`UPDATE inbound_emails SET ${settleWith(`review='${review}'`)} WHERE id=$1`, id)), review)
+        .toMatchObject({ code: "23514", constraint: "inbound_emails_guard" });
+    }
+    const dropped = await fresh();
+    expect(await asRuntime(
+      `UPDATE inbound_emails SET status='dropped', drop_reason='bounce', review='unmatched', settled_at='${T1}' WHERE id=$1`, dropped)).toBe(1);
+    expect(await denied(() => asRuntime("UPDATE inbound_emails SET review='rejected' WHERE id=$1", dropped)))
+      .toMatchObject({ code: "23514", constraint: "inbound_emails_guard" });
+  });
+
+  it("holds the IE-12 shapes at the settle: references, names, subjects, candidates, duplicates", async () => {
+    const settle = async (extra: string) => asRuntime(`UPDATE inbound_emails SET ${settleWith(extra)} WHERE id=$1`, await fresh());
+    // An empty references array is a valid empty list.
+    expect(await settle(`"references"='{}'`)).toBe(1);
+    expect(await settle(`"references"=ARRAY['<a@x>','<b@x>']`)).toBe(1);
+    expect(await settle(`candidate_contact_ids=ARRAY(SELECT gen_random_uuid() FROM generate_series(1,10))`)).toBe(1);
+    const refused: Array<[string, string]> = [
+      [`"references"=ARRAY(SELECT '<'||g||'@x>' FROM generate_series(1,21) g)`, "inbound_emails_references"],
+      [`"references"='{{"<a@x>"},{"<b@x>"}}'`, "inbound_emails_references"],
+      [`"references"=ARRAY['']`, "inbound_emails_references"],
+      ["from_name=''", "inbound_emails_from_name"],
+      [`from_name=E'Mi\tra'`, "inbound_emails_from_name"],
+      ["subject=''", "inbound_emails_subject"],
+      [`subject=E'Hel\u0085lo'`, "inbound_emails_subject"],
+      [`subject=E'Hel\u0007lo'`, "inbound_emails_subject"],
+      ["candidate_contact_ids=ARRAY(SELECT gen_random_uuid() FROM generate_series(1,11))", "inbound_emails_candidates"],
+      ["duplicate_of=id", "inbound_emails_duplicate_self"],
+    ];
+    for (const [extra, constraint] of refused)
+      expect(await denied(() => settle(extra)), extra).toMatchObject({ code: "23514", constraint });
+  });
+
+  it("keeps the link audit with the link, even for the table owner", async () => {
+    const insert = (columns: string, values: string) => database.pool.query(
+      `INSERT INTO inbound_emails (tenant_id,id,address_id,provider,provider_email_id,from_address,received_at,sender_key,created_at${columns})
+       VALUES ($1,gen_random_uuid(),$2,'resend',gen_random_uuid()::text,'mira@example.com',$3,gen_random_uuid(),$3${values})`,
+      [fixture.a.tenantId, address.id, T0]);
+    for (const [columns, values] of [
+      [",linked_by", ",gen_random_uuid()"] as const,
+      [",linked_by,linked_at", ",gen_random_uuid(),now()"] as const,
+      [",linked_at", ",now()"] as const,
+    ])
+      expect(await denied(() => insert(columns, values)), columns).toMatchObject({ code: "23514", constraint: "inbound_emails_link_audit" });
   });
 });
 

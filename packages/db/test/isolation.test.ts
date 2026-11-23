@@ -40,10 +40,13 @@ describe("tenant isolation under actual runtime and privileged roles", () => {
   it("checks every public tenant table from the catalog, including future migrations", async () => {
     const tables = await fixture.service(catalogTenantTables);
     expect(tables.length).toBeGreaterThan(0);
-    await fixture.service(async (tx) => {
-      await seedTenantTables(tx, fixture.a.tenantId, tables);
-      await seedTenantTables(tx, fixture.b.tenantId, tables);
-    });
+    const deferred = await fixture.service(async (tx) => ({
+      a: await seedTenantTables(tx, fixture.a.tenantId, tables),
+      b: await seedTenantTables(tx, fixture.b.tenantId, tables),
+    }));
+    // Rows the service role may not insert (inbound email, IE-31) go in as each tenant's runtime role.
+    for (const [tenant, rows] of [[fixture.a, deferred.a], [fixture.b, deferred.b]] as const)
+      for (const row of rows) await tenant.run((tx) => tx.query(row.sql, row.params));
     for (const table of tables) {
       expect(table.rls, table.name).toBe(true);
       expect(table.forced, table.name).toBe(true);

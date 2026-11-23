@@ -204,6 +204,16 @@ describe("parseServerEnv", () => {
     expect(env.resendWebhook).toBeNull();
   });
 
+  it("refuses an inbound key that the bounce webhook also holds, rotation keys included", () => {
+    const inbound = { ...base, INBOUND_EMAIL_DOMAIN };
+    for (const env of [
+      { RESEND_INBOUND_WEBHOOK_SECRET: RESEND_WEBHOOK_SECRET, RESEND_WEBHOOK_SECRET },
+      { RESEND_INBOUND_WEBHOOK_SECRET, RESEND_WEBHOOK_SECRET, RESEND_WEBHOOK_PREVIOUS_SECRET: RESEND_INBOUND_WEBHOOK_SECRET },
+      { RESEND_INBOUND_WEBHOOK_SECRET, RESEND_INBOUND_WEBHOOK_PREVIOUS_SECRET: RESEND_WEBHOOK_SECRET, RESEND_WEBHOOK_SECRET },
+    ]) expect(() => parseServerEnv({ ...inbound, ...env })).toThrow(/must differ from the RESEND_WEBHOOK secrets/);
+    expect(parseServerEnv({ ...inbound, RESEND_INBOUND_WEBHOOK_SECRET, RESEND_WEBHOOK_SECRET }).resendInboundWebhook).not.toBeNull();
+  });
+
   it("refuses a malformed inbound secret or domain, naming the variable", () => {
     for (const secret of ["", "whsec_", "sk_live_x", `${RESEND_INBOUND_WEBHOOK_SECRET} `])
       expect(() => parseServerEnv({ ...base, RESEND_INBOUND_WEBHOOK_SECRET: secret, INBOUND_EMAIL_DOMAIN }), secret)

@@ -207,7 +207,7 @@ describe("the conversation pane", () => {
 
   it("hides the page description on a phone while a conversation is open", async () => {
     const { html } = await open("Noor Haddad");
-    expect(tagBefore(html, "Website requests and your replies")).toContain("hidden lg:inline");
+    expect(tagBefore(html, "Website requests, emails and your replies")).toContain("hidden lg:inline");
   });
 
   it("shows a missing conversation on the grey panel without a second way back", async () => {

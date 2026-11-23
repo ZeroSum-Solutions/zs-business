@@ -108,12 +108,24 @@ export function createInboundEmailSession(deps: EdgeDependencies, options: Inbou
     async receive(event: InboundEmailEvent): Promise<InboundEmailOutcome> {
       const routing = routeRecipients(event, domain);
       const routes = collapseByTenant(await lookUp(routing.recipients));
+      // IE-4: mail with no routed recipient is acknowledged and leaves nothing, whatever its sender says.
       if (routes.length === 0) return { handled: false, reason: "unrouted", receivedForUnrouted: routing.receivedForUnrouted };
+      // IE-8: routed mail whose sender cannot be read is a 400, so Resend shows it failed and retries.
       const fromAddress = senderAddress(event.data.from);
       if (fromAddress === null) return { handled: false, reason: "malformed_event" };
       const subject = inboundSubject(event.data.subject);
+      // Every routed tenant is tried, even after one fails, so one tenant's fault never holds back another's
+      // mail. Then the first failure propagates (503 or 500) and Resend retries; the tenants stored replay.
       const tenants: InboundTenantOutcome[] = [];
-      for (const route of routes) tenants.push(await receiveFor(route, event.data.email_id, fromAddress, subject));
+      let failure: { readonly error: unknown } | null = null;
+      for (const route of routes) {
+        try {
+          tenants.push(await receiveFor(route, event.data.email_id, fromAddress, subject));
+        } catch (error) {
+          failure ??= { error };
+        }
+      }
+      if (failure) throw failure.error;
       return { handled: true, tenants, receivedForUnrouted: routing.receivedForUnrouted };
     },
   };

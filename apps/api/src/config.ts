@@ -520,6 +520,13 @@ function parseResendInboundWebhook(data: z.infer<typeof envSchema>): ResendInbou
   }
   if (data.INBOUND_EMAIL_DOMAIN === undefined)
     throw new Error("Invalid environment: RESEND_INBOUND_WEBHOOK_SECRET needs INBOUND_EMAIL_DOMAIN");
+  // The signature does not name the route: a key shared with the bounce webhook would let an event signed for
+  // one endpoint verify at the other. The keys are compared without the `whsec_` prefix, rotation keys included.
+  const keys = (...secrets: (string | undefined)[]) =>
+    secrets.flatMap((secret) => (secret === undefined ? [] : [secret.replace(/^whsec_/, "")]));
+  const bounce = new Set(keys(data.RESEND_WEBHOOK_SECRET, data.RESEND_WEBHOOK_PREVIOUS_SECRET));
+  if (keys(data.RESEND_INBOUND_WEBHOOK_SECRET, data.RESEND_INBOUND_WEBHOOK_PREVIOUS_SECRET).some((key) => bounce.has(key)))
+    throw new Error("Invalid environment: RESEND_INBOUND_WEBHOOK_SECRET and _PREVIOUS_SECRET must differ from the RESEND_WEBHOOK secrets");
   return {
     domain: data.INBOUND_EMAIL_DOMAIN,
     secrets: {

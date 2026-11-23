@@ -195,7 +195,9 @@ hub issued:
   an optional reply reference after `+` (IE-6). Anything else is not routed.
 - The handle is looked up with `inbound_email_route(handle)`, a `SECURITY DEFINER` function with
   a pinned `search_path` that returns only `tenant_id` and `address_id` of an `active` or
-  `retiring` address, executable by the runtime role. Every later read and write runs in that
+  `retiring` address, executable by the API runtime login only: it refuses any other session
+  user and any caller with `request.jwt` claims set, so a Data API user cannot map a handle to a
+  tenant (built 2026-11-22). Every later read and write runs in that
   tenant's scope (runtime role, RLS), as R-8 does after reading its tags.
 - Nothing else picks a tenant: not From, Subject, `In-Reply-To`, `References`, any `X-` header,
   the body, `received_for` or the reply reference. A reference, a header or an address that
@@ -587,7 +589,8 @@ foreign keys that include `tenant_id`, and appear in the catalog isolation test.
 - may INSERT `email_thread_refs` rows of direction `in` (settle) and UPDATE their `contact_id`
   (link).
 Only the service role writes addresses, the lease columns, direction `out` references (the
-delivery worker, IE-6), the retention erasure, and deletes (IE-35). `inbound_email_route` returns
+delivery worker, IE-6), the retention erasure, and deletes (IE-35). It never inserts, settles or
+links an email: its UPDATE grant covers only the lease columns and the columns the erasure clears. `inbound_email_route` returns
 no row of a disabled address and nothing but the tenant and address IDs.
 
 **IE-32. Plans.** `inbound.email.receive` and `inbound.email.settle` join PL-8's list of inbound
@@ -852,6 +855,9 @@ Left out of this contract on purpose:
 - Received mail uses the same Resend quota as sending; a flood can stop outbound mail until the
   operator acts (IE-17).
 - The provider keeps its own copy of each message for a time the provider sets.
+- The receive action's stored payload (`actions.payload`, slice 1) holds the sender address and
+  subject. The IE-35 erasure clears them on `inbound_emails` but not there, so they stay in the
+  action log until a retention pass for action payloads exists (follow-up ZSB-64).
 
 ## Open decisions (need the repo owner)
 

@@ -3,10 +3,11 @@
 // signature over the raw body is checked before anything is parsed or any database work. Only
 // `email.received` is read; every other signed event is acknowledged. Original code.
 import { Hono, type Context } from "hono";
-import { bodyLimit } from "hono/body-limit";
 import {
   apiErrorBody,
   createInboundEmailSession,
+  DatabaseUnavailable,
+  retryableAsUnavailable,
   INBOUND_EMAIL_EVENT_TYPE,
   inboundEmailEventSchema,
   verifyResendWebhook,
@@ -14,8 +15,9 @@ import {
   type InboundEmailOutcome,
   type ResendWebhookSecrets,
 } from "@zs/core";
-import { INBOUND_WEBHOOK_MAX_BYTES } from "@zs/contracts";
+import { INBOUND_WEBHOOK_MAX_BYTES, providerEmailIdSchema } from "@zs/contracts";
 import type { AppEnv } from "../app.js";
+import { readBodyBytes } from "../mcp/routes.js";
 
 export const RESEND_INBOUND_WEBHOOK_PATH = "/webhooks/resend/inbound";
 
@@ -31,14 +33,14 @@ export interface ResendInboundWebhookConfig {
   readonly report?: (event: {
     readonly id: string;
     readonly emailId: string | null;
-    readonly outcome: InboundEmailOutcome | { readonly handled: false; readonly reason: "unavailable" };
+    readonly outcome: InboundEmailOutcome | { readonly handled: false; readonly reason: "unavailable" | "failed" };
   }) => void;
 }
 
 /** The email_id of a signed event, when it has a readable one; only for the log line. */
 function emailIdOf(payload: unknown): string | null {
   const id = (payload as { data?: { email_id?: unknown } } | null)?.data?.email_id;
-  return typeof id === "string" && /^[\x21-\x7e]{1,200}$/.test(id) ? id : null;
+  return typeof id === "string" && providerEmailIdSchema.safeParse(id).success ? id : null;
 }
 
 export function resendInboundWebhookRoutes(
@@ -47,12 +49,10 @@ export function resendInboundWebhookRoutes(
   requestEdge: (c: Context<AppEnv>) => EdgeDependencies,
 ) {
   return new Hono<AppEnv>()
-    .use(RESEND_INBOUND_WEBHOOK_PATH, bodyLimit({
-      maxSize: INBOUND_WEBHOOK_MAX_BYTES,
-      onError: (c) => c.json(apiErrorBody("ValidationFailed", "Request body is too large"), 413),
-    }))
     .post(RESEND_INBOUND_WEBHOOK_PATH, async (c) => {
-      const body = new Uint8Array(await c.req.arrayBuffer());
+      // Counted on the stream: a false or missing Content-Length cannot get a larger body past the limit.
+      const body = await readBodyBytes(c.req.raw, INBOUND_WEBHOOK_MAX_BYTES);
+      if (body === null) return c.json(apiErrorBody("ValidationFailed", "Request body is too large"), 413);
       const verified = verifyResendWebhook({
         secrets: config.secrets,
         headers: {
@@ -80,9 +80,12 @@ export function resendInboundWebhookRoutes(
       let outcome: InboundEmailOutcome;
       try {
         outcome = await createInboundEmailSession(requestEdge(c), { domain: config.domain }).receive(event.data);
-      } catch {
-        // IE-8: a database error answers 503 and Resend retries; a stored receive replays.
-        config.report?.({ id: verified.id, emailId, outcome: { handled: false, reason: "unavailable" } });
+      } catch (error) {
+        // IE-8: the database unreachable or busy answers 503 and Resend retries; a stored receive replays.
+        // Anything else is a fault, not a busy database: it reaches the app's error handler (500), Resend still retries.
+        const mapped = retryableAsUnavailable(error);
+        config.report?.({ id: verified.id, emailId, outcome: { handled: false, reason: mapped instanceof DatabaseUnavailable ? "unavailable" : "failed" } });
+        if (!(mapped instanceof DatabaseUnavailable)) throw error;
         return c.json(apiErrorBody("Unavailable", "Inbound email could not be stored; retry later"), 503);
       }
       config.report?.({ id: verified.id, emailId, outcome });

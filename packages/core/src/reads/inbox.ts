@@ -147,7 +147,7 @@ const clip = (text: string | null) => {
   return chars.length <= PREVIEW_LENGTH ? text : `${chars.slice(0, PREVIEW_LENGTH - 1).join("")}…`;
 };
 
-/** Names, addresses and the latest text for a page of threads, in two queries. */
+/** Names, addresses and the latest text for a page of threads, in one query per thread kind on the page. */
 async function summaries(tx: Transaction, tenantId: string, rows: readonly ThreadRow[]): Promise<ThreadSummary[]> {
   const contactIds = rows.filter((row) => row.kind === "customer").map((row) => row.id);
   const itemIds = rows.filter((row) => row.kind === "visitor").map((row) => row.id);
@@ -179,7 +179,7 @@ async function summaries(tx: Transaction, tenantId: string, rows: readonly Threa
       ORDER BY e.sender_key, e.received_at DESC, e.id DESC`,
     [tenantId, senderKeys],
   )).rows.map((row) => [row.sender_key, row]));
-  return rows.map((row) => {
+  return rows.flatMap((row): ThreadSummary | ThreadSummary[] => {
     const base = {
       id: threadId(row.kind, row.id),
       kind: row.kind,
@@ -198,11 +198,14 @@ async function summaries(tx: Transaction, tenantId: string, rows: readonly Threa
       };
     }
     if (row.kind === "sender") {
-      const sender = senders.get(row.id)!;
-      return {
+      // The scan and this lookup are two statements: an email deleted in between (the service role deletes)
+      // can leave a sender with no visible email. That thread is gone; it is left out, never a 500.
+      const sender = senders.get(row.id);
+      if (!sender) return [];
+      return [{
         ...base, contactId: null, intakeItemId: null,
         name: sender.from_name ?? sender.from_address, email: sender.from_address, preview: clip(sender.subject),
-      };
+      }];
     }
     const visitor = visitors.get(row.id)!;
     return {
@@ -312,6 +315,8 @@ const entryId = (entry: ThreadEntry) => (entry.type === "reply" ? entry.reply.id
  */
 async function senderThread(tx: Transaction, tenantId: string, senderKey: string, row: ThreadRow): Promise<ThreadDetail> {
   const [summary] = await summaries(tx, tenantId, [row]);
+  // Each query reads its own snapshot: a sender whose last email was dropped or erased in between has no thread.
+  if (!summary) throw new NotFound("Thread not found");
   const emails = (await tx.query<{
     id: string; received_at: Date; from_address: string; from_name: string | null; subject: string | null; status: string;
   }>(
@@ -329,8 +334,9 @@ async function senderThread(tx: Transaction, tenantId: string, senderKey: string
     subject: email.subject,
     contentPending: email.status === "received",
   }));
+  if (entries.length === 0) throw new NotFound("Thread not found");
   return {
-    ...summary!,
+    ...summary,
     phone: null,
     entries: entries.slice(0, THREAD_ENTRY_LIMIT).reverse(),
     olderEntries: entries.length > THREAD_ENTRY_LIMIT,

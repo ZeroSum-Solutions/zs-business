@@ -563,8 +563,9 @@ Log lines carry IDs and reasons only, never an address or subject (IE-4).
 | 401 `Unauthorized` | Missing, wrong or stale signature. One body for all of them. |
 | 400 `ValidationFailed` | Signed, but not JSON, or an `email.received` it cannot read. Resend retries it. |
 | 413 `ValidationFailed` | Body over 256 KiB. |
-| 503 `Unavailable` | The database failed. Resend retries; a stored receive replays. |
-| 200 `{"handled":true}` | Stored for every routed tenant, or replayed. |
+| 503 `Unavailable` | The database did not answer or was busy. Resend retries; a stored receive replays. |
+| 500 `Internal` | Any other fault (a bug). Resend retries too; the log line says `failed`. |
+| 200 `{"handled":true}` | Stored for every routed tenant, or replayed. A tenant past the admission cap stores nothing and is logged (`over admission`), yet the answer is still 200. |
 | 200 `{"handled":false,"reason":…}` | `unrouted` (no hub recipient), or `unread_event`. |
 
 ## Stripe webhook (`/webhooks/stripe`, no auth)

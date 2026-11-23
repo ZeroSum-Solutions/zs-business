@@ -89,6 +89,9 @@ afterAll(async () => {
   await database?.close();
 });
 
+/** What the member HTTP routes pass; the stdio MCP and every other caller read without it. */
+const MEMBER = { includeEmail: true } as const;
+
 describe("routing (IE-3, pure)", () => {
   const handle = "abcdefghijklmnop";
   const ref = "qrstuvwxyz234567";
@@ -115,7 +118,12 @@ describe("routing (IE-3, pure)", () => {
   });
   it("never routes on received_for, and counts its hub entries", () => {
     const routed = routeRecipients(event({ received_for: [`${handle}@${DOMAIN}`, `${handle}@${DOMAIN.toUpperCase()}`, "x@other.test"] }), DOMAIN);
-    expect(routed).toEqual({ recipients: [], receivedForUnrouted: 2 });
+    expect(routed).toEqual({ recipients: [], receivedForUnrouted: 1 });
+  });
+  it("does not count a received_for address that to, cc or bcc already carried", () => {
+    const other = "bbbbbbbbbbbbbbbb";
+    const routed = routeRecipients(event({ to: [`Hub <${handle}@${DOMAIN}>`], received_for: [`${handle}@${DOMAIN}`, `${other}@${DOMAIN}`] }), DOMAIN);
+    expect(routed.receivedForUnrouted).toBe(1);
   });
   it("collapses one tenant to the first recipient with a reference, else the first", () => {
     const plain = { tenantId: "t1", recipient: { handle: "a", replyRef: null } };
@@ -134,6 +142,16 @@ describe("routing (IE-3, pure)", () => {
     const long = inboundSubject("😀".repeat(150))!;
     expect(long.length).toBe(200);
     expect(inboundSubject("x\uD800y")).toBe("x�y");
+  });
+  it("turns line and paragraph separators in a subject into spaces", () => {
+    expect(inboundSubject("a\u2028b\u2029c")).toBe("a b c");
+  });
+  it("drops C1 controls and bidirectional overrides, and an empty subject is none", () => {
+    expect(senderAddress("we\u0085ird\u202e sender")).toBe("weird sender");
+    expect(senderAddress("Pat <pat\u0085@example.com>")).toBe("pat@example.com");
+    expect(inboundSubject("Invoice \u202egpj.exe\u2069 \u009b")).toBe("Invoice gpj.exe ");
+    expect(inboundSubject("")).toBeNull();
+    expect(inboundSubject("\u0000\u202e")).toBeNull();
   });
 });
 
@@ -167,9 +185,9 @@ describe("receive (IE-9)", () => {
       "INSERT INTO tenant_members (tenant_id,id,email,user_id,role,created_at,updated_at) VALUES ($1,$2,$3,$4,'owner',$5,$5)",
       [fixture.b.tenantId, randomUUID(), "owner-b@example.com", ownerB, new Date(now)]));
     const threadB = `e_${rowB!.sender_key}`;
-    const detail = await createSession(deps(), { tenantId: fixture.b.tenantId, actorId: ownerB }).getThread(threadB);
+    const detail = await createSession(deps(), { tenantId: fixture.b.tenantId, actorId: ownerB }).getThread(threadB, MEMBER);
     expect(detail.entries.map(entryId)).toContain(rowB!.id);
-    await expect(createSession(deps(), { tenantId: fixture.a.tenantId, actorId: ownerA }).getThread(threadB)).rejects.toBeInstanceOf(NotFound);
+    await expect(createSession(deps(), { tenantId: fixture.a.tenantId, actorId: ownerA }).getThread(threadB, MEMBER)).rejects.toBeInstanceOf(NotFound);
   });
 
   it("unknown, disabled, malformed and received_for-only mail is unrouted and leaves no row (test 3)", async () => {
@@ -233,6 +251,8 @@ describe("receive (IE-9)", () => {
   });
 
   it("a failure after the row insert leaves neither the row nor the event (test 6)", async () => {
+    const outboxBefore = await fixture.service(async (tx) => (await tx.query(
+      "SELECT 1 FROM outbox WHERE tenant_id=$1 AND event_type='inbound.email.received'", [fixture.a.tenantId])).rowCount);
     await database.pool.query(`
       CREATE OR REPLACE FUNCTION public.test_fail_inbound_event() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN IF NEW.event_type = 'inbound.email.received' THEN RAISE EXCEPTION 'injected failure'; END IF; RETURN NEW; END $$;
@@ -246,8 +266,33 @@ describe("receive (IE-9)", () => {
     expect(await rows(fixture.a.tenantId, message.data.email_id)).toEqual([]);
     expect(await fixture.service(async (tx) => (await tx.query(
       "SELECT 1 FROM actions WHERE tenant_id=$1 AND idempotency_key=$2", [fixture.a.tenantId, `email-inbound:${message.data.email_id}`])).rowCount)).toBe(0);
-    // The retry after the fault receives it.
+    expect(await fixture.service(async (tx) => (await tx.query(
+      "SELECT 1 FROM outbox WHERE tenant_id=$1 AND event_type='inbound.email.received'", [fixture.a.tenantId])).rowCount)).toBe(outboxBefore);
+    // The retry after the fault receives it, with exactly one event.
     expect(await session().receive(message)).toMatchObject({ handled: true, tenants: [{ outcome: "received" }] });
+    const [row] = await rows(fixture.a.tenantId, message.data.email_id);
+    expect(await events(fixture.a.tenantId, row!.id)).toHaveLength(1);
+  });
+
+  it("one tenant's failure never holds back another tenant's receive; the retry finishes the first", async () => {
+    const tenantA = fixture.a.tenantId;
+    await database.pool.query(`
+      CREATE OR REPLACE FUNCTION public.test_fail_tenant_a() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.tenant_id = '${tenantA}'::uuid AND NEW.event_type = 'inbound.email.received' THEN RAISE EXCEPTION 'injected failure'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER test_fail_tenant_a BEFORE INSERT ON public.outbox FOR EACH ROW EXECUTE FUNCTION public.test_fail_tenant_a();`);
+    // A is listed first: its failure must not stop B.
+    const message = event({ to: [`${handleA}@${DOMAIN}`, `${handleB}@${DOMAIN}`] });
+    try {
+      await expect(session().receive(message)).rejects.toThrow();
+    } finally {
+      await database.pool.query(`DROP TRIGGER test_fail_tenant_a ON public.outbox; DROP FUNCTION public.test_fail_tenant_a();`);
+    }
+    expect(await rows(tenantA, message.data.email_id)).toEqual([]);
+    expect(await rows(fixture.b.tenantId, message.data.email_id)).toHaveLength(1);
+    const retry = await session().receive(message);
+    expect(retry.handled && retry.tenants.map((tenant) => tenant.outcome)).toEqual(["received", "received"]);
+    expect(await rows(tenantA, message.data.email_id)).toHaveLength(1);
+    expect(await rows(fixture.b.tenantId, message.data.email_id)).toHaveLength(1);
   });
 
   it("only the inbound principal runs the receive: no member permission names it", () => {
@@ -263,7 +308,8 @@ describe("admission and plans (IE-17, IE-32)", () => {
     const address = await fixture.service(async (tx) => (await tx.query<{ id: string; handle: string }>(
       "SELECT id, handle FROM inbound_email_addresses WHERE tenant_id=$1", [fresh])).rows[0]!);
     const used = (await rows(fresh)).length;
-    await fixture.service((tx) => tx.query(
+    // Seeded as the runtime role in that tenant's scope: the service role inserts no email (IE-31).
+    await database.db.tenant(fresh, (tx) => tx.query(
       `INSERT INTO inbound_emails (tenant_id, id, address_id, provider, provider_email_id, from_address, received_at, sender_key, created_at)
        SELECT $1, gen_random_uuid(), $2, 'resend', 'flood-' || n, 'flood@example.com', $3, gen_random_uuid(), $3
          FROM generate_series(1, $4::int) n`,
@@ -280,6 +326,23 @@ describe("admission and plans (IE-17, IE-32)", () => {
     // A day later the window has moved: the same message is received.
     now += 24 * 3_600_000;
     expect(await session().receive(message)).toMatchObject({ handled: true, tenants: [{ outcome: "received" }] });
+    await fixture.service((tx) => tx.query("DELETE FROM inbound_emails WHERE tenant_id=$1", [fresh]));
+  });
+
+  it("two concurrent receives at the last free place: one is stored, one is over admission (IE-17)", async () => {
+    const fresh = randomUUID();
+    await fixture.service((tx) => tx.query("INSERT INTO tenants (tenant_id,name) VALUES ($1,'Racing')", [fresh]));
+    const address = await fixture.service(async (tx) => (await tx.query<{ id: string; handle: string }>(
+      "SELECT id, handle FROM inbound_email_addresses WHERE tenant_id=$1", [fresh])).rows[0]!);
+    await database.db.tenant(fresh, (tx) => tx.query(
+      `INSERT INTO inbound_emails (tenant_id, id, address_id, provider, provider_email_id, from_address, received_at, sender_key, created_at)
+       SELECT $1, gen_random_uuid(), $2, 'resend', 'race-' || n, 'flood@example.com', $3, gen_random_uuid(), $3
+         FROM generate_series(1, $4::int) n`,
+      [fresh, address.id, new Date(now - 60_000), INBOUND_ADMISSION_LIMIT - 1]));
+    const outcomes = await Promise.all([1, 2].map(() => session().receive(event({ to: [`${address.handle}@${DOMAIN}`] }))));
+    expect(outcomes.flatMap((outcome) => (outcome.handled ? outcome.tenants.map((t) => t.outcome) : [])).sort())
+      .toEqual(["over_admission", "received"]);
+    expect(await rows(fresh)).toHaveLength(INBOUND_ADMISSION_LIMIT);
     await fixture.service((tx) => tx.query("DELETE FROM inbound_emails WHERE tenant_id=$1", [fresh]));
   });
 
@@ -319,13 +382,13 @@ describe("sender threads (IE-24, test 14)", () => {
 
   it("a member sees one sender thread with needsReview and metadata-only entries, content pending", async () => {
     const member = createSession(deps(), { tenantId: fixture.a.tenantId, actorId: ownerA });
-    const threads = (await member.listThreads({ limit: 100 })).items;
+    const threads = (await member.listThreads({ limit: 100 }, MEMBER)).items;
     const summary = threads.find((thread) => thread.id === threadId);
     expect(summary).toMatchObject({
       kind: "sender", contactId: null, intakeItemId: null, name: sender, email: sender, preview: "Second",
       needsReview: true, needsReply: false, drafts: 0, lastActivityAt: new Date(now).toISOString(),
     });
-    const detail = await member.getThread(threadId);
+    const detail = await member.getThread(threadId, MEMBER);
     expect(detail.phone).toBeNull();
     expect(detail.olderEntries).toBe(false);
     expect(detail.entries).toEqual([
@@ -336,18 +399,40 @@ describe("sender threads (IE-24, test 14)", () => {
 
   it("a settled ready row stays; dropped and rejected rows leave the thread", async () => {
     const member = createSession(deps(), { tenantId: fixture.a.tenantId, actorId: ownerA });
-    await fixture.service((tx) => tx.query(
+    await fixture.a.run((tx) => tx.query(
       "UPDATE inbound_emails SET status='ready', settled_at=$3, kind='message', body_state='full', review='unmatched' WHERE tenant_id=$1 AND id=$2",
       [fixture.a.tenantId, firstId, new Date(now)]));
-    expect((await member.getThread(threadId)).entries.map((entry) => entry.type === "email" && entry.contentPending)).toEqual([false, true]);
-    await fixture.service((tx) => tx.query(
+    expect((await member.getThread(threadId, MEMBER)).entries.map((entry) => entry.type === "email" && entry.contentPending)).toEqual([false, true]);
+    await fixture.a.run((tx) => tx.query(
       "UPDATE inbound_emails SET status='dropped', drop_reason='loop', settled_at=$3 WHERE tenant_id=$1 AND id=$2",
       [fixture.a.tenantId, secondId, new Date(now)]));
-    expect((await member.getThread(threadId)).entries.map(entryId)).toEqual([firstId]);
-    await fixture.service((tx) => tx.query(
+    expect((await member.getThread(threadId, MEMBER)).entries.map(entryId)).toEqual([firstId]);
+    await fixture.a.run((tx) => tx.query(
       "UPDATE inbound_emails SET review='rejected' WHERE tenant_id=$1 AND id=$2", [fixture.a.tenantId, firstId]));
-    await expect(member.getThread(threadId)).rejects.toBeInstanceOf(NotFound);
-    expect((await member.listThreads({ limit: 100 })).items.some((thread) => thread.id === threadId)).toBe(false);
+    await expect(member.getThread(threadId, MEMBER)).rejects.toBeInstanceOf(NotFound);
+    expect((await member.listThreads({ limit: 100 }, MEMBER)).items.some((thread) => thread.id === threadId)).toBe(false);
+  });
+
+  it("spam and duplicate rows never show in a sender thread", async () => {
+    const member = createSession(deps(), { tenantId: fixture.a.tenantId, actorId: ownerA });
+    const address = `dupes-${randomUUID().slice(0, 8)}@example.org`;
+    const ids: string[] = [];
+    for (const subject of ["Kept", "Spam", "Copy"]) {
+      now += 1_000;
+      const message = event({ to: [`${handleA}@${DOMAIN}`], from: address, subject });
+      await session().receive(message);
+      ids.push((await rows(fixture.a.tenantId, message.data.email_id))[0]!.id);
+    }
+    const [kept, spam, copy] = ids as [string, string, string];
+    const settle = (id: string, extra: string, params: unknown[] = []) => fixture.a.run((tx) => tx.query(
+      `UPDATE inbound_emails SET status='ready', settled_at=$3, body_state='full', review='unmatched', ${extra}
+        WHERE tenant_id=$1 AND id=$2`, [fixture.a.tenantId, id, new Date(now), ...params]));
+    await settle(spam, "kind='spam'");
+    await settle(copy, "kind='message', duplicate_of=$4", [kept]);
+    const thread = `e_${inboundSenderKey(fixture.a.tenantId, address)}`;
+    expect((await member.getThread(thread, MEMBER)).entries.map(entryId)).toEqual([kept]);
+    const summary = (await member.listThreads({ limit: 100 }, MEMBER)).items.find((item) => item.id === thread);
+    expect(summary?.preview).toBe("Kept");
   });
 
   it("MCP and token reads see no sender thread and no email entry", async () => {
@@ -359,6 +444,11 @@ describe("sender threads (IE-24, test 14)", () => {
       expect((await listThreads(tx, fixture.a.tenantId, { limit: 100, offset: 0 })).items.every((thread) => thread.kind !== "sender")).toBe(true);
       await expect(getThread(tx, fixture.a.tenantId, hidden)).rejects.toBeInstanceOf(NotFound);
     });
+    // A member session without the option, as the stdio MCP server builds it, sees none either.
+    const plain = createSession(deps(), { tenantId: fixture.a.tenantId, actorId: ownerA });
+    expect((await plain.listThreads({ limit: 100 })).items.every((thread) => thread.kind !== "sender")).toBe(true);
+    await expect(plain.getThread(hidden)).rejects.toBeInstanceOf(NotFound);
+    expect((await plain.listThreads({ limit: 100 }, MEMBER)).items.some((thread) => thread.id === hidden)).toBe(true);
     // An automation token with inbox:read.
     const tokenId = randomUUID();
     await fixture.service((tx) => tx.query(

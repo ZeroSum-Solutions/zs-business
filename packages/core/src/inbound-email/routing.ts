@@ -14,7 +14,9 @@ import { z } from "zod";
 /** Only this event is read (IE-8); every other signed event is acknowledged and ignored. */
 export const INBOUND_EMAIL_EVENT_TYPE = "email.received";
 
-const recipientsSchema = z.array(z.string().max(1000)).max(1000).nullish().transform((list) => list ?? []);
+// No per-entry length: the 256 KiB body bounds them, and an odd entry past the 50 read, or in
+// received_for (counted only), must not make the whole event unreadable.
+const recipientsSchema = z.array(z.string()).max(1000).nullish().transform((list) => list ?? []);
 
 /**
  * The fields of Resend's `email.received` this slice reads. Other fields (attachments, message ID,
@@ -25,12 +27,15 @@ export const inboundEmailEventSchema = z.object({
   type: z.literal(INBOUND_EMAIL_EVENT_TYPE),
   data: z.object({
     email_id: providerEmailIdSchema,
-    from: z.string().min(1).max(2000),
-    to: recipientsSchema,
+    // Required but otherwise free: the session reads it after routing (IE-4, IE-8).
+    from: z.string(),
+    // Resend always sends `to` (it may be empty); an event without it is unreadable, not unrouted (IE-8).
+    to: z.array(z.string()).max(1000),
     cc: recipientsSchema,
     bcc: recipientsSchema,
     received_for: recipientsSchema,
-    subject: z.string().max(100_000).nullish(),
+    // Any length: IE-12 cuts it to 200, and the body limit bounds it.
+    subject: z.string().nullish(),
   }),
 });
 export type InboundEmailEvent = z.infer<typeof inboundEmailEventSchema>;
@@ -76,7 +81,11 @@ export function routeRecipients(event: InboundEmailEvent, domain: string): Recip
     if (!local) continue;
     recipients.push({ handle: local[1]!, replyRef: local[2] ?? null });
   }
-  const receivedForUnrouted = event.data.received_for.filter((entry) => splitAddress(entry)?.domain === hub).length;
+  // An address that also arrived in to, cc or bcc was not dropped: count only the ones routing never saw.
+  const seen = new Set(read.map((entry) => addressOf(entry).toLowerCase()));
+  const receivedForUnrouted = new Set(event.data.received_for
+    .map((entry) => addressOf(entry).toLowerCase())
+    .filter((address) => splitAddress(address)?.domain === hub && !seen.has(address))).size;
   return { recipients, receivedForUnrouted };
 }
 
@@ -107,23 +116,26 @@ function cut(text: string, limit: number): string {
   return out;
 }
 
-// Control characters and NUL (Postgres text refuses NUL); line breaks become spaces first.
-const CONTROL = /[\x00-\x1f\x7f]/g;
+// C0 and C1 control characters and NUL (Postgres text refuses NUL, and [[:cntrl:]] in the from_address check
+// matches C1 too); line breaks become spaces first. Bidirectional overrides and isolates go as well, so a
+// subject or sender cannot reorder what the inbox shows.
+const CONTROL = /[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g;
 
 /**
  * IE-9, IE-19: the sender address, normalised as contacts are when it parses; otherwise trimmed,
  * lower-cased, without control characters, cut to 320. Null when nothing is left.
  */
 export function senderAddress(from: string): string | null {
-  const address = addressOf(from);
+  const address = addressOf(from).replace(CONTROL, "");
   const parsed = contactEmailInputSchema.safeParse(address);
   if (parsed.success) return parsed.data;
-  const fallback = cut(address.replace(CONTROL, "").trim().toLowerCase(), INBOUND_FROM_LIMIT);
+  const fallback = cut(address.trim().toLowerCase(), INBOUND_FROM_LIMIT);
   return fallback.length > 0 ? fallback : null;
 }
 
-/** IE-12: one line of at most 200 characters; null when the message had none. */
+/** IE-12: one line of at most 200 characters; null when the message had none, or nothing is left. */
 export function inboundSubject(subject: string | null | undefined): string | null {
   if (subject === null || subject === undefined) return null;
-  return cut(subject.replace(/[\r\n]+/g, " ").replace(CONTROL, ""), INBOUND_SUBJECT_LIMIT);
+  const line = cut(subject.replace(/[\r\n\u2028\u2029]+/g, " ").replace(CONTROL, ""), INBOUND_SUBJECT_LIMIT);
+  return line.length > 0 ? line : null;
 }

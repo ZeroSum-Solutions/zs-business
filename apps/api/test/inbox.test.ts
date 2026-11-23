@@ -8,6 +8,7 @@ import {
   threadPageSchema,
   type ThreadSummary,
 } from "@zs/contracts";
+import { inboundSenderKey } from "@zs/core";
 import {
   call,
   createApiHarness,
@@ -180,6 +181,34 @@ describe("threads from website requests (I-1..I-3, I-8)", () => {
       expect(response.status).toBe(404);
       expect(errorOf(response)).toEqual({ code: "NotFound", message: "Not found", details: {} });
     }
+  });
+});
+
+describe("sender threads over HTTP (inbound-email.md IE-24)", () => {
+  it("shows a member the sender thread of a received email, metadata only, and another tenant nothing", async () => {
+    const from = `sam.${randomUUID().slice(0, 8)}@example.org`;
+    const id = randomUUID();
+    const at = tick();
+    const address = await h.fixture.service(async (tx) => (await tx.query<{ id: string }>(
+      "SELECT id FROM inbound_email_addresses WHERE tenant_id=$1 AND status='active'", [h.a.tenantId])).rows[0]!.id);
+    // Written as the receive action writes it: the runtime role in tenant A's scope.
+    await h.database.db.tenant(h.a.tenantId, (tx) => tx.query(
+      `INSERT INTO inbound_emails (tenant_id,id,address_id,provider,provider_email_id,from_address,subject,received_at,sender_key,created_at)
+       VALUES ($1,$2,$3,'resend',$4,$5,'Ring sizing',$6,$7,$6)`,
+      [h.a.tenantId, id, address, `em_${id}`, from, at, inboundSenderKey(h.a.tenantId, from)]));
+    const threadId = `e_${inboundSenderKey(h.a.tenantId, from)}`;
+    expect((await allThreads()).find((thread) => thread.id === threadId)).toMatchObject({
+      kind: "sender", contactId: null, name: from, email: from, preview: "Ring sizing", needsReview: true, lastActivityAt: at,
+    });
+    const thread = await get(`/v1/inbox/threads/${threadId}`);
+    expect(thread.status).toBe(200);
+    expect(threadDetailSchema.parse(thread.body).entries).toEqual([
+      { type: "email", id, at, fromAddress: from, fromName: null, subject: "Ring sizing", contentPending: true },
+    ]);
+    expect((await get(`/v1/inbox/threads/${threadId}`, h.b.token)).status).toBe(404);
+    expect((await allThreads(h.b.token)).some((item) => item.id === threadId)).toBe(false);
+    expect((await get(`/v1/inbox/threads/e_${randomUUID()}`)).status).toBe(404);
+    expect((await get(`/v1/inbox/threads/e_${randomUUID()}x`)).status).toBe(400);
   });
 });
 

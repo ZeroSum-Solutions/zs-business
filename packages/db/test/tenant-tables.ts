@@ -26,7 +26,12 @@ export async function catalogTenantTables(tx: Transaction): Promise<TenantTable[
  * Defaults and FK rows take precedence over synthetic scalar values. Unsupported constraints
  * surface as fixture errors, so migrations must keep test data constructible.
  */
-export async function seedTenantTables(tx: Transaction, tenantId: string, tables: TenantTable[]): Promise<void> {
+/** Tables the service role may not insert into: their rows are returned, and the caller inserts them as the runtime role. */
+export const RUNTIME_INSERTED = new Set(["inbound_emails"]);
+export interface DeferredRow { readonly sql: string; readonly params: unknown[] }
+
+export async function seedTenantTables(tx: Transaction, tenantId: string, tables: TenantTable[]): Promise<DeferredRow[]> {
+  const deferred: DeferredRow[] = [];
   const pending = new Map(tables.map((table) => [table.name, table]));
   // A template and its first revision point at each other (deferred key, check on the digest): written together.
   if (pending.has("message_templates") && pending.has("message_template_revisions")) {
@@ -145,10 +150,13 @@ export async function seedTenantTables(tx: Transaction, tenantId: string, tables
       }
       if (!ready) continue;
       const columns = Object.keys(row).map(quote);
-      await tx.query(`insert into ${table}(${columns.join(",")}) select ${columns.join(",")} from jsonb_populate_record(NULL::${table},$1::jsonb)`, [JSON.stringify(row)]);
+      const insert = { sql: `insert into ${table}(${columns.join(",")}) select ${columns.join(",")} from jsonb_populate_record(NULL::${table},$1::jsonb)`, params: [JSON.stringify(row)] };
+      if (RUNTIME_INSERTED.has(name)) deferred.push(insert);
+      else await tx.query(insert.sql, insert.params);
       pending.delete(name);
       progress = true;
     }
     if (!progress) throw new Error(`Cannot resolve fixture dependencies: ${[...pending.keys()].join(", ")}`);
   }
+  return deferred;
 }

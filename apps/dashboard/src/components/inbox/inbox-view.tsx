@@ -106,7 +106,7 @@ function ThreadRows({ selectedId }: { selectedId: string | null }) {
   if (threads.isError && !threads.isFetchNextPageError) return <div className="card p-4"><ErrorNote error={threads.error} retry={() => threads.refetch()} /></div>;
   const items = threads.data.pages.flatMap((page) => page.items);
   if (items.length === 0) {
-    return <EmptyState title="No conversations yet">Website requests and your replies show here, one thread per customer.</EmptyState>;
+    return <EmptyState title="No conversations yet">Website requests, emails and your replies show here, one thread per customer or sender.</EmptyState>;
   }
   return (
     <div>
@@ -583,7 +583,7 @@ function ThreadPane({ id }: { id: string }) {
   );
 }
 
-const DESCRIPTION = "Website requests and your replies, one thread per customer.";
+const DESCRIPTION = "Website requests, emails and your replies, one thread per customer or sender.";
 
 export function InboxView({ selectedId }: { selectedId: string | null }) {
   const threads = useThreads();

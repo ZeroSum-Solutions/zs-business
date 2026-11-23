@@ -129,6 +129,8 @@ describe("signature and body checks (test 4, IE-8)", () => {
     const response = await deliver(event);
     expect(response.status).toBe(413);
     expect(response.body).toMatchObject({ error: { code: "ValidationFailed" } });
+    // A declared length smaller than the body does not get it past: the bytes read are counted.
+    expect((await deliver(event, { headers: { "Content-Length": "100" } })).status).toBe(413);
     expect(await snapshot()).toEqual(before);
   });
 
@@ -149,6 +151,10 @@ describe("signature and body checks (test 4, IE-8)", () => {
       { type: "email.received", data: { email_id: newEmailId(), to: [`${handle}@${INBOUND_EMAIL_DOMAIN}`] } },
       { type: "email.received", data: { email_id: newEmailId(), from: SENDER, to: "not a list" } },
       { type: "email.received" },
+      // No `to` at all: unreadable, never acknowledged as unrouted.
+      { type: "email.received", data: { email_id: newEmailId(), from: SENDER } },
+      // An email_id so long that `email-inbound:<id>` would pass the 200-character key limit.
+      received({ email_id: "x".repeat(187), to: [`${handle}@${INBOUND_EMAIL_DOMAIN}`] }),
       // A from that holds no characters once cleaned: the session reads it as malformed.
       received({ from: "\u0000\u0007 ", to: [`${handle}@${INBOUND_EMAIL_DOMAIN}`] }),
     ];
@@ -159,6 +165,15 @@ describe("signature and body checks (test 4, IE-8)", () => {
       expect(response.body).toMatchObject({ error: { code: "ValidationFailed", message: "Unreadable email.received event" } });
       expect(reports.at(-1)).toMatchObject({ id, outcome: { handled: false, reason: "malformed_event" } });
     }
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it("acknowledges unrouted mail with 200 even when its sender cannot be read (IE-4)", async () => {
+    const before = await snapshot();
+    const id = newId();
+    const response = await deliver(received({ from: "\u0000", to: ["someone@elsewhere.test"] }), { id });
+    expect(response.status).toBe(200);
+    expect(reports.at(-1)).toMatchObject({ id, outcome: { handled: false, reason: "unrouted" } });
     expect(await snapshot()).toEqual(before);
   });
 
@@ -191,6 +206,27 @@ describe("routing (tests 3 and 10, IE-3, IE-4)", () => {
     const stored = await h.fixture.service(async (tx) => (await tx.query<{ body_text: string | null }>(
       "SELECT body_text FROM inbound_emails WHERE tenant_id=$1 AND provider_email_id=$2", [h.b.tenantId, event.data.email_id])).rows[0]!);
     expect(stored.body_text).toBeNull();
+  });
+
+  it("stores a sender and subject with C1 controls and bidi overrides cleaned, and the longest email_id the key allows", async () => {
+    const handle = await handleOf(h.b);
+    const event = received({
+      email_id: "y".repeat(186), to: [`${handle}@${INBOUND_EMAIL_DOMAIN}`],
+      from: "odd\u0085\u009bname\u202e", subject: "Pay \u202etxt.exe\u2069",
+    });
+    expect(await deliver(event)).toEqual({ status: 200, body: { handled: true } });
+    expect((await rows(h.b.tenantId)).find((row) => row.provider_email_id === event.data.email_id))
+      .toMatchObject({ from_address: "oddname", subject: "Pay txt.exe" });
+  });
+
+  it("reads an event with a subject past 100,000 characters and an odd entry past the 50 read", async () => {
+    const handle = await handleOf(h.b);
+    const event = received({
+      to: [`${handle}@${INBOUND_EMAIL_DOMAIN}`, ...Array.from({ length: 50 }, (_, i) => `x${i}@elsewhere.test`), "y".repeat(5000)],
+      received_for: ["z".repeat(5000)], subject: "s".repeat(120_000),
+    });
+    expect(await deliver(event)).toEqual({ status: 200, body: { handled: true } });
+    expect((await rows(h.b.tenantId)).find((row) => row.provider_email_id === event.data.email_id)?.subject).toBe("s".repeat(200));
   });
 
   it("answers 200 for unrouted mail, writes nothing and reports no address or subject (test 3)", async () => {
@@ -258,6 +294,21 @@ describe("retries (test 5, IE-8)", () => {
     expect(response.status).toBe(503);
     expect(response.body).toMatchObject({ error: { code: "Unavailable" } });
     expect(reports.at(-1)).toMatchObject({ id, outcome: { handled: false, reason: "unavailable" } });
+  });
+});
+
+describe("a fault that is not the database", () => {
+  it("reaches the app's error handler (500), not a 503 retry loop, and is reported as failed", async () => {
+    const broken = appOnDatabase({
+      tenant: () => Promise.reject(new Error("bug")),
+      withoutTenant: () => Promise.reject(new Error("bug")),
+    } satisfies ScopedDatabase, {
+      resendInboundWebhook: { secrets: { current: RESEND_INBOUND_WEBHOOK_SECRET }, domain: INBOUND_EMAIL_DOMAIN, report },
+    });
+    const id = newId();
+    const response = await deliver(received({ to: [`${await handleOf(h.a)}@${INBOUND_EMAIL_DOMAIN}`] }), { id }, broken);
+    expect(response.status).toBe(500);
+    expect(reports.at(-1)).toMatchObject({ id, outcome: { handled: false, reason: "failed" } });
   });
 });
 

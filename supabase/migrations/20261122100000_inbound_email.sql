@@ -51,7 +51,8 @@ CREATE UNIQUE INDEX inbound_email_addresses_one_active ON public.inbound_email_a
 -- IE-12: at most the last 20 Message-IDs of at most 255 characters, one line each.
 CREATE FUNCTION public.inbound_emails_references_valid(refs text[]) RETURNS boolean
 LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, pg_temp AS $$
-  SELECT cardinality(refs) <= 20 AND array_ndims(refs) IS NOT DISTINCT FROM 1 AND NOT EXISTS (
+  -- An empty array has no dimensions (array_ndims is null), so it is accepted on its own.
+  SELECT cardinality(refs) <= 20 AND (cardinality(refs) = 0 OR array_ndims(refs) = 1) AND NOT EXISTS (
     SELECT 1 FROM unnest(refs) AS r(v) WHERE v IS NULL OR char_length(v) NOT BETWEEN 1 AND 255 OR v ~ '[\r\n]')
 $$;
 
@@ -70,8 +71,8 @@ CREATE TABLE public.inbound_emails (
   kind text NOT NULL DEFAULT 'unclassified' CONSTRAINT inbound_emails_kind CHECK (kind IN ('message', 'automated', 'spam', 'unclassified')),
   from_address text NOT NULL CONSTRAINT inbound_emails_from_address CHECK (
     char_length(from_address) BETWEEN 1 AND 320 AND from_address !~ '[[:cntrl:]]'),
-  from_name text CONSTRAINT inbound_emails_from_name CHECK (char_length(from_name) <= 200 AND from_name !~ '[\r\n]'),
-  subject text CONSTRAINT inbound_emails_subject CHECK (char_length(subject) <= 200 AND subject !~ '[\r\n]'),
+  from_name text CONSTRAINT inbound_emails_from_name CHECK (char_length(from_name) BETWEEN 1 AND 200 AND from_name !~ '[[:cntrl:]]'),
+  subject text CONSTRAINT inbound_emails_subject CHECK (char_length(subject) BETWEEN 1 AND 200 AND subject !~ '[[:cntrl:]]'),
   received_at timestamptz NOT NULL,
   rfc_message_id text CONSTRAINT inbound_emails_rfc_message_id CHECK (
     char_length(rfc_message_id) BETWEEN 1 AND 255 AND rfc_message_id !~ '[\r\n]'),
@@ -87,7 +88,7 @@ CREATE TABLE public.inbound_emails (
   contact_id uuid,
   match text CONSTRAINT inbound_emails_match CHECK (match IN ('header', 'reply_ref', 'address', 'linked', 'none')),
   review text CONSTRAINT inbound_emails_review CHECK (review IN ('matched', 'possible_match', 'unmatched', 'linked', 'rejected')),
-  candidate_contact_ids uuid[] CONSTRAINT inbound_emails_candidates CHECK (cardinality(candidate_contact_ids) <= 20),
+  candidate_contact_ids uuid[] CONSTRAINT inbound_emails_candidates CHECK (cardinality(candidate_contact_ids) <= 10),
   -- IE-21: derivedId(tenantId, "inbound-sender", normalised From); the sender thread is e_<sender_key>.
   sender_key uuid NOT NULL,
   duplicate_of uuid,
@@ -113,7 +114,11 @@ CREATE TABLE public.inbound_emails (
   CONSTRAINT inbound_emails_contact_review CHECK ((contact_id IS NOT NULL) = coalesce(review IN ('matched', 'linked'), false)),
   CONSTRAINT inbound_emails_erased CHECK ((erased_at IS NOT NULL) = (body_state = 'erased')),
   CONSTRAINT inbound_emails_settled CHECK ((status = 'received') = (settled_at IS NULL)),
-  CONSTRAINT inbound_emails_lease_pair CHECK ((lease_token IS NULL) = (lease_expires_at IS NULL))
+  CONSTRAINT inbound_emails_lease_pair CHECK ((lease_token IS NULL) = (lease_expires_at IS NULL)),
+  -- IE-25: a link always names who linked it and when; nothing else carries that audit.
+  CONSTRAINT inbound_emails_link_audit CHECK (
+    coalesce(review = 'linked', false) = (linked_by IS NOT NULL) AND (linked_by IS NULL) = (linked_at IS NULL)),
+  CONSTRAINT inbound_emails_duplicate_self CHECK (duplicate_of <> id)
 );
 CREATE INDEX inbound_emails_contact ON public.inbound_emails (tenant_id, contact_id, received_at);
 CREATE INDEX inbound_emails_sender ON public.inbound_emails (tenant_id, sender_key, received_at);
@@ -136,6 +141,11 @@ DECLARE
   lease_changed boolean;
   erasure boolean;
 BEGIN
+  -- A TRUNCATE skips the row triggers, so it is refused for every role, the table owner included.
+  IF TG_OP = 'TRUNCATE' THEN
+    RAISE EXCEPTION 'Inbound email is never truncated' USING ERRCODE = 'insufficient_privilege',
+      SCHEMA = 'public', TABLE = 'inbound_emails';
+  END IF;
   IF TG_OP = 'DELETE' THEN
     IF current_user <> 'service_role' THEN
       RAISE EXCEPTION 'Only the service role deletes inbound email' USING ERRCODE = 'insufficient_privilege',
@@ -189,8 +199,17 @@ BEGIN
       USING ERRCODE = 'check_violation', SCHEMA = 'public', TABLE = 'inbound_emails', CONSTRAINT = 'inbound_emails_guard';
   END IF;
   -- Link columns: at the settle, by link (possible_match or unmatched to linked), by reject (to rejected).
+  -- A link names the contact, who linked it and when; a reject leaves the contact and link audit untouched.
+  -- The settle writes a match outcome only; linked and rejected come from a member's link or reject.
+  IF settling AND NEW.review IN ('linked', 'rejected') THEN
+    RAISE EXCEPTION 'An inbound email is linked or rejected only after it settles'
+      USING ERRCODE = 'check_violation', SCHEMA = 'public', TABLE = 'inbound_emails', CONSTRAINT = 'inbound_emails_guard';
+  END IF;
   IF link_changed AND NOT settling AND NOT coalesce(
-       OLD.review IN ('possible_match', 'unmatched') AND NEW.review IN ('linked', 'rejected'), false) THEN
+       OLD.status = 'ready' AND OLD.review IN ('possible_match', 'unmatched') AND (
+         (NEW.review = 'linked' AND NEW.contact_id IS NOT NULL AND NEW.linked_by IS NOT NULL AND NEW.linked_at IS NOT NULL)
+         OR (NEW.review = 'rejected' AND (NEW.contact_id, NEW.linked_by, NEW.linked_at)
+               IS NOT DISTINCT FROM (OLD.contact_id, OLD.linked_by, OLD.linked_at))), false) THEN
     RAISE EXCEPTION 'The link of an inbound email changes only at settle, link or reject'
       USING ERRCODE = 'check_violation', SCHEMA = 'public', TABLE = 'inbound_emails', CONSTRAINT = 'inbound_emails_guard';
   END IF;
@@ -199,15 +218,30 @@ END $$;
 CREATE TRIGGER inbound_emails_guard
   BEFORE UPDATE OR DELETE ON public.inbound_emails
   FOR EACH ROW EXECUTE FUNCTION public.inbound_emails_guard();
+CREATE TRIGGER inbound_emails_no_truncate
+  BEFORE TRUNCATE ON public.inbound_emails
+  FOR EACH STATEMENT EXECUTE FUNCTION public.inbound_emails_guard();
 
 -- IE-3: the only way the runtime role learns a tenant from a handle. Definer (zs_dispatcher), pinned path; it
 -- returns the tenant and the address of an active or retiring address, and nothing for a disabled or unknown one.
+-- EXECUTE goes to authenticated, which Supabase-issued JWTs also hold, so it refuses every caller but the API
+-- runtime login (the rate_limit_take check, 20261020400000): a plain login whose only membership is authenticated,
+-- with no request.jwt claims set. A Data API user cannot map a handle to a tenant.
 CREATE FUNCTION public.inbound_email_route(p_handle text)
 RETURNS TABLE (tenant_id uuid, address_id uuid)
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-  SELECT a.tenant_id, a.id FROM public.inbound_email_addresses a
-   WHERE a.handle = p_handle AND a.status IN ('active', 'retiring')
-$$;
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE r.rolname = session_user
+      AND r.rolcanlogin AND NOT (r.rolsuper OR r.rolbypassrls OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication)
+      AND EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.member = r.oid AND m.roleid = 'authenticated'::regrole)
+      AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.member = r.oid AND m.roleid <> 'authenticated'::regrole))
+    OR coalesce(current_setting('request.jwt.claims', true), '') <> ''
+    OR coalesce(current_setting('request.jwt.claim.sub', true), '') <> '' THEN
+    RAISE EXCEPTION 'inbound_email_route is for the API runtime login only' USING ERRCODE = '42501';
+  END IF;
+  RETURN QUERY SELECT a.tenant_id, a.id FROM public.inbound_email_addresses a
+   WHERE a.handle = p_handle AND a.status IN ('active', 'retiring');
+END $$;
 
 ALTER TABLE public.inbound_email_addresses ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.inbound_email_addresses FORCE ROW LEVEL SECURITY;
@@ -229,9 +263,14 @@ DO $$ BEGIN
   END IF;
 END $$;
 
--- IE-31. Service role: writes addresses (provisioning, rotation, disabling), leases, erases and deletes.
+-- IE-31. Service role: writes addresses (provisioning, rotation, disabling), leases, erases and deletes. It never
+-- receives, settles or links an email: those run through the action path as the runtime role (IE-9), so it gets
+-- no INSERT and updates only the lease columns and the columns the one erasure clears (the guard checks the move).
 GRANT SELECT, INSERT, UPDATE ON public.inbound_email_addresses TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.inbound_emails TO service_role;
+GRANT SELECT, DELETE ON public.inbound_emails TO service_role;
+GRANT UPDATE (lease_token, lease_expires_at, attempts, next_attempt_at,
+  body_text, from_name, subject, attachments, in_reply_to, "references", body_state, erased_at)
+  ON public.inbound_emails TO service_role;
 GRANT SELECT (tenant_id, id, handle, status) ON public.inbound_email_addresses TO zs_dispatcher;
 -- Runtime role: reads its tenant's addresses, and its emails without the lease columns.
 GRANT SELECT ON public.inbound_email_addresses TO authenticated;
@@ -293,7 +332,7 @@ END $$;
 -- The tenant-insert trigger runs as the role inserting the tenant (the service role); a CHECK runs as the writer.
 GRANT EXECUTE ON FUNCTION public.inbound_email_new_handle() TO service_role;
 GRANT EXECUTE ON FUNCTION public.inbound_emails_references_valid(text[]) TO authenticated, service_role;
-GRANT EXECUTE ON FUNCTION public.inbound_email_route(text) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.inbound_email_route(text) TO authenticated;
 GRANT CREATE ON SCHEMA public TO zs_function_owner;
 ALTER FUNCTION public.inbound_email_new_handle() OWNER TO zs_function_owner;
 ALTER FUNCTION public.inbound_emails_references_valid(text[]) OWNER TO zs_function_owner;

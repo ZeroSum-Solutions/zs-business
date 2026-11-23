@@ -1,6 +1,6 @@
 # M3c: Inbox v1 and Home
 
-Status: contract for M3c (2026-10-20), revision 4. Code follows this file; a change to a
+Status: contract for M3c (2026-10-20), revision 5. Code follows this file; a change to a
 numbered rule needs a new revision of this file first. Revision 2 sends replies through M3b's
 approval records (`approvals.md`): I-5..I-8, H-6 and H-8 changed, and `inbox.approve` gave way
 to M3b's `approve`. Revision 3 (hub review): I-4 keeps each step's record through later steps,

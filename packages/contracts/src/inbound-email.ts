@@ -29,8 +29,11 @@ export const INBOUND_EMAIL_RECEIVE_ACTION = "inbound.email.receive";
 export const INBOUND_EMAIL_RECEIVED_EVENT = "inbound.email.received";
 export const INBOUND_EMAIL_IDEMPOTENCY_PREFIX = "email-inbound:";
 
-/** Resend's ID for a received message: printable, no control characters. */
-export const providerEmailIdSchema = z.string().min(1).max(200).regex(/^[\x21-\x7e]+$/, "Expected a provider email ID");
+/**
+ * Resend's ID for a received message: printable, no control characters, and short enough that the
+ * idempotency key `email-inbound:<email_id>` fits the 200-character key limit.
+ */
+export const providerEmailIdSchema = z.string().min(1).max(200 - INBOUND_EMAIL_IDEMPOTENCY_PREFIX.length).regex(/^[\x21-\x7e]+$/, "Expected a provider email ID");
 export const inboundReplyRefSchema = z.string().regex(INBOUND_HANDLE_PATTERN, "Expected a reply reference");
 
 /** The payload holds IDs, the address, the reference and the subject; never a body (IE-9, IE-35). */
@@ -42,7 +45,7 @@ export const inboundEmailReceiveInputSchema = z.strictObject({
   replyRef: inboundReplyRefSchema.nullable(),
   /** Normalised as contacts are when it parses (IE-19); otherwise trimmed and lower-cased. */
   fromAddress: z.string().min(1).max(INBOUND_FROM_LIMIT).refine(isPostgresText, "Invalid Postgres text")
-    .regex(/^[^\x00-\x1f\x7f]+$/, "A sender address has no control characters"),
+    .regex(/^[^\x00-\x1f\x7f-\x9f]+$/, "A sender address has no control characters"),
   /** One line, cut per IE-12; null when the message had none. */
   subject: z.string().max(INBOUND_SUBJECT_LIMIT).refine(isPostgresText, "Invalid Postgres text")
     .regex(/^[^\r\n]*$/, "A subject is one line").nullable(),
