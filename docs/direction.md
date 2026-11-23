@@ -4,8 +4,12 @@ Status: proposed direction, written against `main` at `725cc86`. It judges the e
 in this repo; it does not take them as fixed. Order comes from evidence gates. This file holds no
 time estimates. A numbered rule still lives in `docs/requirements/`; this file says which of those
 contracts matter now and in what order. The ordered ticket list is `docs/backlog-priority.json`
-(ids B01 to B25). It covers stages 0 and 1 and one close-out; tickets for stage 2 and later are
+(ids B01 to B26). It covers stages 0 and 1 and one close-out; tickets for stage 2 and later are
 written when the stage before them nears its gate.
+
+The end goal and the verdict on every idea from the 2026-11-22 product recording (one phone
+interface, hundreds of agents, one password) are in `docs/vision.md`. Read it first. Where it
+names an open decision (D-1 to D-5), this file stays as written until Devin decides.
 
 ## 1. North star
 
@@ -173,7 +177,7 @@ Everything else depends on these. Each has a check and its tickets.
 A stage that misses its gate is repeated or changed, not skipped. Each gate result is recorded
 in `docs/gates/stage-<n>.md` with its proof.
 
-**Stage 0: Base (B01 to B16).** Stable CI. Address-bound approvals, the queue and the action
+**Stage 0: Base (B01 to B16, B26).** Stable CI. Address-bound approvals, the queue and the action
 log. Company facts and a general setup. Allowances, then public sign-up on preview. The model
 lane on preview under one company budget. Seats and durable tasks. Export and deletion.
 Release checks. Promotion to production last.
@@ -213,9 +217,14 @@ contacts. Voice receptionist on a hosted path. More templates.
 
 ## 7. In-flight work
 
-| Ticket | Verdict |
+State on 2026-11-22 (ZSB-68). The earlier rows of this table are closed.
+
+| Ticket | State |
 |---|---|
-| ZSB-21 (deadline test flakiness, `plane-link` workflow) | Keep, first. Two separate changes under one ticket: B01 and B02 |
-| ZSB-13 (document-intake uploads) | Finish and close (B25). It is a data-integrity fix in built code. Add no scope |
-| ZSB-17 (PDF retention sweep) | Stop. Document intake is parked and its sweep cron is off. Reopen when a catalog stage starts |
-| C-17 (Shopify measurement) | Record the scheduled measurement once, then close. `connections.md` says it gates nothing. It needs no backlog item |
+| B01, B02 (ZSB-21, ZSB-24) | Done |
+| B03, B05, B06, B08, B10, B19 (ZSB-41 to ZSB-46) | Done. Follow-ups are ZSB-53 to ZSB-66 |
+| B25 (ZSB-13) | Done |
+| ZSB-17 (PDF retention sweep) | Done: Devin shipped document intake to production with the sweep on. Intake stays parked for new scope (ZSB-47, ZSB-48 wait) |
+| ZSB-69 (B26) | Open, blocks the Stage 0 gate: Free and Solo have no model agents (`packages/contracts/src/plans.ts`), so a fresh sign-up cannot approve an agent-drafted reply until the entitlement is agreed |
+| ZSB-70 to ZSB-81 | Filed from `docs/vision.md`. ZSB-81 (decisions D-1 to D-5) comes first |
+| C-17 (Shopify measurement) | Record the scheduled measurement once, then close. It gates nothing |
