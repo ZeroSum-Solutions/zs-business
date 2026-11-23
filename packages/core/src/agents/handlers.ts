@@ -38,7 +38,7 @@ import {
 import type { Transaction } from "@zs/db";
 import type { ActionHandler } from "../actions/dispatch.js";
 import { idInUse, parseOrFail, tenantVisible } from "../crm/rows.js";
-import { SEND_REPLY_ACTION } from "../inbox/replies.js";
+import { replySendPayload, SEND_REPLY_ACTION } from "../inbox/replies.js";
 import { requireMember } from "../members/access.js";
 import { checkCandidate, loadInquiry } from "./candidates.js";
 import {
@@ -50,7 +50,7 @@ import {
   readGlobalKilled,
   type AgentControls,
 } from "./controls.js";
-import { costSpent } from "./cost.js";
+import { costSpent, effectiveCostCap } from "./cost.js";
 import { loadDecision, loadRun } from "./records.js";
 
 export const UPDATE_SETTINGS_ACTION = "agent.settings.update";
@@ -277,7 +277,8 @@ export const startRunHandler: ActionHandler = {
     let stop: FollowUpStopReason | null = gate(controls, await readGlobalKilled(tx, false), now);
     if (!stop && (await draftsToday(tx, tenantId, now)) >= controls.settings.maxDraftsPerDay) stop = "daily_cap";
     // G-15: a kind that has spent its day's cap starts no run that would call a model.
-    if (!stop && (await costSpent(tx, tenantId, "inquiry_followup", now)) >= controls.maxCostMicrosPerDay) stop = "cost_cap";
+    if (!stop && (await costSpent(tx, tenantId, "inquiry_followup", now)) >= await effectiveCostCap(tx, tenantId, "inquiry_followup", controls.maxCostMicrosPerDay, now))
+      stop = "cost_cap";
     await tx.query(
       `INSERT INTO agent_runs (tenant_id, id, requested_by, started_at, finished_at, status, stop_reason, max_decisions)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
@@ -361,7 +362,7 @@ export const costWarnHandler: ActionHandler = {
       agentKind: payload.agentKind,
       localDate: payload.localDate,
       spentMicros: await costSpent(tx, tenantId, payload.agentKind, now),
-      capMicros: controls.maxCostMicrosPerDay,
+      capMicros: await effectiveCostCap(tx, tenantId, payload.agentKind, controls.maxCostMicrosPerDay, now),
     };
     return { result, event: { type: "agent.cost_warning", payload: result } };
   },
@@ -457,7 +458,8 @@ export const draftHandler: ActionHandler = {
     await tx.query(
       `INSERT INTO approvals (tenant_id,id,action_type,target_type,target_id,payload,summary,requested_by,requested_at,expires_at)
        VALUES ($1,$2,$3,'inbox_reply',$4,$5,$6,$7,$8,$9)`,
-      [tenantId, payload.approvalId, SEND_REPLY_ACTION, payload.replyId, JSON.stringify({ replyId: payload.replyId }), summary,
+      // approvals.md A-16: the proposal binds the customer's address as it is now.
+      [tenantId, payload.approvalId, SEND_REPLY_ACTION, payload.replyId, JSON.stringify(await replySendPayload(tx, tenantId, payload.replyId)), summary,
         binding.actorId, now, new Date(now.getTime() + APPROVAL_DEFAULT_MINUTES * 60_000)],
     );
     await tx.query(

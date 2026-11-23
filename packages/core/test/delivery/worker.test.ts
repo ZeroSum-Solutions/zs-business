@@ -434,6 +434,26 @@ describe("hub review r1", () => {
     expect(await h.delivery(tenant, messageId)).toMatchObject({ status: "blocked", final_reason: "address_changed", outcome_unknown: false });
     expect(await h.wallet(tenant)).toEqual(before);
   });
+
+  it("an unknown send bound to an address that changed is asked about, never repeated, and ends destination_changed", async () => {
+    await h.credit(tenant, 50);
+    const before = await h.wallet(tenant);
+    const contactId = await h.contact(tenant);
+    const bound = (await h.rows<{ normalized_email: string }>("SELECT normalized_email FROM crm_contacts WHERE id=$1", [contactId]))[0]!.normalized_email;
+    const { messageId } = await h.enqueue(tenant, { contactId, destination: bound });
+    const worker = h.worker();
+    h.provider.queue("timeout");
+    await worker.runOnce();
+    expect(await h.delivery(tenant, messageId)).toMatchObject({ bound_address: bound, outcome_unknown: true });
+    await setEmail(contactId, `new-${randomUUID().slice(0, 8)}@haldenrowe.example`);
+    const calls = h.provider.calls.length;
+    h.clock.advance(5_000);
+    await worker.runOnce();
+    expect(h.provider.calls.length).toBe(calls);
+    expect(h.provider.lookups).toHaveLength(1);
+    expect(await h.delivery(tenant, messageId)).toMatchObject({ status: "blocked", final_reason: "destination_changed", outcome_unknown: false });
+    expect(await h.wallet(tenant)).toEqual(before);
+  });
 });
 
 describe("crash and dedupe (D-3, D-7, D-8)", () => {

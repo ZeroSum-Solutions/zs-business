@@ -18,6 +18,8 @@ describe("plan read", () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]?.pathname).toBe("/v1/billing/plan");
     expect(requests[0]?.searchParams.get("features")).toBe("1");
+    // PL-27: and `free=1` for `freeTier`, behind its own opt-in for the same reason.
+    expect(requests[0]?.searchParams.get("free")).toBe("1");
   });
 });
 

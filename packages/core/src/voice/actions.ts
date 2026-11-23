@@ -162,6 +162,8 @@ export const voiceOptinHandler: ActionHandler = {
     const event: MessageSendRequested = {
       messageId: payload.messageId, contactId, channel: "sms", purpose: "transactional", subject: null,
       body: textbackBody(setup.name, setup.booking_url),
+      // delivery.md D-6: no approval covers this text, so it binds no address (the caller's current number).
+      destination: null,
     };
     const requested: VoiceOptinResult = { callSid: payload.callSid, outcome: "requested", contactId, messageId: payload.messageId };
     return { result: { ...requested }, event: { type: MESSAGE_SEND_REQUESTED, payload: { ...event } } };

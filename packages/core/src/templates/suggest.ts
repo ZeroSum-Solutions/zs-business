@@ -26,11 +26,12 @@ import { isoDate, DAY_MS, offsetAt } from "../booking/time-zone.js";
 import { loadControls } from "../agents/controls.js";
 import { COST_WARN_ACTION } from "../agents/handlers.js";
 import {
-  atWarningLine, costSpent, priceFor, priceUsage, reserveModelCall, settleModelCall, worstCase, type ModelPrices,
+  atWarningLine, costSpent, effectiveCostCap, priceFor, priceUsage, reserveModelCall, settleModelCall, worstCase, type ModelPrices,
 } from "../agents/cost.js";
 import { abortable, type TextModel, type TextModelRequest } from "../agents/model.js";
 import { derivedId } from "../edge/ids.js";
 import { readCompanyFacts } from "../business/facts.js";
+import { lockTenantPlanShared } from "../billing/plan-gate.js";
 
 /** G-18: the lane a suggestion goes to. */
 export const TEMPLATE_SUGGESTION_LANE = "no_personal_data" as const;
@@ -104,7 +105,9 @@ export async function suggestTemplate(
   const reservation = await read(async (tx) => {
     // G-15: the cost lock is the kind's settings row, so the row must exist before the lock is taken:
     // with no row, two suggestions would both read the default cap unlocked. A missing row is the
-    // kind's defaults with the kind off (G-14), which is what this writes.
+    // kind's defaults with the kind off (G-14), which is what this writes. The plan lock comes first (PL-27, as in
+    // `reserveModelCall`), before the row write takes the row.
+    await lockTenantPlanShared(tx, tenantId);
     await tx.query(
       `INSERT INTO agent_settings (tenant_id, agent_kind, config, updated_at) VALUES ($1,$2,$3,$4)
        ON CONFLICT (tenant_id, agent_kind) DO NOTHING`,
@@ -113,7 +116,7 @@ export async function suggestTemplate(
     const reserved = await reserveModelCall(tx, tenantId, {
       callKeyBase: `agent:${kind}:suggestion:${key}`, runId: null, kind,
       subjectId, lane: TEMPLATE_SUGGESTION_LANE, model: deps.model.model,
-    }, worst, now());
+    }, worst, now);
     if (reserved.status !== "reserved") return reserved;
     // A key whose call already came back was answered once: a replay never pays for a second call.
     // Checked under the settings lock, so a replay racing the first call sees its settled row.
@@ -164,8 +167,9 @@ export async function suggestTemplate(
 
   const figures = await read(async (tx) => {
     const controls = await loadControls(tx, tenantId, false, kind);
-    const spent = await costSpent(tx, tenantId, kind, now());
-    return { spent, cap: controls.maxCostMicrosPerDay };
+    const at = now();
+    const spent = await costSpent(tx, tenantId, kind, at);
+    return { spent, cap: await effectiveCostCap(tx, tenantId, kind, controls.maxCostMicrosPerDay, at) };
   });
   return {
     agentKind: kind, channel, subject: checked.subject, body: checked.body, variables: [...checked.variables],

@@ -1,0 +1,197 @@
+// The owner's action log (docs/direction.md rule 6, backlog B05). Reads committed actions under
+// the runtime role and turns each into a redacted receipt: actor, type, target, approval, outcome
+// and time. The payload is never read and the result never leaves this file: only an allowlisted
+// outcome word, a record ID and an approval ID are taken from it (see SELECT).
+import {
+  ACTION_OUTCOME_PATTERN,
+  AGENT_KINDS,
+  BROWSER_RUN_STATUSES,
+  ENRICHMENT_STATUSES,
+  IMAGE_STATUSES,
+  OUTREACH_CAMPAIGN_STATUSES,
+  OUTREACH_PROSPECT_STATUSES,
+  QUEUE_ACTIONS,
+  actionLogEntrySchema,
+  approvalStatusSchema,
+  connectionStatusSchema,
+  deliveryStatusSchema,
+  documentIntakeStatusSchema,
+  followUpRunStatusSchema,
+  intakeStatusSchema,
+  replyStatusSchema,
+  topUpStatusSchema,
+  transcriptionStatusSchema,
+  webhookDeliveryStatusSchema,
+  type ActionActor,
+  type ActionLogEntry,
+  type ActionLogPage,
+  type ApprovalStatus,
+  type ListActionsQuery,
+  type MemberRole,
+  type SystemActor,
+} from "@zs/contracts";
+import type { Transaction } from "@zs/db";
+import { agentActorId } from "../agents/controls.js";
+import { standing } from "../approvals/records.js";
+import { derivedId } from "../edge/ids.js";
+import { outreachOperatorActorId } from "../edge/outreach-session.js";
+import { decodeCursor, encodeCursor, microsToTimestamp, timestampToMicros } from "../reads/cursor.js";
+import { page } from "../reads/page.js";
+
+/**
+ * The derived actor IDs of the tenant's workers and webhooks, by the name each one passes to
+ * derivedId (see the `*ActorId` helpers). Activepieces tokens derive one ID per token.
+ */
+const SYSTEM_ID_PARTS: ReadonlyArray<readonly [SystemActor, string]> = [
+  ["public_intake", "public-intake"],
+  ["unsubscribe", "public-unsubscribe"],
+  ["inbound_sms", "inbound-sms"],
+  ["sms_status", "sms-status"],
+  ["email_feedback", "email-feedback"],
+  ["voice", "twilio-voice"],
+  ["enrichment", "enrichment"],
+  ["outreach", "outreach"],
+  ["transcription", "transcription-worker"],
+  ["document_intake", "document-intake-worker"],
+  ["images", "image-worker"],
+];
+
+type ServiceActor = Exclude<ActionActor, { kind: "person" }>;
+
+/** Exported so the tests check every derived actor helper against this map, not a copy of it. */
+export async function serviceActors(tx: Transaction, tenantId: string): Promise<Map<string, ServiceActor>> {
+  const actors = new Map<string, ServiceActor>();
+  for (const agent of AGENT_KINDS) actors.set(agentActorId(tenantId, agent), { kind: "agent", agent });
+  for (const [name, part] of SYSTEM_ID_PARTS) actors.set(derivedId(tenantId, part, "actor"), { kind: "system", name });
+  actors.set(outreachOperatorActorId(tenantId), { kind: "system", name: "outreach" });
+  const tokens = (await tx.query<{ id: string }>("SELECT id FROM automation_tokens WHERE tenant_id=$1", [tenantId])).rows;
+  for (const token of tokens) actors.set(derivedId(tenantId, "activepieces", token.id, "actor"), { kind: "system", name: "automation" });
+  return actors;
+}
+
+interface ActionLogRow {
+  id: string;
+  actor_id: string;
+  action_type: string;
+  target_type: string;
+  target_id: string;
+  approval_id: string | null;
+  approval_status: ApprovalStatus | null;
+  approval_expires_at: Date | null;
+  result_outcome: string | null;
+  result_status: string | null;
+  result_notice: string | null;
+  result_changed: boolean | null;
+  member_id: string | null;
+  member_role: MemberRole | null;
+  created_at: Date;
+  sort_value: string;
+}
+
+/**
+ * The result words an owner may see as the outcome. Handlers name how an action ended in
+ * `outcome` (agents, voice, booking outcomes) or `status` (jobs, deliveries, records). Every word
+ * comes from a contract's fixed status set or this list, so a callback or provider can never put
+ * free text here.
+ */
+export const OUTCOMES: ReadonlySet<string> = new Set([
+  "queued", "sent", "delivered", "undelivered", "failed", "dead", "completed", "applied", "discarded",
+  "confirmed", "cancelled", "approved", "rejected", "revoked", "expired", "published", "connected",
+  "disconnected", "active", "invited", "granted", "denied", "skipped", "drafted", "requested", "no_show",
+  ...transcriptionStatusSchema.options, ...documentIntakeStatusSchema.options, ...deliveryStatusSchema.options,
+  ...replyStatusSchema.options, ...approvalStatusSchema.options, ...connectionStatusSchema.options,
+  ...followUpRunStatusSchema.options, ...intakeStatusSchema.options, ...webhookDeliveryStatusSchema.options,
+  ...topUpStatusSchema.options, ...BROWSER_RUN_STATUSES, ...ENRICHMENT_STATUSES, ...IMAGE_STATUSES,
+  ...OUTREACH_CAMPAIGN_STATUSES, ...OUTREACH_PROSPECT_STATUSES,
+].filter((word) => ACTION_OUTCOME_PATTERN.test(word)));
+
+const UUID_TEXT = "'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'";
+/** A top-level string field of the result, cut short; null when absent or not a string. */
+const resultText = (field: string) =>
+  `CASE WHEN jsonb_typeof(x.result->'${field}') = 'string' THEN left(x.result->>'${field}', 41) END`;
+/** A top-level UUID field of a JSON value, or null. */
+const resultId = (path: string) => `CASE WHEN jsonb_typeof(${path}) = 'string' AND (${path} #>> '{}') ~ ${UUID_TEXT} THEN (${path} #>> '{}') END`;
+const QUEUE_TYPES = Object.values(QUEUE_ACTIONS).map((type) => `'${type}'`).join(", ");
+
+/**
+ * Only these columns are read; `payload` is never read and `result` only field by field.
+ * - Approval: a row in `approvals`. Direct writes carry a derived approval_reference with no row, so
+ *   the join leaves them null. A templated send (A-15) records the standing approval it ran under on
+ *   its decision (`result.approvalId`), which is null when the send was skipped.
+ * - Target: when a write matched an existing record (a contact create-or-find on a known address, an
+ *   upload of bytes already stored), the requested ID was never written; the result's ID is the record.
+ * - Outcome: the result's `outcome`, `status`, `notice` or `customerNotice`, and `changed`/`applied`.
+ */
+const SELECT = `
+  SELECT x.id, x.actor_id, x.action_type, x.target->>'type' AS target_type,
+         COALESCE(
+           CASE x.target->>'type'
+             WHEN 'contact' THEN ${resultId("x.result->'contact'->'id'")}
+             WHEN 'media_asset' THEN ${resultId("x.result->'id'")}
+           END,
+           x.target->>'id') AS target_id,
+         ap.id AS approval_id, ap.status AS approval_status, ap.expires_at AS approval_expires_at,
+         ${resultText("outcome")} AS result_outcome, ${resultText("status")} AS result_status,
+         COALESCE(${resultText("notice")}, ${resultText("customerNotice")}) AS result_notice,
+         CASE WHEN jsonb_typeof(x.result->'changed') = 'boolean' THEN (x.result->>'changed')::boolean
+              WHEN jsonb_typeof(x.result->'applied') = 'boolean' THEN (x.result->>'applied')::boolean END AS result_changed,
+         m.id AS member_id, m.role::text AS member_role, x.created_at, ${timestampToMicros("x.created_at")} AS sort_value
+    FROM actions x
+    LEFT JOIN approvals ap ON ap.tenant_id = x.tenant_id AND ap.id = (
+      CASE WHEN x.action_type IN (${QUEUE_TYPES}) THEN ${resultId("x.result->'approvalId'")}
+           ELSE ${resultId("x.approval_reference->'id'")} END)::uuid
+    LEFT JOIN tenant_members m ON m.tenant_id = x.tenant_id AND m.user_id = x.actor_id`;
+
+/**
+ * How the action ended, in one allowlisted word: the handler's own `outcome`, else its `status`.
+ * A notice other than "queued" means the action committed but sent nothing (no customer, no
+ * email): "skipped". A write that found nothing to change: "no_change".
+ */
+function outcomeOf(row: Pick<ActionLogRow, "result_outcome" | "result_status" | "result_notice" | "result_changed">): string {
+  for (const word of [row.result_outcome, row.result_status]) if (word !== null && OUTCOMES.has(word)) return word;
+  if (row.result_notice === "queued") return "queued";
+  if (row.result_notice === "already_cancelled" || row.result_changed === false) return "no_change";
+  if (row.result_notice !== null) return "skipped";
+  return "done";
+}
+
+/** Exported for the redaction tests: one row as the owner sees it. */
+export function actionLogEntry(
+  row: Omit<ActionLogRow, "sort_value">, services: ReadonlyMap<string, ServiceActor>, now: Date,
+): ActionLogEntry {
+  const actor: ActionActor = services.get(row.actor_id) ??
+    { kind: "person", memberId: row.member_id, role: row.member_role };
+  const approval = row.approval_id === null || row.approval_status === null || row.approval_expires_at === null ? null
+    : { id: row.approval_id, status: standing({ status: row.approval_status, expires_at: row.approval_expires_at }, now) };
+  // Parse on the way out: a strict schema refuses any field this file did not mean to send.
+  return actionLogEntrySchema.parse({
+    id: row.id,
+    actionType: row.action_type,
+    actor,
+    target: { type: row.target_type, id: row.target_id },
+    approval,
+    outcome: outcomeOf(row),
+    createdAt: row.created_at.toISOString(),
+  });
+}
+
+/** The tenant's actions, newest first, keyset paged on (created_at, id). */
+export async function listActionLog(tx: Transaction, tenantId: string, query: ListActionsQuery, now: Date): Promise<ActionLogPage> {
+  const cursor = decodeCursor("actions.recent", query);
+  const position = cursor
+    ? `AND (x.created_at, x.id) < (${microsToTimestamp("$4")}, $5::uuid)`
+    : "";
+  const rows = (await tx.query<ActionLogRow>(
+    `${SELECT} WHERE x.tenant_id=$1 ${position} ORDER BY x.created_at DESC, x.id DESC LIMIT $2 OFFSET $3`,
+    [tenantId, query.limit + 1, query.offset, ...(cursor ?? [])],
+  )).rows;
+  const services = await serviceActors(tx, tenantId);
+  return page(rows.map((row) => actionLogEntry(row, services, now)), query,
+    (index) => encodeCursor("actions.recent", [rows[index]!.sort_value, rows[index]!.id]));
+}
+
+/** One receipt, or null when the tenant has no such action. */
+export async function getActionReceipt(tx: Transaction, tenantId: string, actionId: string, now: Date): Promise<ActionLogEntry | null> {
+  const row = (await tx.query<ActionLogRow>(`${SELECT} WHERE x.tenant_id=$1 AND x.id=$2`, [tenantId, actionId])).rows[0];
+  return row ? actionLogEntry(row, await serviceActors(tx, tenantId), now) : null;
+}

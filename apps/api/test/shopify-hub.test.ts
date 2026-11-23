@@ -54,6 +54,9 @@ describe("createHub failure injection (C-21, C-27)", () => {
     expect(calls.slice(before)).not.toContain("createUser");
     expect([...gotrue.users.values()]).toHaveLength(1);
     expect(await stateOf(key)).toEqual({ tenants: 1, members: [{ email: `owner@${key}.example.test`, role: "owner" }] });
+    // plans.md PL-27: the merchant made the hub for themselves, so it is on the free allowances, not comped.
+    expect((await asService(database.servicePool, (tx) => tx.query<{ free_tier: boolean }>(
+      "SELECT free_tier FROM tenant_plans WHERE tenant_id=$1", [tenantIdForKey(key)]))).rows).toEqual([{ free_tier: true }]);
   });
 
   it("fails after every auth call in turn; the retry ends in the clean state with each step done once", async () => {

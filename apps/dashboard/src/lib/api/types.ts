@@ -1,4 +1,4 @@
-import type { Connection, ConnectionStatus, PendingConnection } from "@zs/contracts";
+import type { ActionLogEntry, Connection, ConnectionStatus, PendingConnection } from "@zs/contracts";
 import type {
   BillingPlan,
   WalletSummary,
@@ -433,8 +433,11 @@ export interface InboxApi {
   /** Throws `not_found` for an unknown or malformed thread ID, or one that moved (a linked visitor). */
   getThread(id: string, options?: ReadOptions): Promise<ThreadDetail>;
   draftReply(input: NewReply, options: WriteOptions): Promise<ReplyRecord>;
-  /** Owners only. A conflict with reason `not_draft` or `no_email` when it cannot be approved. */
-  approveReply(replyId: string, options: WriteOptions): Promise<ReplyRecord>;
+  /**
+   * Owners only. A conflict with reason `not_draft` or `no_email` when it cannot be approved, or
+   * `destination_changed` when `destination` (the address the owner saw) is no longer the customer's.
+   */
+  approveReply(replyId: string, options: WriteOptions, destination?: string | null): Promise<ReplyRecord>;
   /** A conflict with reason `not_draft` once it was approved or discarded. */
   discardReply(replyId: string, options: WriteOptions): Promise<ReplyRecord>;
 }
@@ -755,6 +758,17 @@ export interface MediaApi {
 }
 
 /** The approvals path (approvals.md A-7): approving also runs the action. */
+/** Backlog B05: the owner's redacted action log. Owners only (`reports`); staff get 403. */
+export interface ActionLogApi {
+  /** Newest first, keyset paged by `cursor`. */
+  listActions(query?: { cursor?: string | undefined; limit?: number | undefined }, options?: ReadOptions): Promise<Page<ActionLogEntry>>;
+  /** One action's receipt; an unknown ID is a 404. */
+  getAction(id: string, options?: ReadOptions): Promise<ActionLogEntry>;
+}
+
+/** Rows per page of the action log. */
+export const ACTION_PAGE_SIZE = 30;
+
 export interface ApprovalsApi {
   approveApproval(approvalId: string, options: WriteOptions): Promise<ApproveApprovalResponse>;
 }
@@ -816,7 +830,7 @@ export interface BillingApi {
   openBillingPortal(): Promise<BillingPortalResponse>;
 }
 
-export type ZsApi = BillingApi & BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & ManagedConnectionsApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi & SetupApi;
+export type ZsApi = ActionLogApi & BillingApi & BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & ManagedConnectionsApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi & SetupApi;
 
 
 /** Strip the formatting people type into phone fields; the API wants E.164. */

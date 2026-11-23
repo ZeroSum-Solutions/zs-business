@@ -151,7 +151,7 @@ export function createDemoAgents(ctx: DemoAgentContext): FollowUpApi & DemoAgent
       id: ctx.newId(), tenantId: DEMO_TENANT_ID, contactId: contact.id, channel: "email", subject: DEMO_FOLLOW_UP_SUBJECT,
       body: `Hi ${first}, thank you for your request on ${formatDay(item.createdAt, settings.timeZone, "long")}. `
         + `We would be glad to help. Reply to this email with any questions, or with a time that suits you.\n\n${DEMO_BUSINESS}`,
-      status: "draft", draftedBy: DEMO_AGENT, createdAt, approvedBy: null, approvedAt: null, discardedAt: null, settledAt: null,
+      status: "draft", draftedBy: DEMO_AGENT, createdAt, approvedBy: null, approvedAt: null, discardedAt: null, settledAt: null, deliveryReason: null,
     };
     ctx.replies.set(reply.id, reply);
     return reply;

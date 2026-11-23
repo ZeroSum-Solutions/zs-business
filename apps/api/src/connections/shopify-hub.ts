@@ -1,10 +1,10 @@
 // Connections C-21, C-22: the hub side of the native Shopify tier, for the worker. `createHub` makes (or finds) the
-// tenant `shopify-<numeric shop id>`, its Supabase user and its owner member, all idempotent for the same key and
+// tenant `shopify-<numeric shop id>` (marked free, plans.md PL-27), its Supabase user and its owner member, all idempotent for the same key and
 // email, so a retry after any crash resumes. `signInLink` asks Supabase Auth for a one-time token and builds the dashboard's /auth/confirm link from it; nothing is
 // emailed. It uses the service pool the worker already holds and the Supabase Auth admin API.
 import { randomBytes, randomUUID } from "node:crypto";
 import type { Pool } from "pg";
-import type { HubPort } from "@zs/core";
+import { markSelfSignup, type HubPort } from "@zs/core";
 import { asService } from "@zs/db";
 import { checkTenantCreateInput, createTenant, tenantIdForKey } from "../tenant-create.js";
 import type { SupabaseAuthAdmin } from "../supabase-auth-admin.js";
@@ -49,6 +49,10 @@ export function createShopifyHub(deps: {
             step = "create_tenant";
           },
         });
+        // plans.md PL-27: a merchant who installs the app makes the hub for themselves, so it starts on the free
+        // allowances until a Shopify plan applies. Idempotent, so a retry after a crash here marks it then.
+        step = "mark_free";
+        await asService(deps.pool, (tx) => markSelfSignup(tx, { tenantId, now: deps.clock.now() }));
         return { kind: "ok", tenantId, name };
       } catch {
         // A create that raced another for the same email lost: the next retry finds the user. No error text is kept.

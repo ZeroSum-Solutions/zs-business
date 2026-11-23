@@ -41,7 +41,7 @@ const summary = {
 const reply = {
   id: REPLY, tenantId: TENANT, contactId: CONTACT, channel: "email", subject: "Your visit", body: "See you then.", status: "draft",
   draftedBy: { userId: USER, email: "owner@example.com" }, createdAt: "2026-10-20T12:05:00.000Z",
-  approvedBy: null, approvedAt: null, discardedAt: null, settledAt: null,
+  approvedBy: null, approvedAt: null, discardedAt: null, settledAt: null, deliveryReason: null,
 };
 const detail = {
   ...summary,

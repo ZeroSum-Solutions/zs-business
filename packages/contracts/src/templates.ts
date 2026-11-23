@@ -7,6 +7,7 @@ import {
   deliveryPurposeSchema,
   EMAIL_BODY_MAX,
   messageSendRequestedSchema,
+  sendDestinationSchema,
   SMS_BODY_MAX,
   type DeliveryChannel,
   type DeliveryPurpose,
@@ -260,6 +261,12 @@ export const queueMessageInputSchema = z.strictObject({
   templateRevisionId: idSchema,
   standingApprovalId: idSchema,
   values: valuesSchema,
+  /**
+   * approvals.md A-16: the customer's normalized address on the revision's channel, as the runner
+   * read it. The handler refuses `destination_changed` unless it is still the address, and the
+   * send event binds it (delivery.md D-6). Absent only in actions stored before A-16.
+   */
+  destination: z.lazy(() => sendDestinationSchema).optional(),
 });
 export type QueueMessageInput = z.infer<typeof queueMessageInputSchema>;
 const queueCommand = (actionType: string) => z.lazy(() => actionCommandSchema.extend({

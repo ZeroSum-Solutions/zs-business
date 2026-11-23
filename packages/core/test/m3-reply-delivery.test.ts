@@ -189,6 +189,321 @@ describe("Inbox reply through the delivery worker", () => {
     expect(await reply(second.replyId)).toMatchObject({ status: "failed" });
   });
 
+  describe("the approved address (approvals.md A-16, delivery.md D-6 revision 6)", () => {
+    const setAddress = (contactId: string, column: "normalized_email" | "e164_phone", value: string) => service((tx) => tx.query(
+      `UPDATE crm_contacts SET ${column}=$3 WHERE tenant_id=$1 AND id=$2`, [tenantId, contactId, value]));
+
+    it("the approval read shows the address, subject and body the owner approves", async () => {
+      const { contactId, email } = await customer();
+      const draft = await sessionFor(staff).draftReply({ contactId, subject: "Your booking", body: "See you at 7." }, randomUUID());
+      const pending = (await rows<{ id: string; payload: unknown }>(
+        "SELECT id, payload FROM approvals WHERE tenant_id=$1 AND target_id=$2 AND status='pending'", [tenantId, draft.result.id]))[0]!;
+      expect(pending.payload).toEqual({ replyId: draft.result.id, destination: email });
+      const record = await sessionFor(owner).getApproval(pending.id);
+      expect(record.send).toEqual({ contactId, channel: "email", destination: email, subject: "Your booking", body: "See you at 7." });
+      const page = await sessionFor(owner).listApprovals({ status: "pending" });
+      expect(page.items.find((item) => item.id === pending.id)?.send).toEqual(record.send);
+    });
+
+    it("a changed email between approval and delivery ends the send with no provider call; the owner re-approves the new address", async () => {
+      const { contactId } = await customer();
+      const { replyId } = await approvedReply(contactId);
+      await setAddress(contactId, "normalized_email", "moved@haldenrowe.example");
+      const before = await balance();
+      await worker().runOnce();
+      expect(provider.calls).toHaveLength(0);
+      expect(await delivery(replyId)).toMatchObject({ status: "blocked", final_reason: "destination_changed", attempts: 0 });
+      expect(await reply(replyId)).toMatchObject({ status: "failed" });
+      expect(await balance()).toBe(before);
+      // The owner sees why on the reply.
+      const thread = await sessionFor(owner).getThread(`c_${contactId}`);
+      expect(thread.entries.flatMap((entry) => (entry.type === "reply" && entry.reply.id === replyId ? [entry.reply] : [])))
+        .toEqual([expect.objectContaining({ status: "failed", deliveryReason: "destination_changed" })]);
+
+      // Approving the failed reply drafts the same words again for the new address and answers 409.
+      const key = randomUUID();
+      const error = await sessionFor(owner).approveReply(replyId, {}, key).then(() => null, (caught: unknown) => caught);
+      expect(error).toMatchObject({ code: "Conflict", details: { reason: "destination_changed", destination: "moved@haldenrowe.example" } });
+      const copyId = (error as { details: { replyId: string } }).details.replyId;
+      expect(copyId).not.toBe(replyId);
+      // A retry of that call names the same copy and makes no second one.
+      expect(await sessionFor(owner).approveReply(replyId, {}, key).then(() => null, (caught: unknown) => caught))
+        .toMatchObject({ details: { reason: "destination_changed", replyId: copyId } });
+      // Another call names the same copy too: one failed reply gets one copy.
+      expect(await sessionFor(owner).approveReply(replyId, {}, randomUUID()).then(() => null, (caught: unknown) => caught))
+        .toMatchObject({ details: { reason: "destination_changed", replyId: copyId } });
+      // A second owner gets the same copy, not a binding error.
+      const secondOwner = await addMember("owner");
+      expect(await sessionFor(secondOwner).approveReply(replyId, {}, randomUUID()).then(() => null, (caught: unknown) => caught))
+        .toMatchObject({ details: { reason: "destination_changed", replyId: copyId } });
+      expect(await rows("SELECT 1 FROM inbox_replies WHERE tenant_id=$1 AND contact_id=$2", [tenantId, contactId])).toHaveLength(2);
+      const proposal = (await rows<{ id: string }>(
+        "SELECT id FROM approvals WHERE tenant_id=$1 AND target_id=$2 AND status='pending'", [tenantId, copyId]))[0]!;
+      expect((await sessionFor(owner).getApproval(proposal.id)).send).toMatchObject({
+        destination: "moved@haldenrowe.example", subject: "Your booking", body: "Your table is ready at 7.",
+      });
+      expect((await sessionFor(owner).approveReply(copyId, {}, randomUUID())).result.status).toBe("approved");
+      await worker().runOnce();
+      expect(provider.delivered).toHaveLength(1);
+      expect(provider.delivered[0]!.request).toMatchObject({ to: "moved@haldenrowe.example" });
+      expect(await reply(copyId)).toMatchObject({ status: "sent" });
+    });
+
+    it("a proposal made for an old address is proposed again, not approved", async () => {
+      const { contactId } = await customer();
+      const draft = await sessionFor(staff).draftReply({ contactId, subject: "Your booking", body: "See you at 7." }, randomUUID());
+      await setAddress(contactId, "normalized_email", "new@haldenrowe.example");
+      const error = await sessionFor(owner).approveReply(draft.result.id, {}, randomUUID()).then(() => null, (caught: unknown) => caught);
+      expect(error).toMatchObject({ code: "Conflict", details: { reason: "destination_changed", destination: "new@haldenrowe.example" } });
+      expect(await rows<{ status: string; destination: string }>(
+        "SELECT status, payload->>'destination' AS destination FROM approvals WHERE tenant_id=$1 AND target_id=$2 ORDER BY status",
+        [tenantId, draft.result.id])).toEqual(expect.arrayContaining([
+        { status: "revoked", destination: expect.stringMatching(/@haldenrowe\.example$/) },
+        { status: "pending", destination: "new@haldenrowe.example" },
+      ]));
+      expect((await sessionFor(owner).approveReply(draft.result.id, {}, randomUUID())).result.status).toBe("approved");
+      await worker().runOnce();
+      expect(provider.delivered[0]!.request).toMatchObject({ to: "new@haldenrowe.example" });
+    });
+
+    it("a retry of the call that proposed again replays the same 409; the key cannot move to another reply", async () => {
+      const { contactId } = await customer();
+      const draft = await sessionFor(staff).draftReply({ contactId, subject: "Your booking", body: "See you at 7." }, randomUUID());
+      await setAddress(contactId, "normalized_email", "again@haldenrowe.example");
+      const key = randomUUID();
+      const first = await sessionFor(owner).approveReply(draft.result.id, {}, key).then(() => null, (caught: unknown) => caught);
+      const approvalId = (first as { details: { approvalId: string } }).details.approvalId;
+      expect(first).toMatchObject({ details: { reason: "destination_changed", destination: "again@haldenrowe.example" } });
+      expect(await sessionFor(owner).approveReply(draft.result.id, {}, key).then(() => null, (caught: unknown) => caught))
+        .toMatchObject({ details: { reason: "destination_changed", approvalId } });
+      expect(await rows("SELECT 1 FROM approvals WHERE tenant_id=$1 AND target_id=$2 AND status='pending'", [tenantId, draft.result.id]))
+        .toHaveLength(1);
+      const other = await sessionFor(staff).draftReply({ contactId, subject: "Other", body: "Other words." }, randomUUID());
+      expect(await sessionFor(owner).approveReply(other.result.id, {}, key).then(() => null, (caught: unknown) => caught))
+        .toMatchObject({ code: "IdempotencyConflict" });
+    });
+
+    it("an address that changes between the approve call's read and its run is withdrawn and proposed again", async () => {
+      const { contactId } = await customer();
+      const draft = await sessionFor(staff).draftReply({ contactId, subject: "Your booking", body: "See you at 7." }, randomUUID());
+      // The first transaction of the call is its read; the address changes right after it commits.
+      let move: (() => Promise<unknown>) | null = () => setAddress(contactId, "normalized_email", "race@haldenrowe.example");
+      const db = database.db;
+      const racing: typeof db = { ...db, tenant: async (tenant, work, options) => {
+        const out = await db.tenant(tenant, work, options);
+        const next = move; move = null;
+        if (next) await next();
+        return out;
+      } };
+      const key = randomUUID();
+      const owners = createSession({ ...deps(), db: racing }, { tenantId, actorId: owner });
+      const error = await owners.approveReply(draft.result.id, {}, key).then(() => null, (caught: unknown) => caught);
+      expect(error).toMatchObject({ code: "Conflict", details: { reason: "destination_changed", destination: "race@haldenrowe.example" } });
+      const approvalId = (error as { details: { approvalId: string } }).details.approvalId;
+      expect(await rows<{ status: string; destination: string }>(
+        "SELECT status, payload->>'destination' AS destination FROM approvals WHERE tenant_id=$1 AND target_id=$2 AND status IN ('pending','approved')",
+        [tenantId, draft.result.id])).toEqual([{ status: "pending", destination: "race@haldenrowe.example" }]);
+      // The same key replays the same answer.
+      expect(await sessionFor(owner).approveReply(draft.result.id, {}, key).then(() => null, (caught: unknown) => caught))
+        .toMatchObject({ details: { reason: "destination_changed", approvalId } });
+      expect((await sessionFor(owner).approveReply(draft.result.id, {}, randomUUID())).result.status).toBe("approved");
+      await worker().runOnce();
+      expect(provider.delivered[0]!.request).toMatchObject({ to: "race@haldenrowe.example" });
+    });
+
+    it("with no open proposal, an address that changes before the new proposal is left pending, not approved", async () => {
+      const { contactId, email } = await customer();
+      const draft = await sessionFor(staff).draftReply({ contactId, subject: "Your booking", body: "See you at 7." }, randomUUID());
+      const pending = (await rows<{ id: string }>(
+        "SELECT id FROM approvals WHERE tenant_id=$1 AND target_id=$2 AND status='pending'", [tenantId, draft.result.id]))[0]!;
+      await sessionFor(owner).revokeApproval(pending.id, {}, randomUUID());
+      let move: (() => Promise<unknown>) | null = () => setAddress(contactId, "normalized_email", "between@haldenrowe.example");
+      const db = database.db;
+      const racing: typeof db = { ...db, tenant: async (tenant, work, options) => {
+        const out = await db.tenant(tenant, work, options);
+        const next = move; move = null;
+        if (next) await next();
+        return out;
+      } };
+      const owners = createSession({ ...deps(), db: racing }, { tenantId, actorId: owner });
+      const error = await owners.approveReply(draft.result.id, { destination: email }, randomUUID()).then(() => null, (caught: unknown) => caught);
+      expect(error).toMatchObject({ code: "Conflict", details: { reason: "destination_changed", destination: "between@haldenrowe.example" } });
+      expect(await rows<{ status: string; destination: string }>(
+        "SELECT status, payload->>'destination' AS destination FROM approvals WHERE tenant_id=$1 AND target_id=$2 AND status IN ('pending','approved')",
+        [tenantId, draft.result.id])).toEqual([{ status: "pending", destination: "between@haldenrowe.example" }]);
+      expect(await reply(draft.result.id)).toMatchObject({ status: "draft" });
+      await worker().runOnce();
+      expect(provider.calls).toHaveLength(0);
+    });
+
+    it("a call that withdrew the stale proposal but failed before proposing again finishes on retry", async () => {
+      const { contactId } = await customer();
+      const draft = await sessionFor(staff).draftReply({ contactId, subject: "Your booking", body: "See you at 7." }, randomUUID());
+      await setAddress(contactId, "normalized_email", "half@haldenrowe.example");
+      // The read, then the withdrawal commit; the next transaction (the new proposal) fails once.
+      let calls = 0;
+      const db = database.db;
+      const flaky: typeof db = { ...db, tenant: async (tenant, work, options) => {
+        calls += 1;
+        if (calls === 3) throw new Error("connection lost");
+        return db.tenant(tenant, work, options);
+      } };
+      const key = randomUUID();
+      const owners = createSession({ ...deps(), db: flaky }, { tenantId, actorId: owner });
+      await expect(owners.approveReply(draft.result.id, {}, key)).rejects.toThrow();
+      expect(await rows("SELECT 1 FROM approvals WHERE tenant_id=$1 AND target_id=$2 AND status='revoked'", [tenantId, draft.result.id]))
+        .toHaveLength(1);
+      expect(await sessionFor(owner).approveReply(draft.result.id, {}, key).then(() => null, (caught: unknown) => caught))
+        .toMatchObject({ details: { reason: "destination_changed", destination: "half@haldenrowe.example", approvalId: expect.any(String) } });
+      expect(await rows("SELECT 1 FROM approvals WHERE tenant_id=$1 AND target_id=$2 AND status='pending'", [tenantId, draft.result.id]))
+        .toHaveLength(1);
+    });
+
+    it("after its own approval met a changed address, a call that failed before proposing again finishes on retry", async () => {
+      const { contactId } = await customer();
+      const draft = await sessionFor(staff).draftReply({ contactId, subject: "Your booking", body: "See you at 7." }, randomUUID());
+      // The address moves after the read; the transaction that proposes again fails once.
+      let calls = 0;
+      let failed = false;
+      const db = database.db;
+      const flaky: typeof db = { ...db, tenant: async (tenant, work, options) => {
+        calls += 1;
+        const revoked = (await rows("SELECT 1 FROM approvals WHERE tenant_id=$1 AND target_id=$2 AND status='revoked'", [tenantId, draft.result.id])).length > 0;
+        if (revoked && !failed) { failed = true; throw new Error("connection lost"); }
+        const out = await db.tenant(tenant, work, options);
+        if (calls === 1) await setAddress(contactId, "normalized_email", "after@haldenrowe.example");
+        return out;
+      } };
+      const key = randomUUID();
+      const owners = createSession({ ...deps(), db: flaky }, { tenantId, actorId: owner });
+      await expect(owners.approveReply(draft.result.id, {}, key)).rejects.toThrow("connection lost");
+      expect(await rows("SELECT 1 FROM approvals WHERE tenant_id=$1 AND target_id=$2 AND status IN ('pending','approved')", [tenantId, draft.result.id]))
+        .toHaveLength(0);
+      expect(await sessionFor(owner).approveReply(draft.result.id, {}, key).then(() => null, (caught: unknown) => caught))
+        .toMatchObject({ details: { reason: "destination_changed", destination: "after@haldenrowe.example", approvalId: expect.any(String) } });
+      expect(await rows<{ destination: string }>(
+        "SELECT payload->>'destination' AS destination FROM approvals WHERE tenant_id=$1 AND target_id=$2 AND status='pending'",
+        [tenantId, draft.result.id])).toEqual([{ destination: "after@haldenrowe.example" }]);
+      await worker().runOnce();
+      expect(provider.calls).toHaveLength(0);
+    });
+
+    it("an email cleared between the approve call's read and its run answers destination_changed and queues nothing", async () => {
+      const { contactId } = await customer();
+      const draft = await sessionFor(staff).draftReply({ contactId, subject: "Your booking", body: "See you at 7." }, randomUUID());
+      let move: (() => Promise<unknown>) | null = () => service((tx) => tx.query(
+        "UPDATE crm_contacts SET normalized_email=NULL, e164_phone='+15555550143' WHERE tenant_id=$1 AND id=$2", [tenantId, contactId]));
+      const db = database.db;
+      const racing: typeof db = { ...db, tenant: async (tenant, work, options) => {
+        const out = await db.tenant(tenant, work, options);
+        const next = move; move = null;
+        if (next) await next();
+        return out;
+      } };
+      const owners = createSession({ ...deps(), db: racing }, { tenantId, actorId: owner });
+      const error = await owners.approveReply(draft.result.id, {}, randomUUID()).then(() => null, (caught: unknown) => caught);
+      expect(error).toMatchObject({ code: "Conflict", details: { reason: "destination_changed", destination: null } });
+      expect(await reply(draft.result.id)).toMatchObject({ status: "draft" });
+      expect(await rows("SELECT 1 FROM approvals WHERE tenant_id=$1 AND target_id=$2 AND status='approved'", [tenantId, draft.result.id]))
+        .toHaveLength(0);
+      await worker().runOnce();
+      expect(provider.calls).toHaveLength(0);
+    });
+
+    it("an approve that names another address than the customer's now records nothing and answers 409", async () => {
+      const { contactId, email } = await customer();
+      const draft = await sessionFor(staff).draftReply({ contactId, subject: "Your booking", body: "See you at 7." }, randomUUID());
+      const error = await sessionFor(owner).approveReply(draft.result.id, { destination: "stale@haldenrowe.example" }, randomUUID())
+        .then(() => null, (caught: unknown) => caught);
+      expect(error).toMatchObject({ code: "Conflict", details: { reason: "destination_changed", destination: email } });
+      expect(await reply(draft.result.id)).toMatchObject({ status: "draft" });
+      expect(await rows("SELECT 1 FROM approvals WHERE tenant_id=$1 AND target_id=$2 AND status='approved'", [tenantId, draft.result.id]))
+        .toHaveLength(0);
+      const approved = await sessionFor(owner).approveReply(draft.result.id, { destination: email }, randomUUID());
+      expect(approved.result.status).toBe("approved");
+    });
+
+    it("with no open proposal, one made for an old address is proposed again before any approval", async () => {
+      const { contactId } = await customer();
+      const draft = await sessionFor(staff).draftReply({ contactId, subject: "Your booking", body: "See you at 7." }, randomUUID());
+      const pending = (await rows<{ id: string }>(
+        "SELECT id FROM approvals WHERE tenant_id=$1 AND target_id=$2 AND status='pending'", [tenantId, draft.result.id]))[0]!;
+      await sessionFor(owner).revokeApproval(pending.id, {}, randomUUID());
+      await setAddress(contactId, "normalized_email", "later@haldenrowe.example");
+      const error = await sessionFor(owner).approveReply(draft.result.id, {}, randomUUID()).then(() => null, (caught: unknown) => caught);
+      expect(error).toMatchObject({ code: "Conflict", details: { reason: "destination_changed", destination: "later@haldenrowe.example" } });
+      expect(await rows("SELECT 1 FROM approvals WHERE tenant_id=$1 AND target_id=$2 AND status='approved'", [tenantId, draft.result.id]))
+        .toHaveLength(0);
+    });
+
+    it("an email cleared after approval (phone kept) ends the send destination_changed, not no_address", async () => {
+      const { contactId } = await customer();
+      const { replyId } = await approvedReply(contactId);
+      await service((tx) => tx.query("UPDATE crm_contacts SET normalized_email=NULL, e164_phone=$3 WHERE tenant_id=$1 AND id=$2", [tenantId, contactId, "+15555550199"]));
+      await worker().runOnce();
+      expect(provider.calls).toHaveLength(0);
+      expect(await delivery(replyId)).toMatchObject({ status: "blocked", final_reason: "destination_changed" });
+    });
+
+    it("an owner's own draft is bound the same way", async () => {
+      const { contactId } = await customer();
+      const draft = await sessionFor(owner).draftReply({ contactId, subject: "Your booking", body: "Mine." }, randomUUID());
+      expect((await sessionFor(owner).approveReply(draft.result.id, {}, randomUUID())).result.status).toBe("approved");
+      await setAddress(contactId, "normalized_email", "owner-moved@haldenrowe.example");
+      await worker().runOnce();
+      expect(provider.calls).toHaveLength(0);
+      expect(await delivery(draft.result.id)).toMatchObject({ status: "blocked", final_reason: "destination_changed" });
+    });
+
+    it("a requester cannot name the address: the proposal stores the customer's", async () => {
+      const { contactId, email } = await customer();
+      const draft = await sessionFor(staff).draftReply({ contactId, subject: "Your booking", body: "See you at 7." }, randomUUID());
+      const out = await sessionFor(staff).requestApproval({
+        action: { actionType: "inbox.reply.send", target: { type: "inbox_reply", id: draft.result.id },
+          payload: { replyId: draft.result.id, destination: "attacker@evil.example" } },
+        summary: "Send it",
+      }, randomUUID());
+      expect(out.result.payload).toEqual({ replyId: draft.result.id, destination: email });
+    });
+
+    it("a send event whose words or address differ from the approved ones is not approved (approval_missing)", async () => {
+      // The last case leaves the customer's address alone: a forged address is not a changed one.
+      const cases = [["body", "Words nobody approved.", false], ["destination", "elsewhere@haldenrowe.example", true],
+        ["destination", "forged@haldenrowe.example", false]] as const;
+      for (const [field, value, moved] of cases) {
+        const { contactId } = await customer();
+        const { replyId } = await approvedReply(contactId);
+        if (moved) await setAddress(contactId, "normalized_email", value);
+        await service((tx) => tx.query(
+          `UPDATE outbox SET payload = jsonb_set(payload, ARRAY[$3::text], to_jsonb($4::text))
+            WHERE tenant_id=$1 AND event_type='message.send_requested' AND payload->>'messageId'=$2`, [tenantId, replyId, field, value]));
+        await worker().runOnce();
+        expect(provider.calls).toHaveLength(0);
+        expect(await delivery(replyId)).toMatchObject({ status: "blocked", final_reason: "approval_missing" });
+      }
+    });
+
+    it("a revoked approval says approval_revoked even when the address also changed", async () => {
+      const { contactId } = await customer();
+      const { replyId, approvalId } = await approvedReply(contactId);
+      await sessionFor(owner).revokeApproval(approvalId, { note: "Do not send" }, randomUUID());
+      await setAddress(contactId, "normalized_email", "revoked-too@haldenrowe.example");
+      await worker().runOnce();
+      expect(provider.calls).toHaveLength(0);
+      expect(await delivery(replyId)).toMatchObject({ status: "blocked", final_reason: "approval_revoked" });
+    });
+
+    it("a changed phone does not stop an email reply", async () => {
+      const { contactId, email } = await customer();
+      const { replyId } = await approvedReply(contactId);
+      await setAddress(contactId, "e164_phone", "+15555550142");
+      await worker().runOnce();
+      expect(provider.delivered).toHaveLength(1);
+      expect(provider.delivered[0]!.request).toMatchObject({ to: email });
+      expect(await reply(replyId)).toMatchObject({ status: "sent" });
+    });
+  });
+
   it("never settles another tenant's reply from a worker pass over this tenant's deliveries", async () => {
     const { contactId } = await customer();
     const { replyId } = await approvedReply(contactId);
