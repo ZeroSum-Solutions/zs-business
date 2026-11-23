@@ -296,7 +296,7 @@ describe("tenancy as the runtime role (BP-12, BP-9)", () => {
       expect(await valid("business_hours_valid", bad)).toBe(false);
     }
     expect(await valid("business_fact_marks_valid", { tone: mark, policies: mark })).toBe(true);
-    for (const bad of [{ colour: mark }, { tone: { ...mark, setAt: "x" } }, { tone: { ...mark, revision: 2.5 } },
+    for (const bad of [{ colour: mark }, { tone: { ...mark, setAt: "x" } }, { tone: { ...mark, setAt: "2026-02-30T10:00:00.000Z" } }, { tone: { ...mark, setAt: "2026-11-22T24:00:00.000Z" } }, { tone: { ...mark, revision: 2.5 } },
       { tone: { ...mark, revision: 2_147_483_648 } }, { tone: { ...mark, revision: 1 } }, { tone: { ...mark, setBy: "not-a-uuid" } }, []]) {
       expect(await valid("business_fact_marks_valid", bad)).toBe(false);
     }
@@ -353,6 +353,14 @@ describe("tenancy as the runtime role (BP-12, BP-9)", () => {
     await refusedOwner("policies='[]'::jsonb", []);
     const cleared = await write(fixture.a.tenantId, "policies='[]'::jsonb, fact_marks=fact_marks || $2::jsonb", [JSON.stringify({ policies: markOf(owner, 3) })]);
     expect(cleared.rows[0]).toMatchObject({ policies: [] });
+    // Dropping a recorded mark is refused, with the change or without it: it would leave no mark to check.
+    for (const fact of ["tone", "hours", "policies"]) {
+      await refusedOwner(`fact_marks=fact_marks - '${fact}'`, []);
+    }
+    await refusedOwner("tone='Forged.', fact_marks=fact_marks - 'tone'", []);
+    await refusedOwner("tone=NULL, fact_marks=fact_marks - 'tone'", []);
+    await refusedOwner("hours=NULL, fact_marks=fact_marks - 'hours'", []);
+    await refusedOwner(`policies=$2::jsonb, fact_marks=fact_marks - 'policies'`, [JSON.stringify([{ title: "Deposits", text: "Half.", ...markOf(owner, 3) }])]);
 
     // A blank tone fails its own CHECK even with a mark.
     for (const blank of ["  ", "\t\n"]) {

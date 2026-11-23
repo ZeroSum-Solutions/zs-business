@@ -25,8 +25,9 @@ import {
   bookingPageSummarySchema,
   businessProfileReadSchema,
   MARKED_FACTS,
-  WEEKDAYS,
-  type BusinessHours,
+  businessHoursSchema,
+  businessPolicySchema,
+  factMarkSchema,
   type FactMarks,
   contactEnrichmentSchema,
   enrichmentProposalListSchema,
@@ -193,31 +194,30 @@ const enrichmentOutputSchema = z.object({ actionId: uuidSchema, result: enrichme
  * facts read as not known, and Settings shows them read-only and never sends them, so a save cannot wipe
  * stored hours, tone or policies it could not read.
  */
-const dayRead = z.object({ open: z.string(), close: z.string() }).nullable();
-const hoursRead = z.object({ mon: dayRead, tue: dayRead, wed: dayRead, thu: dayRead, fri: dayRead, sat: dayRead, sun: dayRead });
-const policiesRead = z.array(z.object({ title: z.string(), text: z.string(), setBy: z.string(), setAt: z.string(), revision: z.number().optional() }));
-const markRead = z.object({ setBy: z.string(), setAt: z.string(), revision: z.number().optional() });
+const policiesRead = z.array(businessPolicySchema);
+/** Hours, tone and policies carry their marks; a mark this client cannot read makes those facts unavailable too. */
+const COMPANY_FACT_KEYS = ["hours", "tone", "policies"] as const;
 function withContent(profile: z.output<typeof businessProfileReadSchema>): BusinessProfileView {
   const { description, services, hours, tone, policies, factMarks, ...rest } = profile;
-  const week = hours === null ? { success: true as const, data: null } : hoursRead.safeParse(hours);
+  const week = businessHoursSchema.nullable().safeParse(hours);
   const note = z.string().nullable().safeParse(tone);
   const list = policiesRead.safeParse(policies);
-  const factsUnavailable = !week.success || !note.success || !list.success;
+  const rawMarks = factMarks !== null && typeof factMarks === "object" && !Array.isArray(factMarks) ? (factMarks as Record<string, unknown>) : null;
   const marks: FactMarks = {};
-  const rawMarks = factMarks !== null && typeof factMarks === "object" ? (factMarks as Record<string, unknown>) : {};
   for (const fact of MARKED_FACTS) {
-    const mark = markRead.safeParse(rawMarks[fact]);
-    if (mark.success) marks[fact] = { setBy: mark.data.setBy, setAt: mark.data.setAt, revision: mark.data.revision ?? 0 };
+    const mark = factMarkSchema.safeParse(rawMarks?.[fact]);
+    if (mark.success) marks[fact] = mark.data;
   }
-  const openWeek = week.success && week.data && WEEKDAYS.some((day) => week.data![day] !== null) ? (week.data as BusinessHours) : null;
+  const marksRead = rawMarks !== null && COMPANY_FACT_KEYS.every((fact) => rawMarks[fact] === undefined || marks[fact] !== undefined);
+  const factsUnavailable = !week.success || !note.success || !list.success || !marksRead;
   return {
     ...rest,
     description: description ?? null,
     services: services ?? [],
-    hours: factsUnavailable ? null : openWeek,
-    tone: factsUnavailable ? null : note.data ?? null,
-    policies: factsUnavailable ? [] : list.data!.map((policy) => ({ title: policy.title, text: policy.text, setBy: policy.setBy, setAt: policy.setAt, revision: policy.revision ?? 0 })),
-    factMarks: marks,
+    hours: factsUnavailable ? null : week.data,
+    tone: factsUnavailable ? null : note.data,
+    policies: factsUnavailable ? [] : list.data,
+    factMarks: factsUnavailable ? Object.fromEntries(Object.entries(marks).filter(([fact]) => !(COMPANY_FACT_KEYS as readonly string[]).includes(fact))) : marks,
     ...(factsUnavailable ? { factsUnavailable: true as const } : {}),
   };
 }

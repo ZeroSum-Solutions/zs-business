@@ -26,21 +26,32 @@ LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, pg_temp AS $$
     false)
 $$;
 
--- BP-18, BP-19: a mark is { setBy, setAt, revision }: the owner's member ID, the instant (as the contract
--- writes it, UTC with milliseconds) and the profile revision the save made, a whole number from 2.
+-- BP-18, BP-19: a mark is { setBy, setAt, revision }: the owner's member ID, a real instant written as the
+-- contract writes it (UTC with milliseconds) and the profile revision the save made, a whole number from 2.
+-- PL/pgSQL, so each test runs only after the one before it passed and a bad value returns false, not an error.
 CREATE FUNCTION public.business_fact_mark_valid(p_mark jsonb) RETURNS boolean
-LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, pg_temp AS $$
-  SELECT coalesce(
-    jsonb_typeof(p_mark) = 'object'
-    AND (p_mark - ARRAY['setBy', 'setAt', 'revision']) = '{}'::jsonb
-    AND jsonb_typeof(p_mark->'setBy') = 'string'
-    AND (p_mark->>'setBy') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-    AND jsonb_typeof(p_mark->'setAt') = 'string'
-    AND (p_mark->>'setAt') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$'
-    AND jsonb_typeof(p_mark->'revision') = 'number' AND (p_mark->>'revision') ~ '^[0-9]{1,10}$'
-    AND (p_mark->>'revision')::bigint BETWEEN 2 AND 2147483647,
-    false)
-$$;
+LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+  IF jsonb_typeof(p_mark) IS DISTINCT FROM 'object'
+     OR (p_mark - ARRAY['setBy', 'setAt', 'revision']) <> '{}'::jsonb
+     OR jsonb_typeof(p_mark->'setBy') IS DISTINCT FROM 'string'
+     OR jsonb_typeof(p_mark->'setAt') IS DISTINCT FROM 'string'
+     OR jsonb_typeof(p_mark->'revision') IS DISTINCT FROM 'number' THEN
+    RETURN false;
+  END IF;
+  IF (p_mark->>'setBy') !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+     OR (p_mark->>'setAt') !~ '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\.[0-9]{3}Z$'
+     OR (p_mark->>'revision') !~ '^[0-9]{1,10}$' THEN
+    RETURN false;
+  END IF;
+  IF (p_mark->>'revision')::bigint NOT BETWEEN 2 AND 2147483647 THEN
+    RETURN false;
+  END IF;
+  -- A date such as 2026-02-30 passes the pattern; the date input refuses it.
+  RETURN left(p_mark->>'setAt', 10)::date IS NOT NULL;
+EXCEPTION WHEN datetime_field_overflow OR invalid_datetime_format THEN
+  RETURN false;
+END $$;
 
 -- BP-18: policies, a JSON array of at most 10 { title, text, setBy, setAt, revision }. A title is one line
 -- of 1..60 characters and no two titles are the same ignoring case; a text is 1..1000 characters; neither
@@ -90,8 +101,8 @@ ALTER TABLE public.business_profiles
 
 -- BP-19, BP-20: a mark is true or it is gone, and only an owner sets one. On insert and on update:
 -- 0. A malformed fact_marks or policies value is left to its CHECK, which names the right constraint.
--- 1. A change to hours, tone or the policy list must carry a new mark (the action always writes one), so a
---    direct write cannot set, change or clear them unmarked.
+-- 1. A change to hours, tone or the policy list must carry a new mark (the action always writes one), and
+--    their recorded marks are never removed, so a direct write cannot set, change or clear them unmarked.
 -- 2. Any other marked fact (the name, description, services, time zone) that changes while its mark does not
 --    (a setup step or an operator script writing the time zone) loses its mark: the value stays, and who
 --    set it is no longer recorded. Every mark carries the revision of its save, so a save by the same owner
@@ -135,12 +146,16 @@ BEGIN
         WHEN 'policies' THEN NEW.policies IS DISTINCT FROM OLD.policies
       END;
     END IF;
-    IF changed AND (NEW.fact_marks->k) IS NOT DISTINCT FROM (old_marks->k) THEN
-      IF k IN ('hours', 'tone', 'policies') THEN
+    IF k IN ('hours', 'tone', 'policies') THEN
+      -- A change needs a new mark, and a mark already recorded is never dropped (removing it in the same
+      -- write would otherwise pass as a change with no mark to check).
+      IF (changed AND (NOT (NEW.fact_marks ? k) OR (NEW.fact_marks->k) IS NOT DISTINCT FROM (old_marks->k)))
+         OR ((old_marks ? k) AND NOT (NEW.fact_marks ? k)) THEN
         RAISE EXCEPTION 'A company fact changes only with the mark of the owner who set it' USING ERRCODE = 'check_violation',
           SCHEMA = 'public', TABLE = 'business_profiles', COLUMN = 'fact_marks',
           CONSTRAINT = 'business_profiles_fact_owner';
       END IF;
+    ELSIF changed AND (NEW.fact_marks->k) IS NOT DISTINCT FROM (old_marks->k) THEN
       NEW.fact_marks := NEW.fact_marks - k;
     END IF;
   END LOOP;

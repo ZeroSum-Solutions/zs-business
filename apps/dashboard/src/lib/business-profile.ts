@@ -295,6 +295,16 @@ export function fieldFromIssuePath(path: string): BusinessField | null {
  * cached copy could read the company facts (an older API answered the refetch during a rolling deploy).
  * Revisions only grow, so the lower one is stale.
  */
+/**
+ * The form Settings shows. A draft begun while the company facts were unreadable never touched them: once
+ * they load, it takes the stored ones, so a save cannot send the blanks it held (BP-16..BP-19).
+ */
+export function draftForm(draft: { form: BusinessForm; factsLocked: boolean } | null, saved: BusinessForm, factsLocked: boolean): BusinessForm {
+  if (!draft) return saved;
+  if (draft.factsLocked && !factsLocked) return { ...draft.form, hours: saved.hours, tone: saved.tone, policies: saved.policies };
+  return draft.form;
+}
+
 export function newerProfile<T extends BusinessProfile & { factsUnavailable?: true }>(cached: T | undefined, incoming: T): T {
   if (!cached) return incoming;
   if (cached.revision !== incoming.revision) return cached.revision > incoming.revision ? cached : incoming;

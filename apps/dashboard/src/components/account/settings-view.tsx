@@ -18,6 +18,7 @@ import { timeZoneChoices, zoneName } from "@/lib/agents";
 import {
   WEEKDAY_NAMES,
   countryChoices,
+  draftForm,
   factProvenance,
   fieldFromIssuePath,
   newerProfile,
@@ -184,23 +185,23 @@ function BusinessFormBody({ profile, reload, lockedReason }: {
   const intents = useIntentKey();
   const { setBusinessName } = useSession();
   const demo = useApiRuntime().mode === "demo";
-  const [draft, setDraft] = useState<{ revision: number; form: BusinessForm } | null>(null);
+  const [draft, setDraft] = useState<{ revision: number; form: BusinessForm; factsLocked: boolean } | null>(null);
   const [errors, setErrors] = useState<BusinessFormErrors>({});
   const [stale, setStale] = useState(false);
   const [saveOnce] = useState(singleFlight);
 
   const saved = useMemo(() => toBusinessForm(profile), [profile]);
-  const form = draft?.form ?? saved;
+  // BP-16..BP-19: facts this screen could not read stay read-only and are never sent.
+  const factsLocked = profile.factsUnavailable === true;
+  const form = draftForm(draft, saved, factsLocked);
   const revision = draft?.revision ?? profile.revision;
   const dirty = !sameForm(form, saved);
   const zones = useMemo(() => timeZoneChoices(form.timeZone).filter((zone) => zone !== ""), [form.timeZone]);
   const countries = useMemo(() => countryChoices(), []);
   const locked = lockedReason !== null;
-  // BP-16..BP-19: facts this screen could not read stay read-only and are never sent.
-  const factsLocked = profile.factsUnavailable === true;
   const unchanged = !locked && !dirty;
 
-  const edit = (patch: Partial<BusinessForm>) => setDraft({ revision, form: { ...form, ...patch } });
+  const edit = (patch: Partial<BusinessForm>) => setDraft({ revision, form: { ...form, ...patch }, factsLocked });
 
   const save = useMutation({
     mutationFn: (input: UpdateBusinessProfileRequest) => api.updateBusiness(input, { idempotencyKey: intents.keyFor(input) }),
@@ -209,7 +210,7 @@ function BusinessFormBody({ profile, reload, lockedReason }: {
     onSettled: (_profile, error, input) => intents.settle(input, error),
     onSuccess: (next) => {
       // A replayed answer can be older than what is cached: never move the cache back a revision.
-      const latest = newerProfile(queryClient.getQueryData<BusinessProfile>(keys.business), next);
+      const latest = newerProfile(queryClient.getQueryData<BusinessProfileView>(keys.business), next);
       queryClient.setQueryData(keys.business, latest);
       setBusinessName(latest.displayName);
       setDraft(null);
@@ -263,7 +264,8 @@ function BusinessFormBody({ profile, reload, lockedReason }: {
   const savedPolicyLine = (draft: { title: string; text: string }) => {
     const saved = factsLocked ? undefined : profile.policies.find((policy) => policy.title === draft.title.trim() && policy.text === draft.text.trim());
     const date = saved ? setAtLabel(saved.setAt) : null;
-    return date ? <p className="text-xs text-meta">Set by an owner on {date}.</p> : null;
+    if (!saved) return null;
+    return <p className="text-xs text-meta">{date ? `Set by an owner on ${date}.` : "Set by an owner."}</p>;
   };
   const editDay = (day: Weekday, patch: Partial<DayHours>) => edit({ hours: { ...form.hours, [day]: { ...form.hours[day], ...patch } } });
   const editPolicy = (index: number, patch: Partial<BusinessForm["policies"][number]>) =>

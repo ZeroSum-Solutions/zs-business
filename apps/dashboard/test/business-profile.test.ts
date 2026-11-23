@@ -2,7 +2,7 @@
 // `changes` a save sends: only what changed, a phone in E.164, an address all or nothing.
 import { describe, expect, it } from "vitest";
 import type { BusinessProfile } from "@zs/contracts";
-import { countryChoices, factProvenance, fieldFromIssuePath, newerProfile, normalizedForm, readBusinessForm, toBusinessForm } from "../src/lib/business-profile";
+import { countryChoices, draftForm, factProvenance, fieldFromIssuePath, newerProfile, normalizedForm, readBusinessForm, toBusinessForm } from "../src/lib/business-profile";
 
 const profile = (change: Partial<BusinessProfile> = {}): BusinessProfile => ({
   displayName: "Halden & Rowe", legalName: null, phoneE164: null, timeZone: null, currency: "USD", postalAddress: null,
@@ -173,6 +173,21 @@ describe("newerProfile", () => {
     const older = { ...profile({ revision: 3 }), factsUnavailable: true as const };
     expect(newerProfile(cached, older)).toBe(cached);
     expect(newerProfile(older, cached)).toBe(cached);
+  });
+});
+
+describe("draftForm", () => {
+  it("gives a draft begun while the facts were locked the stored facts once they load, so a save cannot send blanks", () => {
+    const locked = toBusinessForm({ ...profile({ revision: 3 }), factsUnavailable: true } as BusinessProfile);
+    const draft = { form: { ...locked, legalName: "New Ltd" }, factsLocked: true };
+    const loaded = toBusinessForm(profile({ revision: 3, tone: "Warm.", policies: [{ title: "Refunds", text: "Ten days.", setBy: "m", setAt: "2026-11-22T10:00:00.000Z", revision: 3 }] }));
+    const form = draftForm(draft, loaded, false);
+    expect(form).toMatchObject({ legalName: "New Ltd", tone: "Warm.", hours: loaded.hours, policies: loaded.policies });
+    expect(readBusinessForm(profile({ revision: 3, tone: "Warm.", policies: [{ title: "Refunds", text: "Ten days.", setBy: "m", setAt: "2026-11-22T10:00:00.000Z", revision: 3 }] }), form))
+      .toEqual({ ok: true, changes: { legalName: "New Ltd" } });
+    expect(draftForm(draft, loaded, true)).toBe(draft.form);
+    expect(draftForm({ form: draft.form, factsLocked: false }, loaded, false)).toBe(draft.form);
+    expect(draftForm(null, loaded, false)).toBe(loaded);
   });
 });
 

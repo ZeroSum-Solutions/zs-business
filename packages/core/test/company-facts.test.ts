@@ -278,7 +278,7 @@ function otherProfileReads(source: string, inBuilder = true): string[] {
     [/\.getBusiness\s*\(/, "calls a getBusiness read"],
     [/\bmemberProfile\s*\(/, "reads the business name through memberProfile"],
     // An imported module may read tenants for other reasons (a kill switch); only the name is the business.
-    [new RegExp(String.raw`\bSELECT\b[^;]*?\bname\b[^;]*?\bFROM\s+(?:[^;]*?,\s*)?${TENANTS}`, "is"), "reads the tenant's name"],
+    [new RegExp(String.raw`\bSELECT\b[^;]*?(?:\bname\b|\*)[^;]*?\b(?:FROM\s+(?:[^;]*?,\s*)?|JOIN\s+)${TENANTS}`, "is"), "reads the tenant's name"],
   ];
   if (inBuilder) patterns.push([new RegExp(String.raw`\b(?:FROM|JOIN)\s+(?:[^;()]*?,\s*)?${TENANTS}`, "i"), "reads tenants"]);
   return patterns.filter(([pattern]) => pattern.test(code)).map(([, label]) => label);
@@ -369,9 +369,13 @@ describe("one read for every prompt builder (BP-21)", () => {
       [`${root}/agents/builder.ts`, "import { load } from './helper.js'; const req: TextModelRequest = { system: S, input: await load(tx) };"],
       [`${root}/agents/helper.ts`, "export const load = (tx) => tx.query('SELECT tone FROM business_profiles');"],
       [`${root}/agents/kill.ts`, "export const killed = (tx) => tx.query('SELECT killed_at FROM tenants');"],
+      [`${root}/agents/joined.ts`, "export const n = (tx) => tx.query('SELECT t.name FROM intake_items i JOIN tenants t ON t.tenant_id = i.tenant_id');"],
+      [`${root}/agents/star.ts`, "export const all = (tx) => tx.query('SELECT * FROM tenants WHERE tenant_id = $1');"],
+      [`${root}/agents/both.ts`, "import { n } from './joined.js'; import { all } from './star.js'; let r: TextModelRequest;"],
       [`${root}/agents/clean.ts`, "import { killed } from './kill.js'; const company = companyFactsForPrompt(await readCompanyFacts(tx, id)); model.complete({ system, input: company });"],
     ]);
     expect(builderViolations(`${root}/agents/builder.ts`, files, root)).toEqual(["agents/helper.ts: reads business_profiles"]);
+    expect(builderViolations(`${root}/agents/both.ts`, files, root)).toEqual(["agents/joined.ts: reads the tenant's name", "agents/star.ts: reads the tenant's name"]);
     expect(builderViolations(`${root}/agents/clean.ts`, files, root)).toEqual(["agents/clean.ts: puts company facts in a prompt without COMPANY_FACTS_RULE"]);
   });
 

@@ -57,11 +57,16 @@ describe("http client: business profile", () => {
       json(200, { ...withContent, ...facts }),
       json(200, { ...withContent, ...facts, hours: { mon: null } }),
       json(200, { ...withContent, ...facts, policies: { list: [] } }),
+      // A time, a week or a mark this client cannot read locks the facts too, rather than blocking every save.
+      json(200, { ...withContent, ...facts, hours: { ...hours, mon: { open: "9:00", close: "17:00" } } }),
+      json(200, { ...withContent, ...facts, hours: { ...hours, mon: null } }),
+      json(200, { ...withContent, ...facts, factMarks: { ...facts.factMarks, tone: { setBy: ACTION } } }),
+      json(200, { ...withContent, ...facts, factMarks: undefined }),
     ]);
     const read = await api.getBusiness();
     expect(read).toEqual({ ...withContent, ...facts, factMarks: { hours: mark, tone: mark } });
     expect(read).not.toHaveProperty("factsUnavailable");
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < 6; i++) {
       expect(await api.getBusiness()).toMatchObject({ hours: null, tone: null, policies: [], factsUnavailable: true });
     }
   });

@@ -156,13 +156,14 @@ stays, and who set it reads as not recorded. The trigger runs on insert as well 
 **BP-20. The owner is the only writer.** The action needs the `business` permission, which only
 owners hold (BP-6). The database enforces it too: a trigger refuses any new or changed mark or
 policy whose `setBy` is not an owner member of the same tenant, and any change to hours, tone or
-policies that carries no new mark, with `check_violation` `business_profiles_fact_owner`. So a
+policies that carries no new mark, and any write that drops a recorded mark of those three, with
+`check_violation` `business_profiles_fact_owner`. So a
 direct write as the runtime role cannot set, change or clear those facts unmarked, or in a staff
 member's name or another tenant's. The database has no actor setting and cannot tell which owner
 is acting; the action stamps the acting owner's own member ID. A malformed `fact_marks` or
 `policies` value fails its own CHECK (`business_profiles_fact_marks`,
 `business_profiles_policies`), which match the contract: marks need a UUID, an instant with
-milliseconds and a whole revision from 2.
+milliseconds on a real calendar date, and a whole revision from 2.
 
 **BP-21. One read for agents.** `readCompanyFacts(tx, tenantId)` in `packages/core/src/business`
 is the only way an agent prompt builder reads the business: it returns the name, description,
@@ -178,9 +179,10 @@ which tells the model never to guess a fact that is not known. A prompt with no 
 a `system` text, a `.complete(` call or a `*Prompt` input) and fails when the builder, or a
 helper it imports from its own feature folder, reads `business_profiles`, the tenant's name or
 `getBusinessProfile` in any other way, or when a builder puts the facts in a prompt without the
-rule. The dashboard checks each fact the API sends: when an older API sends none, or a newer one
-sends a shape it does not know, the facts read as not known, Settings shows them read-only, and a
-save never sends them, so it cannot wipe facts it did not see (BP-10). A save stored before this
+rule. The dashboard checks hours, tone, policies and their marks against the contract: when an older API
+sends none, or a newer one sends a shape or value it does not know, the facts read as not known, Settings shows them read-only, and a
+save never sends them, so it cannot wipe facts it did not see (BP-10). A draft begun while they
+were read-only takes the stored facts once a later read brings them. A save stored before this
 revision replays with them empty.
 
 **BP-12. Tenancy.** A member of tenant A cannot read or update tenant B's profile through the
