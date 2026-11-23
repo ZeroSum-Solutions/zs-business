@@ -7,7 +7,8 @@
     "stage": "Stage 0: Base",
     "blast": "low",
     "depends_on": [],
-    "existing_ticket": "ZSB-21"
+    "existing_ticket": "ZSB-21",
+    "status": "done"
   },
   {
     "id": "B02",
@@ -17,7 +18,8 @@
     "stage": "Stage 0: Base",
     "blast": "low",
     "depends_on": [],
-    "existing_ticket": "ZSB-21"
+    "existing_ticket": "ZSB-24",
+    "status": "done"
   },
   {
     "id": "B03",
@@ -29,7 +31,8 @@
     "depends_on": [
       "B01"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-41",
+    "status": "done"
   },
   {
     "id": "B04",
@@ -41,7 +44,8 @@
     "depends_on": [
       "B03"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-25",
+    "status": "open"
   },
   {
     "id": "B05",
@@ -53,7 +57,8 @@
     "depends_on": [
       "B01"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-42",
+    "status": "done"
   },
   {
     "id": "B06",
@@ -65,7 +70,8 @@
     "depends_on": [
       "B01"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-43",
+    "status": "done"
   },
   {
     "id": "B07",
@@ -77,7 +83,8 @@
     "depends_on": [
       "B06"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-26",
+    "status": "open"
   },
   {
     "id": "B08",
@@ -89,7 +96,8 @@
     "depends_on": [
       "B01"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-44",
+    "status": "done"
   },
   {
     "id": "B09",
@@ -102,7 +110,8 @@
       "B07",
       "B08"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-27",
+    "status": "open"
   },
   {
     "id": "B10",
@@ -114,7 +123,8 @@
     "depends_on": [
       "B01"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-45",
+    "status": "done"
   },
   {
     "id": "B11",
@@ -126,7 +136,8 @@
     "depends_on": [
       "B08"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-28",
+    "status": "open"
   },
   {
     "id": "B12",
@@ -138,7 +149,8 @@
     "depends_on": [
       "B03"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-29",
+    "status": "open"
   },
   {
     "id": "B13",
@@ -150,7 +162,8 @@
     "depends_on": [
       "B05"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-30",
+    "status": "open"
   },
   {
     "id": "B14",
@@ -163,7 +176,8 @@
       "B05",
       "B13"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-31",
+    "status": "open"
   },
   {
     "id": "B15",
@@ -177,7 +191,8 @@
       "B11",
       "B12"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-32",
+    "status": "open"
   },
   {
     "id": "B16",
@@ -195,7 +210,22 @@
       "B14",
       "B15"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-33",
+    "status": "open"
+  },
+  {
+    "id": "B26",
+    "title": "Agree the first-agent entitlement so the Stage 0 gate can pass",
+    "why": "The Stage 0 gate asks a fresh sign-up to approve an agent-drafted reply. Free and Solo have modelAgents false and the plan gate refuses a model agent for them, so the gate cannot pass as written (docs/vision.md section 5).",
+    "done_when": "plans.md, B08, B09, B15 and B16 agree on which fresh sign-up may draft a reply, how many drafts it gets, who pays and when access ends. A preview test proves the allowed path and a refused path.",
+    "stage": "Stage 0: Base",
+    "blast": "medium",
+    "depends_on": [
+      "B08",
+      "B09"
+    ],
+    "existing_ticket": "ZSB-69",
+    "status": "open"
   },
   {
     "id": "B17",
@@ -209,7 +239,8 @@
       "B11",
       "B12"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-34",
+    "status": "open"
   },
   {
     "id": "B18",
@@ -222,7 +253,8 @@
       "B11",
       "B12"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-35",
+    "status": "open"
   },
   {
     "id": "B19",
@@ -234,7 +266,8 @@
     "depends_on": [
       "B01"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-46",
+    "status": "done"
   },
   {
     "id": "B20",
@@ -247,7 +280,8 @@
       "B19",
       "B14"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-36",
+    "status": "open"
   },
   {
     "id": "B21",
@@ -260,7 +294,8 @@
       "B20",
       "B03"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-37",
+    "status": "open"
   },
   {
     "id": "B22",
@@ -272,7 +307,8 @@
     "depends_on": [
       "B04"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-38",
+    "status": "open"
   },
   {
     "id": "B23",
@@ -288,7 +324,8 @@
       "B21",
       "B22"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-39",
+    "status": "open"
   },
   {
     "id": "B24",
@@ -300,7 +337,8 @@
     "depends_on": [
       "B17"
     ],
-    "existing_ticket": null
+    "existing_ticket": "ZSB-40",
+    "status": "open"
   },
   {
     "id": "B25",
@@ -310,6 +348,7 @@
     "stage": "Close-out (does not block Stage 0)",
     "blast": "low",
     "depends_on": [],
-    "existing_ticket": "ZSB-13"
+    "existing_ticket": "ZSB-13",
+    "status": "done"
   }
 ]

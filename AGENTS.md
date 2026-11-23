@@ -1,5 +1,10 @@
 # zs-business — rules for agents
 
+Start here: `docs/vision.md` (the end goal: a whole company run from one phone, and the verdict on
+every product idea), then `docs/direction.md` (order of work, trust rules, stage gates), then the
+contract in `docs/requirements/` for your ticket. Build toward the vision; do not widen scope past
+what a contract or ticket says.
+
 Public repo, owner Devin (Zero Sum Solutions). Never commit `.t3-runs/`, hidden tests, client data, secrets or third-party text. Read `docs/licenses.md` before you read or
 copy any outside code.
 
