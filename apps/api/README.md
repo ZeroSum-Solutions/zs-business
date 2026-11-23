@@ -176,6 +176,9 @@ strict schema rejects.
 | `UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET` | Optional, during a rotation: links signed with it still verify. |
 | `RESEND_WEBHOOK_SECRET` | The signing secret of the Resend webhook endpoint, as Resend shows it (`whsec_` then base64, at least 24 bytes). Anything else is refused. Unset, `POST /webhooks/resend` is off. |
 | `RESEND_WEBHOOK_PREVIOUS_SECRET` | Optional, during a rotation: events signed with it still verify. Needs `RESEND_WEBHOOK_SECRET`. |
+| `RESEND_INBOUND_WEBHOOK_SECRET` | The signing secret of the separate Resend endpoint for received mail (inbound-email.md IE-8), same shape as `RESEND_WEBHOOK_SECRET`. Needs `INBOUND_EMAIL_DOMAIN`. Unset, `POST /webhooks/resend/inbound` is off. |
+| `RESEND_INBOUND_WEBHOOK_PREVIOUS_SECRET` | Optional, during a rotation. Needs `RESEND_INBOUND_WEBHOOK_SECRET`. |
+| `INBOUND_EMAIL_DOMAIN` | The hub's receiving domain (IE-1), for example `reply.example.com`; only recipients at exactly this domain route. Read only with `RESEND_INBOUND_WEBHOOK_SECRET`. |
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_LIVEMODE`, `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL` | Stripe wallet top-ups (stripe.md S-9), all or none. None set: top-ups and `POST /webhooks/stripe` are off. A secret or restricted key (`sk_`/`rk_`), the endpoint's `whsec_` secret, `true` or `false` matching the key's mode, and https return URLs. |
 | `STRIPE_WEBHOOK_PREVIOUS_SECRET`, `STRIPE_CURRENCY`, `STRIPE_TOPUP_MIN`, `STRIPE_TOPUP_MAX`, `STRIPE_API_VERSION`, `STRIPE_BASE_URL` | Optional: a rotation secret, `usd`, 500 and 50000 minor units, the account's default API version, `https://api.stripe.com`. |
 | `STRIPE_PLAN_PRICES`, `STRIPE_PLAN_RETURN_URL` | Hub plans (plans.md PL-13), both or none, and only with the top-up variables above. A JSON object from all eleven PL-2 lookup keys to `price_` IDs, and the https dashboard plan page. None set: `GET /v1/billing/plan` says plans are off, and Checkout and the Portal are 404. |
@@ -539,6 +542,31 @@ redelivery with the same `svix-id` replays the stored action (one suppression, o
 | 413 `ValidationFailed` | Body over 256 KiB. |
 | 200 `{"handled":true}` | The suppression is recorded, or replayed. |
 | 200 `{"handled":false,"reason":…}` | Signed, but nothing to do: an event that suppresses nothing, a shape it does not read, no tags, or no matching delivery. Resend does not retry it. |
+
+## Resend inbound webhook (`/webhooks/resend/inbound`, no auth)
+
+Resend posts received mail here (inbound-email.md IE-8, slice 1). It ships dark: on only when
+`RESEND_INBOUND_WEBHOOK_SECRET` and `INBOUND_EMAIL_DOMAIN` are set, and no inbound domain or
+provider route is configured yet. Subscribe the endpoint to `email.received` only; other signed
+events are acknowledged and read no further.
+
+The signature check is the one above, with this endpoint's own secret. The route reads `to`,
+`cc` and `bcc` (first 50 together) for `<handle>[+<ref>]@INBOUND_EMAIL_DOMAIN` (IE-3); each
+tenant named gets one `inbound_emails` row through `inbound.email.receive`, keyed
+`email-inbound:<email_id>`, with an `inbound.email.received` outbox event. Only the sender
+address and a one-line subject are stored; the body is fetched later (slice 2). Per tenant at
+most 2000 rows are admitted in 24 hours (IE-17); past that the mail is logged, not stored.
+Log lines carry IDs and reasons only, never an address or subject (IE-4).
+
+| Answer | When |
+|---|---|
+| 401 `Unauthorized` | Missing, wrong or stale signature. One body for all of them. |
+| 400 `ValidationFailed` | Signed, but not JSON, or an `email.received` it cannot read. Resend retries it. |
+| 413 `ValidationFailed` | Body over 256 KiB. |
+| 503 `Unavailable` | The database did not answer or was busy. Resend retries; a stored receive replays. |
+| 500 `Internal` | Any other fault (a bug). Resend retries too; the log line says `failed`. |
+| 200 `{"handled":true}` | Stored for every routed tenant, or replayed. A tenant past the admission cap stores nothing and is logged (`over admission`), yet the answer is still 200. |
+| 200 `{"handled":false,"reason":…}` | `unrouted` (no hub recipient), or `unread_event`. |
 
 ## Stripe webhook (`/webhooks/stripe`, no auth)
 
@@ -979,6 +1007,7 @@ against the pinned Supabase Root 2021 CA.
    | `UNSUBSCRIBE_TOKEN_SECRET` | yes (verifies links) | yes (signs links, only with `DELIVERY_WORKER=on`) |
    | `UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET` | yes (verifies links) | yes (only with `DELIVERY_WORKER=on`, if rotating) |
    | `RESEND_WEBHOOK_SECRET`, `RESEND_WEBHOOK_PREVIOUS_SECRET` | yes | no |
+   | `RESEND_INBOUND_WEBHOOK_SECRET`, `RESEND_INBOUND_WEBHOOK_PREVIOUS_SECRET`, `INBOUND_EMAIL_DOMAIN` | yes | no |
    | `SIGN_IN_LIMITER_SECRET`, `SIGN_IN_LIMITER_PREVIOUS_SECRET` (the dashboard project holds the same value as `DASHBOARD_SIGN_IN_LIMITER_SECRET`; deploy the API first) | yes | no |
    | `ACTIVEPIECES_KEY_SECRET` (and `ACTIVEPIECES_KEY_PREVIOUS_SECRET`, `ACTIVEPIECES_ALLOW_LOOPBACK`) | yes | yes (only with `ACTIVEPIECES_WEBHOOK_WORKER=on`) |
    | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CHANNEL_SECRET`, `GOOGLE_OAUTH_BASE_URL`, `GOOGLE_TOKEN_BASE_URL`, `GOOGLE_API_BASE_URL` | yes | yes (only with `CALENDAR_WORKER=on`; the three `*_BASE_URL` are optional overrides read by both through `google-env.ts`) |

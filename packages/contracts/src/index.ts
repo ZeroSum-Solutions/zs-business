@@ -129,5 +129,6 @@ export * from "./shopify.js";
 export * from "./automation.js";
 export * from "./browser.js";
 export * from "./voice.js";
+export * from "./inbound-email.js";
 export * from "./templates/industry.js";
 export * from "./sign-in-limit.js";

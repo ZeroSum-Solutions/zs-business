@@ -172,6 +172,8 @@ export const READ_ONLY_ALLOWED_ACTIONS: ReadonlySet<string> = new Set([
   "outreach.mailbox.disconnect",
   // booking-self-service.md BS-12: a customer can always cancel their own booking, even when the business is read-only.
   "booking.self_cancel",
+  // inbound-email.md IE-32: mail is never lost while a plan lapses; the owner reads it and pays to reply.
+  "inbound.email.receive",
 ]);
 
 /** PL-8, PL-27: the counted limits, by the action that would add one more. */

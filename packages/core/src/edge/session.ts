@@ -185,13 +185,14 @@ import {
 } from "../inbox/index.js";
 import { smsStatusHandlers } from "../delivery/sms-status.js";
 import { voiceHandlers } from "../voice/actions.js";
+import { inboundEmailHandlers } from "../inbound-email/actions.js";
 import { suppressionHandlers } from "../delivery/suppression.js";
 import { automationHandlers } from "../automation/handlers.js";
 import { intakeHandlers, linkIntakeItem, rejectIntakeItem, signBookingKey } from "../intake/index.js";
 import { listBookingPages, listIntakeItems } from "../reads/intake.js";
 import { getContact, listContacts, listDeals, listPipelines } from "../reads/crm.js";
 import { homeResults } from "../reads/home.js";
-import { getThread, listThreads, loadReply } from "../reads/inbox.js";
+import { getThread, listThreads, loadReply, type InboxReadOptions } from "../reads/inbox.js";
 import { findSlots, getBooking, listBookings, listResources } from "../reads/booking.js";
 import { memberProfile, requireMember } from "../members/access.js";
 import { listMembers, memberHandlers } from "../members/handlers.js";
@@ -313,7 +314,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 
 const dispatch = createDispatcher({
   ...bookingHandlers, ...bookingCancelHandlers, ...bookingOutcomeHandlers, ...bookingContactHandlers, ...bookingSelfServiceHandlers, ...crmHandlers, ...stageHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
-  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...voiceHandlers, ...topUpHandlers, ...planHandlers, ...calendarHandlers, ...connectionHandlers, ...automationHandlers, ...siteHandlers,
+  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...voiceHandlers, ...inboundEmailHandlers, ...topUpHandlers, ...planHandlers, ...calendarHandlers, ...connectionHandlers, ...automationHandlers, ...siteHandlers,
   ...agentHandlers, ...templateHandlers, ...templatedKindHandlers, ...browserHandlers, ...businessHandlers, ...enrichmentHandlers, ...outreachHandlers, ...transcriptionHandlers, ...imageHandlers, ...documentIntakeHandlers,
   ...setupHandlers,
 });
@@ -975,13 +976,17 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       }
       return discarded;
     },
-    listThreads: (query: unknown) => {
+    /**
+     * IE-24: sender threads and email entries are read only when the caller asks, which only the
+     * member HTTP routes do. The stdio MCP server shares this session and leaves them out (IE-33).
+     */
+    listThreads: (query: unknown, options: InboxReadOptions = {}) => {
       const parsed = parseInput(listThreadsQuerySchema, query, "query");
-      return read("inbox.drafts", (tx) => listThreads(tx, tenantId, parsed));
+      return read("inbox.drafts", (tx) => listThreads(tx, tenantId, parsed, { includeEmail: options.includeEmail === true }));
     },
-    getThread: (threadId: unknown) => {
+    getThread: (threadId: unknown, options: InboxReadOptions = {}) => {
       const id = parseInput(threadIdSchema, threadId, "thread ID");
-      return read("inbox.drafts", (tx) => getThread(tx, tenantId, id));
+      return read("inbox.drafts", (tx) => getThread(tx, tenantId, id, { includeEmail: options.includeEmail === true }));
     },
     /** H-3: the clock is read once, here, so both weeks come from the same instant. */
     homeResults: (query: unknown) => {

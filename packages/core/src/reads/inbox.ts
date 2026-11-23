@@ -1,5 +1,5 @@
-// M3c inbox reads (inbox-home.md I-1..I-3, I-8). Threads are derived from website requests and
-// replies, so there is no thread row to keep in step. They run inside ScopedDatabase.tenant, so
+// M3c inbox reads (inbox-home.md I-1..I-3, I-8). Threads are derived from website requests,
+// replies and (revision 5, member sessions only) inbound email, so there is no thread row to keep in step. They run inside ScopedDatabase.tenant, so
 // RLS limits rows to the tenant; the tenant_id filters are defence in depth.
 import {
   NotFound,
@@ -23,6 +23,22 @@ import { decodeCursor, encodeCursor, microsToTimestamp, timestampToMicros } from
 import { page } from "./page.js";
 
 const PREVIEW_LENGTH = 140;
+
+/**
+ * Who reads. Inbound email (inbound-email.md IE-24, IE-33) is shown to member sessions only: MCP and
+ * automation tokens see no sender thread and no email entry before slice 4, so they leave it false.
+ */
+export interface InboxReadOptions {
+  includeEmail?: boolean;
+}
+
+/**
+ * IE-24 slice 1: an email a sender thread shows. Received over the hub's own address (never a Gmail
+ * mailbox), not dropped, not a duplicate, not spam, not bound to a contact and not rejected.
+ */
+const VISIBLE_EMAIL = (alias: string) => `${alias}.provider = 'resend' AND ${alias}.status IN ('received','ready')
+       AND ${alias}.kind <> 'spam' AND ${alias}.duplicate_of IS NULL AND ${alias}.contact_id IS NULL
+       AND (${alias}.review IS NULL OR ${alias}.review IN ('possible_match','unmatched'))`;
 
 interface ReplyRow {
   id: string;
@@ -89,11 +105,11 @@ interface ThreadRow {
 
 /**
  * I-1: one row per customer with a website request or a reply that is not discarded, and one
- * per website request that names no contact. `$1` is the tenant; `kind` and `id` name the
- * parameters that optionally narrow it to one thread. Activity is the latest request, draft,
- * approval or settle time.
+ * per website request that names no contact; with `email`, one per sender of a visible inbound
+ * email (IE-24). `$1` is the tenant; `kind` and `id` name the parameters that optionally narrow
+ * it to one thread. Activity is the latest request, draft, approval, settle or receive time.
  */
-const threads = (kindParam: string, idParam: string) => `
+const threads = (kindParam: string, idParam: string, email: boolean) => `
   WITH requests AS (
     SELECT contact_id, max(created_at) AS last_in
       FROM intake_items WHERE tenant_id=$1 AND contact_id IS NOT NULL
@@ -116,13 +132,19 @@ const threads = (kindParam: string, idParam: string) => `
     UNION ALL
     SELECT 'visitor', i.id, i.created_at, false, i.status = 'possible_match', 0
       FROM intake_items i WHERE i.tenant_id=$1 AND i.contact_id IS NULL
-       AND (${kindParam}::text IS NULL OR (${kindParam} = 'visitor' AND i.id = ${idParam}::uuid))
+       AND (${kindParam}::text IS NULL OR (${kindParam} = 'visitor' AND i.id = ${idParam}::uuid))${email ? `
+    UNION ALL
+    SELECT 'sender', e.sender_key, max(e.received_at), false, true, 0
+      FROM inbound_emails e WHERE e.tenant_id=$1 AND ${VISIBLE_EMAIL("e")}
+       AND (${kindParam}::text IS NULL OR (${kindParam} = 'sender' AND e.sender_key = ${idParam}::uuid))
+     GROUP BY e.sender_key` : ""}
   )
   SELECT kind, id, last_activity_at, needs_reply, needs_review, drafts,
          ${timestampToMicros("last_activity_at")} AS sort_value
     FROM threads`;
 
-const threadId = (kind: ThreadKind, id: string) => `${kind === "customer" ? "c" : "v"}_${id}`;
+const THREAD_PREFIX: Record<ThreadKind, string> = { customer: "c", visitor: "v", sender: "e" };
+const threadId = (kind: ThreadKind, id: string) => `${THREAD_PREFIX[kind]}_${id}`;
 /** Cuts by code point, so an emoji is never split in half. */
 const clip = (text: string | null) => {
   if (text === null) return null;
@@ -130,7 +152,7 @@ const clip = (text: string | null) => {
   return chars.length <= PREVIEW_LENGTH ? text : `${chars.slice(0, PREVIEW_LENGTH - 1).join("")}…`;
 };
 
-/** Names, addresses and the latest text for a page of threads, in two queries. */
+/** Names, addresses and the latest text for a page of threads, in one query per thread kind on the page. */
 async function summaries(tx: Transaction, tenantId: string, rows: readonly ThreadRow[]): Promise<ThreadSummary[]> {
   const contactIds = rows.filter((row) => row.kind === "customer").map((row) => row.id);
   const itemIds = rows.filter((row) => row.kind === "visitor").map((row) => row.id);
@@ -152,7 +174,17 @@ async function summaries(tx: Transaction, tenantId: string, rows: readonly Threa
     "SELECT id, submitted_name, submitted_email, notes FROM intake_items WHERE tenant_id=$1 AND id = ANY($2::uuid[])",
     [tenantId, itemIds],
   )).rows.map((row) => [row.id, row]));
-  return rows.map((row) => {
+  const senderKeys = rows.filter((row) => row.kind === "sender").map((row) => row.id);
+  // A sender is named by their latest visible email.
+  const senders = new Map(senderKeys.length === 0 ? [] : (await tx.query<{
+    sender_key: string; from_address: string; from_name: string | null; subject: string | null;
+  }>(
+    `SELECT DISTINCT ON (e.sender_key) e.sender_key, e.from_address, e.from_name, e.subject
+       FROM inbound_emails e WHERE e.tenant_id=$1 AND e.sender_key = ANY($2::uuid[]) AND ${VISIBLE_EMAIL("e")}
+      ORDER BY e.sender_key, e.received_at DESC, e.id DESC`,
+    [tenantId, senderKeys],
+  )).rows.map((row) => [row.sender_key, row]));
+  return rows.flatMap((row): ThreadSummary | ThreadSummary[] => {
     const base = {
       id: threadId(row.kind, row.id),
       kind: row.kind,
@@ -170,6 +202,16 @@ async function summaries(tx: Transaction, tenantId: string, rows: readonly Threa
         email, preview: clip(contact.preview),
       };
     }
+    if (row.kind === "sender") {
+      // The scan and this lookup are two statements: an email deleted in between (the service role deletes)
+      // can leave a sender with no visible email. That thread is gone; it is left out, never a 500.
+      const sender = senders.get(row.id);
+      if (!sender) return [];
+      return [{
+        ...base, contactId: null, intakeItemId: null,
+        name: sender.from_name ?? sender.from_address, email: sender.from_address, preview: clip(sender.subject),
+      }];
+    }
     const visitor = visitors.get(row.id)!;
     return {
       ...base, contactId: null, intakeItemId: row.id,
@@ -179,17 +221,21 @@ async function summaries(tx: Transaction, tenantId: string, rows: readonly Threa
 }
 
 /** I-8: latest activity first; a cursor continues right after the last thread of the page before. */
-export async function listThreads(tx: Transaction, tenantId: string, query: ListThreadsQuery): Promise<ThreadPage> {
+export async function listThreads(
+  tx: Transaction, tenantId: string, query: ListThreadsQuery, options: InboxReadOptions = {},
+): Promise<ThreadPage> {
   const cursor = decodeCursor("inbox.recent", query);
   const position = cursor
     ? `WHERE (last_activity_at < ${microsToTimestamp("$6")} OR (last_activity_at = ${microsToTimestamp("$6")} AND id > $7::uuid))`
     : "";
   const rows = (await tx.query<ThreadRow>(
-    `SELECT * FROM (${threads("$4", "$5")}) t ${position} ORDER BY last_activity_at DESC, id LIMIT $2 OFFSET $3`,
+    `SELECT * FROM (${threads("$4", "$5", options.includeEmail === true)}) t ${position} ORDER BY last_activity_at DESC, id LIMIT $2 OFFSET $3`,
     [tenantId, query.limit + 1, query.offset, null, null, ...(cursor ?? [])],
   )).rows;
-  return page(await summaries(tx, tenantId, rows), query,
-    (index) => encodeCursor("inbox.recent", [rows[index]!.sort_value, rows[index]!.id]));
+  // "More" and the cursor come from the scanned rows, not the summaries: a sender whose last email went
+  // between the two queries leaves a short page, never a lost next page.
+  const scanned = page(rows, query, (index) => encodeCursor("inbox.recent", [rows[index]!.sort_value, rows[index]!.id]));
+  return { ...scanned, items: await summaries(tx, tenantId, scanned.items) };
 }
 
 interface RequestRow {
@@ -206,11 +252,17 @@ interface RequestRow {
 }
 
 /** I-2, I-3: one thread with its latest entries, oldest first. */
-export async function getThread(tx: Transaction, tenantId: string, id: ThreadId): Promise<ThreadDetail> {
-  const kind: ThreadKind = id.startsWith("c_") ? "customer" : "visitor";
+export async function getThread(
+  tx: Transaction, tenantId: string, id: ThreadId, options: InboxReadOptions = {},
+): Promise<ThreadDetail> {
+  const kind: ThreadKind = id.startsWith("c_") ? "customer" : id.startsWith("e_") ? "sender" : "visitor";
   const key = id.slice(2);
-  const row = (await tx.query<ThreadRow>(threads("$2", "$3"), [tenantId, kind, key])).rows[0];
+  const email = options.includeEmail === true;
+  // A reader without email sees no sender thread: the same 404 as an unknown ID.
+  if (kind === "sender" && !email) throw new NotFound("Thread not found");
+  const row = (await tx.query<ThreadRow>(threads("$2", "$3", email), [tenantId, kind, key])).rows[0];
   if (!row) throw new NotFound("Thread not found");
+  if (kind === "sender") return senderThread(tx, tenantId, key, row);
   const [summary] = await summaries(tx, tenantId, [row]);
   const limit = THREAD_ENTRY_LIMIT + 1;
   const requests = (await tx.query<RequestRow>(
@@ -262,4 +314,38 @@ export async function getThread(tx: Transaction, tenantId: string, id: ThreadId)
   };
 }
 
-const entryId = (entry: ThreadEntry) => (entry.type === "request" ? entry.id : entry.reply.id);
+const entryId = (entry: ThreadEntry) => (entry.type === "reply" ? entry.reply.id : entry.id);
+
+/**
+ * IE-24 slice 1: a sender thread holds that sender's visible emails as metadata only (sender,
+ * subject, time); a `received` row is marked content pending. No body is read here.
+ */
+async function senderThread(tx: Transaction, tenantId: string, senderKey: string, row: ThreadRow): Promise<ThreadDetail> {
+  const [summary] = await summaries(tx, tenantId, [row]);
+  // Each query reads its own snapshot: a sender whose last email was dropped or erased in between has no thread.
+  if (!summary) throw new NotFound("Thread not found");
+  const emails = (await tx.query<{
+    id: string; received_at: Date; from_address: string; from_name: string | null; subject: string | null; status: string;
+  }>(
+    `SELECT e.id, e.received_at, e.from_address, e.from_name, e.subject, e.status
+       FROM inbound_emails e WHERE e.tenant_id=$1 AND e.sender_key=$2 AND ${VISIBLE_EMAIL("e")}
+      ORDER BY e.received_at DESC, e.id DESC LIMIT $3`,
+    [tenantId, senderKey, THREAD_ENTRY_LIMIT + 1],
+  )).rows;
+  const entries = emails.map((email): ThreadEntry => ({
+    type: "email",
+    id: email.id,
+    at: email.received_at.toISOString(),
+    fromAddress: email.from_address,
+    fromName: email.from_name,
+    subject: email.subject,
+    contentPending: email.status === "received",
+  }));
+  if (entries.length === 0) throw new NotFound("Thread not found");
+  return {
+    ...summary,
+    phone: null,
+    entries: entries.slice(0, THREAD_ENTRY_LIMIT).reverse(),
+    olderEntries: entries.length > THREAD_ENTRY_LIMIT,
+  };
+}

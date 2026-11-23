@@ -858,7 +858,7 @@ describe("plan limits (PL-8)", () => {
       "member.remove", "connection.disconnect", "calendar.google.disconnect", "automation.token.revoke",
       "approval.reject", "approval.revoke", "inbox.reply.discard",
       "outreach.campaign.pause", "outreach.prospect.stop", "outreach.mailbox.disconnect",
-      "booking.self_cancel",
+      "booking.self_cancel", "inbound.email.receive",
     ].sort());
     expect(PLAN_CHECKOUT_CREATE_ACTION).toBe("plan.checkout.create");
   });

@@ -65,6 +65,7 @@ import { ACTIVEPIECES_INBOUND_PREFIX, activepiecesInboundRoutes } from "./public
 import { createPostgresRateLimiter } from "./public/postgres-limiter.js";
 import { publicRoutes, RateLimited, type PublicIntakeConfig } from "./public/routes.js";
 import { resendWebhookRoutes, type ResendWebhookConfig } from "./public/resend-webhook.js";
+import { resendInboundWebhookRoutes, type ResendInboundWebhookConfig } from "./public/resend-inbound-webhook.js";
 import { stripeWebhookRoutes, type StripeWebhookConfig } from "./public/stripe-webhook.js";
 import { googleCalendarRoutes, type GoogleCalendarConfig } from "./public/google-calendar.js";
 import { connectionsCallbackRoutes, type ConnectionsApiConfig } from "./public/connections.js";
@@ -120,6 +121,8 @@ export interface AppDependencies {
   readonly templated?: Omit<TemplatedAgentsConfig, "bookingLink">;
   /** Resend email events, bounces and complaints feeding suppression (resend.md R-7, R-8); absent means off. */
   readonly resendWebhook?: ResendWebhookConfig;
+  /** Received mail (inbound-email.md IE-8); absent means POST /webhooks/resend/inbound is 404. */
+  readonly resendInboundWebhook?: ResendInboundWebhookConfig;
   /** Stripe Checkout for wallet top-ups (stripe.md S-1, S-2); absent means POST /v1/wallet/top-ups is 404. */
   readonly stripe?: StripeClient;
   /** Hub plans (plans.md PL-4..PL-7); absent means plan checkout and the Portal are 404. Needs `stripe`. */
@@ -314,6 +317,7 @@ export function createApp(deps: AppDependencies) {
   if (deps.unsubscribe) app.route("/public/v1", unsubscribeRoutes(edge, deps.unsubscribe, requestEdge));
   if (deps.signInLimit) app.route(SIGN_IN_LIMIT_PREFIX, signInLimitRoutes(edge, deps.signInLimit));
   if (deps.resendWebhook) app.route("/", resendWebhookRoutes(edge, deps.resendWebhook, requestEdge));
+  if (deps.resendInboundWebhook) app.route("/", resendInboundWebhookRoutes(edge, deps.resendInboundWebhook, requestEdge));
   if (deps.stripeWebhook) app.route("/", stripeWebhookRoutes(edge, deps.stripeWebhook, requestEdge));
   if (deps.googleCalendar) app.route("/", googleCalendarRoutes(deps.googleCalendar, requestEdge));
   if (deps.connections) app.route("/", connectionsCallbackRoutes(deps.connections, requestEdge));
@@ -477,6 +481,7 @@ export { allowAllBots, type BotCheck, type PublicIntakeConfig } from "./public/r
 export type { UnsubscribeConfig } from "./public/unsubscribe.js";
 export type { SignInLimitConfig } from "./public/sign-in-limit.js";
 export type { ResendWebhookConfig } from "./public/resend-webhook.js";
+export type { ResendInboundWebhookConfig } from "./public/resend-inbound-webhook.js";
 export type { StripeWebhookConfig } from "./public/stripe-webhook.js";
 export type { GoogleCalendarConfig } from "./public/google-calendar.js";
 export type { ConnectionsApiConfig } from "./public/connections.js";

@@ -22,7 +22,12 @@ export {
   settleReplyDelivery,
   type SendApproval,
 } from "./inbox/index.js";
-export { getThread, listThreads, loadReply } from "./reads/inbox.js";
+export { getThread, listThreads, loadReply, type InboxReadOptions } from "./reads/inbox.js";
+export { inboundEmailHandlers, inboundEmailId, inboundSenderKey, OVER_ADMISSION } from "./inbound-email/actions.js";
+export {
+  addressOf, collapseByTenant, INBOUND_EMAIL_EVENT_TYPE, inboundEmailEventSchema, inboundSubject, routeRecipients, senderAddress,
+  type InboundEmailEvent, type RecipientRouting, type RoutedRecipient,
+} from "./inbound-email/routing.js";
 export { homeResults } from "./reads/home.js";
 export { firstInstantAtOrAfter, weekRanges } from "./home/week.js";
 export {

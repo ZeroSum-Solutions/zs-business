@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 import { parseImageRunnerEnv } from "../src/images/config.js";
 import { parseImageEnv, parseServerEnv, PLACEHOLDER_BOOKING_KEY_SECRET, PLACEHOLDER_JWT_SECRET, PLACEHOLDER_UNSUBSCRIBE_TOKEN_SECRET } from "../src/config.js";
 import {
+  INBOUND_EMAIL_DOMAIN,
   KEY_SECRET,
   PREVIOUS_KEY_SECRET,
+  PREVIOUS_RESEND_INBOUND_WEBHOOK_SECRET,
   PREVIOUS_RESEND_WEBHOOK_SECRET,
   PREVIOUS_TWILIO_AUTH_TOKEN,
   PREVIOUS_UNSUBSCRIBE_SECRET,
+  RESEND_INBOUND_WEBHOOK_SECRET,
   RESEND_WEBHOOK_SECRET,
   SECRET,
   TWILIO_ACCOUNT_SID,
@@ -179,6 +182,47 @@ describe("parseServerEnv", () => {
     }
     expect(() => parseServerEnv({ ...base, RESEND_WEBHOOK_SECRET: short })).toThrow(/too short/);
     expect(() => parseServerEnv({ ...base, RESEND_WEBHOOK_SECRET: "sk_live_x" })).toThrow(/whsec_/);
+  });
+
+  it("keeps the inbound email webhook off until its secret is set, then needs the domain (inbound-email.md IE-8, IE-3)", () => {
+    expect(parseServerEnv(base).resendInboundWebhook).toBeNull();
+    // The bounce secret and the domain alone turn nothing on.
+    expect(parseServerEnv({ ...base, RESEND_WEBHOOK_SECRET, INBOUND_EMAIL_DOMAIN }).resendInboundWebhook).toBeNull();
+    expect(() => parseServerEnv({ ...base, RESEND_INBOUND_WEBHOOK_PREVIOUS_SECRET: PREVIOUS_RESEND_INBOUND_WEBHOOK_SECRET }))
+      .toThrow(/RESEND_INBOUND_WEBHOOK_PREVIOUS_SECRET needs RESEND_INBOUND_WEBHOOK_SECRET/);
+    expect(() => parseServerEnv({ ...base, RESEND_INBOUND_WEBHOOK_SECRET }))
+      .toThrow(/RESEND_INBOUND_WEBHOOK_SECRET needs INBOUND_EMAIL_DOMAIN/);
+    const env = parseServerEnv({
+      ...base, RESEND_INBOUND_WEBHOOK_SECRET, RESEND_INBOUND_WEBHOOK_PREVIOUS_SECRET: PREVIOUS_RESEND_INBOUND_WEBHOOK_SECRET,
+      INBOUND_EMAIL_DOMAIN: "Reply.HaldenRowe.Example",
+    });
+    expect(env.resendInboundWebhook).toEqual({
+      domain: INBOUND_EMAIL_DOMAIN,
+      secrets: { current: RESEND_INBOUND_WEBHOOK_SECRET, previous: PREVIOUS_RESEND_INBOUND_WEBHOOK_SECRET },
+    });
+    // It turns no other webhook on.
+    expect(env.resendWebhook).toBeNull();
+  });
+
+  it("refuses an inbound key that the bounce webhook also holds, rotation keys included", () => {
+    const inbound = { ...base, INBOUND_EMAIL_DOMAIN };
+    for (const env of [
+      { RESEND_INBOUND_WEBHOOK_SECRET: RESEND_WEBHOOK_SECRET, RESEND_WEBHOOK_SECRET },
+      { RESEND_INBOUND_WEBHOOK_SECRET, RESEND_WEBHOOK_SECRET, RESEND_WEBHOOK_PREVIOUS_SECRET: RESEND_INBOUND_WEBHOOK_SECRET },
+      { RESEND_INBOUND_WEBHOOK_SECRET, RESEND_INBOUND_WEBHOOK_PREVIOUS_SECRET: RESEND_WEBHOOK_SECRET, RESEND_WEBHOOK_SECRET },
+      // The same signing bytes without base64 padding are the same key.
+      { RESEND_INBOUND_WEBHOOK_SECRET: RESEND_WEBHOOK_SECRET.replace(/=+$/, ""), RESEND_WEBHOOK_SECRET },
+    ]) expect(() => parseServerEnv({ ...inbound, ...env })).toThrow(/must differ from the RESEND_WEBHOOK secrets/);
+    expect(parseServerEnv({ ...inbound, RESEND_INBOUND_WEBHOOK_SECRET, RESEND_WEBHOOK_SECRET }).resendInboundWebhook).not.toBeNull();
+  });
+
+  it("refuses a malformed inbound secret or domain, naming the variable", () => {
+    for (const secret of ["", "whsec_", "sk_live_x", `${RESEND_INBOUND_WEBHOOK_SECRET} `])
+      expect(() => parseServerEnv({ ...base, RESEND_INBOUND_WEBHOOK_SECRET: secret, INBOUND_EMAIL_DOMAIN }), secret)
+        .toThrow(/RESEND_INBOUND_WEBHOOK_SECRET/);
+    for (const domain of ["", "localhost", "reply..example", "https://reply.example", "reply.example/", "a b.example", "user@reply.example"])
+      expect(() => parseServerEnv({ ...base, RESEND_INBOUND_WEBHOOK_SECRET, INBOUND_EMAIL_DOMAIN: domain }), domain)
+        .toThrow(/INBOUND_EMAIL_DOMAIN/);
   });
 
   it("keeps the Twilio webhooks off until the auth token is set, then needs the account and base URL (twilio.md T-9)", () => {

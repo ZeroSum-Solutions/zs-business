@@ -16,6 +16,9 @@ const WORKER_ONLY = new Set([
   // The runtime role reads this table's columns one by one (never the sealed token, cursor or lease), so `select *` is
   // refused; packages/db/test/outreach.test.ts proves the isolation of its allowed columns.
   "outreach_mailboxes",
+  // The same for inbound email (inbound-email.md IE-31: never the lease columns); packages/db/test/inbound-email.test.ts
+  // proves the isolation of its allowed columns.
+  "inbound_emails",
 ]);
 let harness: TestDatabase;
 let fixture: TwoTenantFixture;
@@ -37,10 +40,13 @@ describe("tenant isolation under actual runtime and privileged roles", () => {
   it("checks every public tenant table from the catalog, including future migrations", async () => {
     const tables = await fixture.service(catalogTenantTables);
     expect(tables.length).toBeGreaterThan(0);
-    await fixture.service(async (tx) => {
-      await seedTenantTables(tx, fixture.a.tenantId, tables);
-      await seedTenantTables(tx, fixture.b.tenantId, tables);
-    });
+    const deferred = await fixture.service(async (tx) => ({
+      a: await seedTenantTables(tx, fixture.a.tenantId, tables),
+      b: await seedTenantTables(tx, fixture.b.tenantId, tables),
+    }));
+    // Rows the service role may not insert (inbound email, IE-31) go in as each tenant's runtime role.
+    for (const [tenant, rows] of [[fixture.a, deferred.a], [fixture.b, deferred.b]] as const)
+      for (const row of rows) await tenant.run((tx) => tx.query(row.sql, row.params));
     for (const table of tables) {
       expect(table.rls, table.name).toBe(true);
       expect(table.forced, table.name).toBe(true);

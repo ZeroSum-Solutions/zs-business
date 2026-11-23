@@ -22,6 +22,7 @@ import {
   type RateLimiter,
   type SignInLimitConfig,
   type ResendWebhookConfig,
+  type ResendInboundWebhookConfig,
   type TwilioWebhookConfig,
   type UnsubscribeConfig,
 } from "../src/app.js";
@@ -53,6 +54,10 @@ export const WORKER_TOKEN = ["test", "worker", "w".repeat(32)].join("-");
 /** Synthetic document-intake worker bearer token, built at runtime like SECRET. */
 export const INTAKE_WORKER_TOKEN = ["test", "intake", "i".repeat(32)].join("-");
 export const ACTIVEPIECES_KEY_SECRET = ["test", "activepieces", "a".repeat(32)].join("-");
+/** The inbound endpoint's own secrets and the hub's inbound domain (inbound-email.md IE-8, IE-1). */
+export const RESEND_INBOUND_WEBHOOK_SECRET = "whsec_" + Buffer.from(["test", "inbound", "i".repeat(32)].join("-")).toString("base64");
+export const PREVIOUS_RESEND_INBOUND_WEBHOOK_SECRET = "whsec_" + Buffer.from(["test", "inbound", "p".repeat(32)].join("-")).toString("base64");
+export const INBOUND_EMAIL_DOMAIN = "reply.haldenrowe.example";
 export const PREVIOUS_RESEND_WEBHOOK_SECRET = "whsec_" + Buffer.from(["test", "resend", "r".repeat(32)].join("-")).toString("base64");
 
 /** A signed-in member: an auth user with a live session and a membership row. */
@@ -142,6 +147,8 @@ export interface HarnessOptions {
   signInLimit?: Partial<SignInLimitConfig>;
   /** Turns POST /webhooks/resend on; the signing secret defaults to RESEND_WEBHOOK_SECRET. */
   resendWebhook?: Partial<ResendWebhookConfig>;
+  /** Turns POST /webhooks/resend/inbound on (inbound-email.md IE-8); secret and domain default to the test values. */
+  resendInboundWebhook?: Partial<ResendInboundWebhookConfig>;
   /** Turns the /webhooks/twilio routes on with the TWILIO_* test values below. */
   twilioWebhook?: Partial<TwilioWebhookConfig>;
   /** Turns the Activepieces routes on; the key defaults to ACTIVEPIECES_KEY_SECRET. */
@@ -200,6 +207,9 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
     ...(options.resendWebhook
       ? { resendWebhook: { secrets: { current: RESEND_WEBHOOK_SECRET }, ...options.resendWebhook } }
       : {}),
+    ...(options.resendInboundWebhook
+      ? { resendInboundWebhook: { secrets: { current: RESEND_INBOUND_WEBHOOK_SECRET }, domain: INBOUND_EMAIL_DOMAIN, ...options.resendInboundWebhook } }
+      : {}),
     ...(options.twilioWebhook
       ? { twilioWebhook: {
         tokens: { current: TWILIO_AUTH_TOKEN }, accountSid: TWILIO_ACCOUNT_SID, webhookBaseUrl: TWILIO_WEBHOOK_BASE_URL,
@@ -229,7 +239,7 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
  * statements), with the Activepieces routes and the remote MCP endpoint on. Owner tokens from
  * `ApiHarness.a.token` work on it as long as `clock` does not pass their hour.
  */
-export function appOnDatabase(db: ScopedDatabase, options: { clock?: { now(): Date }; onError?: (error: unknown) => void; activepieces?: boolean; requestTimeoutMs?: number; usageWriteTimeoutMs?: number; signInLimit?: { limiter?: RateLimiter; secrets?: SignInLimitConfig["secrets"] }; sites?: { store: SiteObjectStore; compiler: SiteCompiler } } = {}): App {
+export function appOnDatabase(db: ScopedDatabase, options: { clock?: { now(): Date }; onError?: (error: unknown) => void; activepieces?: boolean; requestTimeoutMs?: number; usageWriteTimeoutMs?: number; signInLimit?: { limiter?: RateLimiter; secrets?: SignInLimitConfig["secrets"] }; sites?: { store: SiteObjectStore; compiler: SiteCompiler }; resendInboundWebhook?: ResendInboundWebhookConfig } = {}): App {
   const appClock = options.clock ?? clock;
   return createApp({
     verifier: createHs256Verifier(SECRET, { clock: appClock }),
@@ -245,6 +255,7 @@ export function appOnDatabase(db: ScopedDatabase, options: { clock?: { now(): Da
     ...(options.activepieces === false ? {} : { activepieces: { keySecrets: { current: ACTIVEPIECES_KEY_SECRET } } }),
     ...(options.onError ? { onError: options.onError } : {}),
     ...(options.sites ? { sites: options.sites } : {}),
+    ...(options.resendInboundWebhook ? { resendInboundWebhook: options.resendInboundWebhook } : {}),
     ...(options.signInLimit ? { signInLimit: { secrets: options.signInLimit.secrets ?? { current: SIGN_IN_LIMITER_SECRET }, limiter: options.signInLimit.limiter ?? createPostgresRateLimiter(db, appClock) } } : {}),
   });
 }

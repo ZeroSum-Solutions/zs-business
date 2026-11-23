@@ -178,7 +178,7 @@ describe("threads (I-1, I-2, I-3)", () => {
     tick();
     await a.linkIntakeItem(request.itemId, { contactId: known }, randomUUID());
     const after = await a.getThread(`c_${known}`);
-    expect(after.entries.map((entry) => entry.type === "request" ? entry.id : entry.reply.id))
+    expect(after.entries.map((entry) => entry.type === "reply" ? entry.reply.id : entry.id))
       .toEqual([reply.result.id, request.itemId]);
     expect(after.entries[1]).toMatchObject({ type: "request", status: "linked", notes, name: "Not Halden" });
     expect(after.preview).toBe(notes);
@@ -497,7 +497,7 @@ describe("summaries (I-8)", () => {
     expect(capped.entries).toHaveLength(200);
     expect(capped.olderEntries).toBe(true);
     expect(capped.entries[0]).toMatchObject({ type: "request", notes: "request 1" });
-    expect(capped.entries.slice(-3).map((entry) => entry.type === "reply" ? entry.reply.body : entry.notes))
+    expect(capped.entries.slice(-3).map((entry) => entry.type === "reply" ? entry.reply.body : entry.type === "request" ? entry.notes : null))
       .toEqual(["Newest one", "Newest two", "Newest request"]);
   });
 });

@@ -1,13 +1,16 @@
 # M3c: Inbox v1 and Home
 
-Status: contract for M3c (2026-10-20), revision 4. Code follows this file; a change to a
+Status: contract for M3c (2026-10-20), revision 5. Code follows this file; a change to a
 numbered rule needs a new revision of this file first. Revision 2 sends replies through M3b's
 approval records (`approvals.md`): I-5..I-8, H-6 and H-8 changed, and `inbox.approve` gave way
 to M3b's `approve`. Revision 3 (hub review): I-4 keeps each step's record through later steps,
 I-6 binds a resumed send to the caller's key and leaves another owner's approval to them, and
 I-9 limits runtime inserts to drafts. Revision 4 (2026-10-22 audit, B5-06): H-1 checks
 currencies against ISO 4217, not the shape alone, and says what happens to deals stored under the
-earlier check. The I-6 notes of 2026-11-22 (ZSB-41) follow `approvals.md` A-16 and `delivery.md`
+earlier check. Revision 5 (2026-11-22, inbound-email.md IE-24, slice 1): sender threads for
+received email. I-1 adds the sender thread, I-2 the `e_` ID, I-3 the metadata-only `email` entry
+and I-8 its summary; member sessions only. Slice 3 extends these rules to customer threads.
+The I-6 notes of 2026-11-22 (ZSB-41) follow `approvals.md` A-16 and `delivery.md`
 revision 6: the proposal and the send event bind the customer's address.
 
 Scope: the owner's Inbox (one thread per customer, built from what people send through the
@@ -42,9 +45,13 @@ Linking a request (`intake.item.link`) moves it into that customer's thread at o
 the request now names the contact. A visitor's message never lands in a matched contact's
 thread before the owner links it (P-7): an anonymous visitor cannot write into someone
 else's conversation by typing their email.
+- a sender thread for each sender address with at least one received email
+  (`inbound_emails`, `provider = resend`) that is unlinked, unrejected, not a duplicate, not
+  `spam` and of status `received` or `ready` (inbound-email.md IE-24, revision 5). Email From is
+  anonymous input: it never lands in a contact's thread before the owner links it.
 
-**I-2. Thread IDs.** `c_<contactId>` for a customer thread and `v_<intakeItemId>` for a
-visitor thread, lowercase UUIDs. Anything else is a 400; an ID of another tenant, or a contact
+**I-2. Thread IDs.** `c_<contactId>` for a customer thread, `v_<intakeItemId>` for a
+visitor thread and `e_<senderKey>` for a sender thread (revision 5), lowercase UUIDs. Anything else is a 400; an ID of another tenant, or a contact
 with no thread, is a 404 with the fixed `NotFound` body.
 
 **I-3. Entries.** A thread holds, oldest first:
@@ -53,6 +60,9 @@ with no thread, is a 404 with the fixed `NotFound` body.
   times) when it has one. The notes are the form message; the booking is the booking message.
 - `reply`: one per reply that is not discarded: text, status (`draft`, `approved`, `sent`,
   `failed`), who drafted it and when, who approved it and when, and when delivery settled.
+- `email` (revision 5, sender threads only): one per shown received email: sender address and
+  name (null until the content worker reads it), subject (one line, or null), received time and
+  `contentPending` (true while the row is `received`). No text yet (inbound-email.md slice 2).
 Discarded drafts are not shown. A thread returns at most its 200 latest entries and says
 whether older ones exist.
 
@@ -129,7 +139,10 @@ means (revoking its approval stops delivery, A-8, A-10).
   `name`, `email`, `preview` (the last notes or reply text, at most 140 characters),
   `lastActivityAt`, `needsReply`, `needsReview`, `drafts` (waiting drafts).
   `needsReply`: a customer thread whose latest request is newer than its latest approved
-  reply. `needsReview`: a visitor thread still `possible_match`.
+  reply. `needsReview`: a visitor thread still `possible_match`, and every sender thread
+  (revision 5; its `name` and `email` are the sender address, its `preview` the latest subject).
+  Sender threads and `email` entries are in member-session reads only: MCP and automation-token
+  reads list no sender thread and answer `e_` IDs with 404 until inbound-email.md slice 4 (IE-33).
 - `GET /v1/inbox/threads/:threadId`: the summary plus `entries` and `olderEntries`.
 - `POST /v1/inbox/replies` `{ contactId, body }` (draft), `POST /v1/inbox/replies/:id/approve`
   `{}`, `POST /v1/inbox/replies/:id/discard` `{}`; each takes `Idempotency-Key`.
