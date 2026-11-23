@@ -121,12 +121,15 @@ test("an owner sets opening hours, a tone of voice and a policy on a phone, each
   await expect(card.getByTestId("provenance-policies")).toHaveText(/Not set/);
 
   await card.getByRole("switch", { name: "Open on Monday" }).click();
-  await expect(card.getByLabel("Monday opens")).toHaveValue("09:00");
+  // No times are guessed for a day the owner turns on: both are blank until filled.
+  await expect(card.getByLabel("Monday opens")).toHaveValue("");
+  await card.getByLabel("Monday opens").fill("09:00");
   await card.getByLabel("Monday closes").fill("17:30");
   await card.getByLabel("Tone of voice").fill("Warm and plain.");
   await card.getByRole("button", { name: "Add a policy" }).click();
   await card.getByLabel("Title").fill("Cancellation");
   await card.getByLabel("Policy", { exact: true }).fill("Give us 24 hours' notice.");
+  await expect(card.getByRole("button", { name: "Remove Cancellation" })).toHaveText("Remove");
 
   // Nothing on the form is wider than the phone.
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
@@ -135,6 +138,7 @@ test("an owner sets opening hours, a tone of voice and a policy on a phone, each
   await card.getByRole("button", { name: "Save changes" }).click();
   await expect(page.getByRole("status").filter({ hasText: "Saved in this demo only" })).toBeVisible();
   for (const fact of ["hours", "tone", "policies"]) await expect(card.getByTestId(`provenance-${fact}`)).toHaveText(/^Set by an owner on /);
+  await expect(card.getByTestId("policy-row")).toContainText(/Set by an owner on /);
 
   const log = await writes(page);
   expect(log.at(-1)!.payload).toMatchObject({ changes: {
@@ -142,4 +146,15 @@ test("an owner sets opening hours, a tone of voice and a policy on a phone, each
     tone: "Warm and plain.",
     policies: [{ title: "Cancellation", text: "Give us 24 hours' notice." }],
   } });
+});
+
+test("a policy with the longest title still fits a phone, and Remove keeps the title in its name (BP-18)", async ({ page }) => {
+  await openSettings(page);
+  const card = businessCard(page);
+  const title = "W".repeat(60);
+  await card.getByRole("button", { name: "Add a policy" }).click();
+  await card.getByLabel("Title").fill(title);
+  await expect(card.getByRole("button", { name: `Remove ${title}` })).toHaveText("Remove");
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
 });

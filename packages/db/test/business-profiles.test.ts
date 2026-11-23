@@ -284,30 +284,89 @@ describe("tenancy as the runtime role (BP-12, BP-9)", () => {
     expect((await asA((tx) => tx.query("SELECT description FROM business_profiles WHERE tenant_id=$1", [fixture.b.tenantId]))).rowCount).toBe(0);
   });
 
-  it("updates its own hours, tone and policies within their shapes, and cannot touch another tenant's (BP-16..BP-18)", async () => {
+  it("keeps hours, tone, policies and marks to their shapes (BP-16..BP-19)", async () => {
     const hours = { mon: { open: "09:00", close: "17:00" }, tue: null, wed: null, thu: null, fri: null, sat: null, sun: null };
-    const own = await asA((tx) => tx.query(
-      "UPDATE business_profiles SET hours=$1::jsonb, tone='Warm.' WHERE tenant_id=$2 RETURNING hours, tone",
-      [JSON.stringify(hours), fixture.a.tenantId]));
-    expect(own.rows).toEqual([{ hours, tone: "Warm." }]);
-    const refused = async (sql: string, value: unknown) => {
-      await expect(asA((tx) => tx.query(sql, [JSON.stringify(value), fixture.a.tenantId]))).rejects.toMatchObject({ code: "23514" });
-    };
-    const setHours = "UPDATE business_profiles SET hours=$1::jsonb WHERE tenant_id=$2";
-    await refused(setHours, { ...hours, mon: { open: "17:00", close: "09:00" } });
-    await refused(setHours, { ...hours, mon: null });
-    await refused(setHours, { ...hours, mon: { open: "9:00", close: "17:00" } });
-    await refused(setHours, { mon: hours.mon });
-    await refused(setHours, { ...hours, hol: null });
-    // A policy or a mark without an owner's member ID fails its shape before any owner check.
-    await refused("UPDATE business_profiles SET policies=$1::jsonb WHERE tenant_id=$2", [{ title: "Refunds", text: "Ten days." }]);
-    await refused("UPDATE business_profiles SET fact_marks=$1::jsonb WHERE tenant_id=$2", { colour: { setBy: randomUUID(), setAt: "x", revision: 2 } });
-    await expect(asA((tx) => tx.query("UPDATE business_profiles SET tone='  ' WHERE tenant_id=$1", [fixture.a.tenantId])))
-      .rejects.toMatchObject({ code: "23514" });
+    const mark = { setBy: randomUUID(), setAt: "2026-11-22T10:00:00.000Z", revision: 2 };
+    const valid = (fn: string, value: unknown) => asA(async (tx) =>
+      (await tx.query<{ ok: boolean }>(`SELECT public.${fn}($1::jsonb) AS ok`, [JSON.stringify(value)])).rows[0]!.ok);
+    expect(await valid("business_hours_valid", hours)).toBe(true);
+    expect(await valid("business_hours_valid", { ...hours, mon: { open: "18:00", close: "24:00" } })).toBe(true);
+    for (const bad of [{ ...hours, mon: { open: "17:00", close: "09:00" } }, { ...hours, mon: null }, { ...hours, mon: { open: "9:00", close: "17:00" } },
+      { mon: hours.mon }, { ...hours, hol: null }]) {
+      expect(await valid("business_hours_valid", bad)).toBe(false);
+    }
+    expect(await valid("business_fact_marks_valid", { tone: mark, policies: mark })).toBe(true);
+    for (const bad of [{ colour: mark }, { tone: { ...mark, setAt: "x" } }, { tone: { ...mark, revision: 2.5 } },
+      { tone: { ...mark, revision: 2_147_483_648 } }, { tone: { ...mark, revision: 1 } }, { tone: { ...mark, setBy: "not-a-uuid" } }, []]) {
+      expect(await valid("business_fact_marks_valid", bad)).toBe(false);
+    }
+    expect(await valid("business_policies_valid", [{ title: "Refunds", text: "Ten days.", ...mark }])).toBe(true);
+    for (const bad of [[{ title: "Refunds", text: "Ten days." }], [{ title: " Refunds", text: "Ten days.", ...mark }], {},
+      [{ title: "Refunds", text: "Ten days.", ...mark }, { title: "REFUNDS", text: "None.", ...mark }], [{ title: "Re\nfunds", text: "Ten days.", ...mark }],
+      [{ title: "\tRefunds", text: "Ten days.", ...mark }], [{ title: "Refunds", text: "\n\t", ...mark }]]) {
+      expect(await valid("business_policies_valid", bad)).toBe(false);
+    }
+  });
+
+  it("refuses a malformed fact column with its own constraint, before the marks guard reads it", async () => {
+    const refused = (sql: string, constraint: string) =>
+      expect(asA((tx) => tx.query(sql, [fixture.a.tenantId]))).rejects.toMatchObject({ code: "23514", constraint });
+    await refused("UPDATE business_profiles SET fact_marks='[]'::jsonb WHERE tenant_id=$1", "business_profiles_fact_marks");
+    await refused("UPDATE business_profiles SET fact_marks='1'::jsonb WHERE tenant_id=$1", "business_profiles_fact_marks");
+    await refused("UPDATE business_profiles SET policies='{}'::jsonb WHERE tenant_id=$1", "business_profiles_policies");
+    await refused(`UPDATE business_profiles SET fact_marks='{"tone":{"setBy":"not-a-uuid","setAt":"2026-11-22T10:00:00.000Z","revision":2}}'::jsonb WHERE tenant_id=$1`,
+      "business_profiles_fact_marks");
+  });
+
+  it("sets hours, tone and policies only with an owner's mark, and never another tenant's (BP-19, BP-20)", async () => {
+    const owner = randomUUID();
+    const staff = randomUUID();
+    await fixture.service(async (tx) => {
+      for (const [id, role] of [[owner, "owner"], [staff, "staff"]] as const) {
+        await tx.query(
+          "INSERT INTO tenant_members (tenant_id,id,user_id,email,role,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,now(),now())",
+          [fixture.a.tenantId, id, randomUUID(), `${id}@example.test`, role]);
+      }
+    });
+    const hours = { mon: { open: "09:00", close: "17:00" }, tue: null, wed: null, thu: null, fri: null, sat: null, sun: null };
+    const markOf = (setBy: string, revision: number) => ({ setBy, setAt: "2026-11-22T10:00:00.000Z", revision });
+    const write = (tenantId: string, set: string, values: unknown[]) =>
+      asA((tx) => tx.query(`UPDATE business_profiles SET ${set} WHERE tenant_id=$1 RETURNING hours, tone, policies, fact_marks`, [tenantId, ...values]));
+    const refusedOwner = (set: string, values: unknown[]) =>
+      expect(write(fixture.a.tenantId, set, values)).rejects.toMatchObject({ code: "23514", constraint: "business_profiles_fact_owner" });
+
+    // Unmarked writes of the three facts are refused, setting and clearing alike.
+    await refusedOwner("hours=$2::jsonb", [JSON.stringify(hours)]);
+    await refusedOwner("tone='Warm.'", []);
+    await refusedOwner("policies=$2::jsonb", [JSON.stringify([{ title: "Refunds", text: "Ten days.", ...markOf(owner, 2) }])]);
+    // A mark that names staff, an unknown member or nobody of this tenant is refused.
+    for (const setBy of [staff, randomUUID()]) {
+      await refusedOwner("tone='Warm.', fact_marks=$2::jsonb", [JSON.stringify({ tone: markOf(setBy, 2) })]);
+    }
+
+    const ownMark = markOf(owner, 2);
+    const policies = [{ title: "Refunds", text: "Ten days.", ...ownMark }];
+    const saved = await write(fixture.a.tenantId, "hours=$2::jsonb, tone='Warm.', policies=$3::jsonb, fact_marks=$4::jsonb",
+      [JSON.stringify(hours), JSON.stringify(policies), JSON.stringify({ hours: ownMark, tone: ownMark, policies: ownMark })]);
+    expect(saved.rows).toEqual([{ hours, tone: "Warm.", policies, fact_marks: { hours: ownMark, tone: ownMark, policies: ownMark } }]);
+    // Deleting a policy without a new mark is refused; with the owner's new mark it goes through.
+    await refusedOwner("policies='[]'::jsonb", []);
+    const cleared = await write(fixture.a.tenantId, "policies='[]'::jsonb, fact_marks=fact_marks || $2::jsonb", [JSON.stringify({ policies: markOf(owner, 3) })]);
+    expect(cleared.rows[0]).toMatchObject({ policies: [] });
+
+    // A blank tone fails its own CHECK even with a mark.
+    for (const blank of ["  ", "\t\n"]) {
+      await expect(write(fixture.a.tenantId, "tone=$3, fact_marks=fact_marks || $2::jsonb", [JSON.stringify({ tone: markOf(owner, 4) }), blank]))
+        .rejects.toMatchObject({ code: "23514", constraint: "business_profiles_tone" });
+    }
+
+    // Tenant B's row is out of reach, and a tenant-A owner's mark does not count there.
     const before = await profileOf(fixture.b.tenantId);
-    const other = await asA((tx) => tx.query("UPDATE business_profiles SET tone='Hijacked' WHERE tenant_id=$1", [fixture.b.tenantId]));
+    const other = await write(fixture.b.tenantId, "tone='Hijacked', fact_marks=$2::jsonb", [JSON.stringify({ tone: markOf(owner, 2) })]);
     expect(other.rowCount).toBe(0);
     expect(await profileOf(fixture.b.tenantId)).toEqual(before);
+    await expect(fixture.service((tx) => tx.query("UPDATE business_profiles SET tone='Hijacked', fact_marks=$2::jsonb WHERE tenant_id=$1",
+      [fixture.b.tenantId, JSON.stringify({ tone: markOf(owner, 2) })]))).rejects.toMatchObject({ constraint: "business_profiles_fact_owner" });
   });
 
   it("renames the tenant with the display name, in the same transaction, for its own tenant only", async () => {

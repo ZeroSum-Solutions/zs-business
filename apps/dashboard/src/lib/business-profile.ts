@@ -78,8 +78,6 @@ export const BUSINESS_MESSAGES = {
 export const WEEKDAY_NAMES: Record<Weekday, string> = {
   mon: "Monday", tue: "Tuesday", wed: "Wednesday", thu: "Thursday", fri: "Friday", sat: "Saturday", sun: "Sunday",
 };
-/** The times a day gets when it is turned on. */
-export const DEFAULT_DAY = { open: "09:00", close: "17:00" } as const;
 
 /** A time input cannot show 24:00, so a day that closes at midnight shows 00:00, and 00:00 as a closing time saves as 24:00. */
 const closeForInput = (close: string) => (close === "24:00" ? "00:00" : close);
@@ -106,8 +104,10 @@ function hoursOf(form: Record<Weekday, DayHours>): { ok: true; hours: BusinessHo
   return { ok: true, hours: WEEKDAYS.some((day) => hours[day] !== null) ? hours : null };
 }
 
+const sameDay = (a: { open: string; close: string } | null, b: { open: string; close: string } | null) =>
+  a === null || b === null ? a === b : a.open === b.open && a.close === b.close;
 const sameHours = (a: BusinessHours | null, b: BusinessHours | null) =>
-  a === null || b === null ? a === b : WEEKDAYS.every((day) => JSON.stringify(a[day]) === JSON.stringify(b[day]));
+  a === null || b === null ? a === b : WEEKDAYS.every((day) => sameDay(a[day], b[day]));
 
 /** The policies a form describes, trimmed, rows with both parts empty dropped; null when one is not valid. */
 function policiesOf(drafts: PolicyDraft[]): BusinessPolicyInput[] | null {
@@ -121,20 +121,34 @@ function policiesOf(drafts: PolicyDraft[]): BusinessPolicyInput[] | null {
 }
 
 /**
- * Who set a fact and when (BP-19), for the line under it: null when the fact is not set, which the
- * screen shows as not known. A fact set before marks were kept, or by a setup step, has no mark.
+ * Who set a fact and when (BP-19), for the line under it: not known when the fact is empty, whatever
+ * mark it carries (a mark also records who cleared it). A fact set before marks were kept, or by a setup
+ * step, has no mark.
  */
-export function factProvenance(profile: BusinessProfile, fact: MarkedFact | "policies"): { known: false } | { known: true; mark: Pick<FactMark, "setBy" | "setAt"> | null } {
-  if (fact === "policies") {
-    if (profile.policies.length === 0) return { known: false };
-    // The newest policy's mark: the list as a whole was last changed then.
-    const newest = [...profile.policies].sort((a, b) => b.setAt.localeCompare(a.setAt))[0]!;
-    return { known: true, mark: { setBy: newest.setBy, setAt: newest.setAt } };
-  }
-  const value = fact === "displayName" ? profile.displayName : fact === "services" ? (profile.services.length > 0 ? profile.services : null) : profile[fact];
+export function factProvenance(profile: BusinessProfile, fact: MarkedFact): { known: false } | { known: true; mark: Pick<FactMark, "setBy" | "setAt"> | null } {
+  const value = fact === "displayName" ? profile.displayName
+    : fact === "services" || fact === "policies" ? (profile[fact].length > 0 ? profile[fact] : null)
+    : profile[fact];
   if (value === null || value === "") return { known: false };
-  const mark = profile.factMarks[fact];
+  // The list's own mark is its last change; a list stored before it was kept falls back to its newest policy.
+  const newestPolicy = fact === "policies" ? [...profile.policies].sort((a, b) => b.setAt.localeCompare(a.setAt))[0] : undefined;
+  const mark = profile.factMarks[fact] ?? newestPolicy;
   return { known: true, mark: mark ? { setBy: mark.setBy, setAt: mark.setAt } : null };
+}
+
+/**
+ * The form as a save would read it, for telling whether anything changed: a closed day's times and a
+ * policy row with nothing in it are not part of it.
+ */
+export function normalizedForm(form: BusinessForm): BusinessForm {
+  return {
+    ...form,
+    hours: Object.fromEntries(WEEKDAYS.map((day) => {
+      const entry = form.hours[day];
+      return [day, entry.isOpen ? { isOpen: true, open: entry.open, close: entry.close } : { isOpen: false, open: "", close: "" }];
+    })) as Record<Weekday, DayHours>,
+    policies: form.policies.filter((policy) => policy.title.trim() !== "" || policy.text.trim() !== ""),
+  };
 }
 
 export function toBusinessForm(profile: BusinessProfile): BusinessForm {
@@ -194,7 +208,7 @@ const sameAddress = (a: PostalAddress | null, b: PostalAddress | null) =>
  * The fields of `form` that differ from `profile`, ready for `PUT /v1/business`; an empty optional
  * field clears it (null). A field that cannot be sent comes back with the words to show.
  */
-export function readBusinessForm(profile: BusinessProfile, form: BusinessForm): BusinessRead {
+export function readBusinessForm(profile: BusinessProfile & { factsUnavailable?: true }, form: BusinessForm): BusinessRead {
   const errors: BusinessFormErrors = {};
   const changes: BusinessProfileChanges = {};
 
@@ -223,17 +237,21 @@ export function readBusinessForm(profile: BusinessProfile, form: BusinessForm): 
   if (!servicesValid(services)) errors.services = BUSINESS_MESSAGES.services;
   else if (services.join("\n") !== profile.services.join("\n")) changes.services = services;
 
-  const hours = hoursOf(form.hours);
-  if (!hours.ok) errors.hours = BUSINESS_MESSAGES.hours;
-  else if (!sameHours(hours.hours, profile.hours)) changes.hours = hours.hours;
+  // The company facts are sent only when this client could read them, so a save never wipes facts it did not see.
+  if (!profile.factsUnavailable) {
+    const hours = hoursOf(form.hours);
+    if (!hours.ok) errors.hours = BUSINESS_MESSAGES.hours;
+    else if (!sameHours(hours.hours, profile.hours)) changes.hours = hours.hours;
 
-  const tone = form.tone.trim();
-  if ([...tone].length > BUSINESS_TONE_MAX) errors.tone = BUSINESS_MESSAGES.tone;
-  else if (tone !== (profile.tone ?? "")) changes.tone = tone === "" ? null : tone;
+    const tone = form.tone.trim();
+    if ([...tone].length > BUSINESS_TONE_MAX) errors.tone = BUSINESS_MESSAGES.tone;
+    else if (tone !== (profile.tone ?? "")) changes.tone = tone === "" ? null : tone;
 
-  const policies = policiesOf(form.policies);
-  if (!policies) errors.policies = BUSINESS_MESSAGES.policies;
-  else if (JSON.stringify(policies) !== JSON.stringify(profile.policies.map((policy) => ({ title: policy.title, text: policy.text })))) changes.policies = policies;
+    const policies = policiesOf(form.policies);
+    if (!policies) errors.policies = BUSINESS_MESSAGES.policies;
+    else if (policies.length !== profile.policies.length || policies.some((policy, i) => policy.title !== profile.policies[i]!.title || policy.text !== profile.policies[i]!.text))
+      changes.policies = policies;
+  }
 
   const { address, errors: addressErrors } = addressOf(form);
   Object.assign(errors, addressErrors);
@@ -272,9 +290,15 @@ export function fieldFromIssuePath(path: string): BusinessField | null {
     || key === "hours" || key === "tone" || key === "policies" ? key : null;
 }
 
-/** Whichever of two copies of the profile has the higher revision; a tie takes `incoming`. Revisions only grow, so the lower one is stale. */
-export function newerProfile(cached: BusinessProfile | undefined, incoming: BusinessProfile): BusinessProfile {
-  return cached && cached.revision > incoming.revision ? cached : incoming;
+/**
+ * Whichever of two copies of the profile has the higher revision; a tie takes `incoming`, unless only the
+ * cached copy could read the company facts (an older API answered the refetch during a rolling deploy).
+ * Revisions only grow, so the lower one is stale.
+ */
+export function newerProfile<T extends BusinessProfile & { factsUnavailable?: true }>(cached: T | undefined, incoming: T): T {
+  if (!cached) return incoming;
+  if (cached.revision !== incoming.revision) return cached.revision > incoming.revision ? cached : incoming;
+  return incoming.factsUnavailable && !cached.factsUnavailable ? cached : incoming;
 }
 
 /** Countries a postal address may name, by English name. */

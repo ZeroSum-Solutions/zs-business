@@ -12,7 +12,7 @@ import {
   automationScopeListSchema,
   automationTokenWithSecretSchema,
   automationUsageSchema,
-  businessProfileSchema,
+  agentBusinessProfileSchema,
   proposalRecordSchema,
   READ_SCOPE_DISCLOSURES,
   READ_SCOPES,
@@ -207,7 +207,7 @@ describe("an MCP SDK client against the real app (H-5, H-6)", () => {
     expect(text(replies[1] as ToolReply).items.map((item: { id: string }) => item.id)).toEqual([b.contactId]);
     expect((replies[2] as { tools: unknown[] }).tools).toHaveLength(4);
     expect((replies[3] as { tools: unknown[] }).tools).toHaveLength(5);
-    expect(businessProfileSchema.parse(text(replies[4] as ToolReply)).displayName).toBe("Tenant B");
+    expect(agentBusinessProfileSchema.parse(text(replies[4] as ToolReply)).displayName).toBe("Tenant B");
     await Promise.all([clientOne.client.close(), clientTwo.client.close()]);
   });
 
@@ -276,6 +276,10 @@ describe("what a token's scopes allow (H-2, H-6)", () => {
     }
     const pipelines = text(await client.callTool({ name: "list_pipelines", arguments: {} }) as ToolReply);
     expect(pipelines.items.map((pipeline: { id: string }) => pipeline.id)).toEqual([h.a.pipelineId]);
+    // The company facts go out without who set them: member IDs stay in the hub (business-profile.md BP-21).
+    const business = text(await client.callTool({ name: "get_business", arguments: {} }) as ToolReply);
+    expect(business).toMatchObject({ hours: null, tone: null, policies: [] });
+    expect(business).not.toHaveProperty("factMarks");
     await expect(client.callTool({ name: "propose_booking_create", arguments: {} })).rejects.toMatchObject({ code: -32601 });
     await client.close();
   });
@@ -323,8 +327,8 @@ describe("tenants (H-11)", () => {
     expect(text(await ca.callTool({ name: "list_contacts", arguments: { ids: theirs.contactId } }) as ToolReply).items).toEqual([]);
     expect(text(await ca.callTool({ name: "list_deals", arguments: { contactId: theirs.contactId } }) as ToolReply).items).toEqual([]);
     expect(text(await ca.callTool({ name: "list_bookings", arguments: { resourceId: h.b.resourceId } }) as ToolReply).items).toEqual([]);
-    expect(businessProfileSchema.parse(text(await ca.callTool({ name: "get_business", arguments: {} }) as ToolReply)).displayName).toBe("Tenant A");
-    expect(businessProfileSchema.parse(text(await cb.callTool({ name: "get_business", arguments: {} }) as ToolReply)).displayName).toBe("Tenant B");
+    expect(agentBusinessProfileSchema.parse(text(await ca.callTool({ name: "get_business", arguments: {} }) as ToolReply)).displayName).toBe("Tenant A");
+    expect(agentBusinessProfileSchema.parse(text(await cb.callTool({ name: "get_business", arguments: {} }) as ToolReply)).displayName).toBe("Tenant B");
     // A proposal that names the other tenant's rows is made for this tenant and cannot reach theirs.
     const moved = await ca.callTool({
       name: "propose_deal_move_stage",
@@ -553,7 +557,7 @@ describe("usage record and the owner route (H-8)", () => {
     const app = appOnDatabase(breaking, { clock, onError: (error) => { reported.push(error); } });
     const response = await rpc(app, secret, callTool("get_business"));
     expect(response.status).toBe(200);
-    expect(businessProfileSchema.parse(JSON.parse((await response.json()).result.content[0].text)).displayName).toBe("Tenant A");
+    expect(agentBusinessProfileSchema.parse(JSON.parse((await response.json()).result.content[0].text)).displayName).toBe("Tenant A");
     expect(reported.map((error) => (error as Error).message)).toEqual(["usage store down"]);
   });
 });

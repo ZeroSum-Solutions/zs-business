@@ -155,7 +155,7 @@ export const READ_SCOPE_DISCLOSURES: Readonly<Record<ReadScope, string>> = Objec
   "bookings:read": "Bookings with times, resources and the linked customer's name and ID.",
   "inbox:read": "Website requests and replies with customer identities and message text, and the names and emails of staff who replied.",
   "results:read": "Lead, booking and revenue totals by source.",
-  "business:read": "The business profile (name, contact details, address, currency, zone).",
+  "business:read": "The business profile (name, contact details, address, currency, zone, opening hours, tone of voice and policies).",
   // connections.md C-11: every store the business connects now or later, not only the ones connected today.
   "connections:read": "Orders from every store the business connects, now or later: customer names and emails, line items and totals.",
 });

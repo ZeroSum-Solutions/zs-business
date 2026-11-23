@@ -81,8 +81,6 @@ const FIELDS: readonly { key: keyof BusinessProfileChanges; column: string; cast
   { key: "policies", column: "policies", cast: "::jsonb" },
 ];
 
-/** A fact value that reads as "not known" (BP-20) carries no mark. */
-const unset = (value: unknown) => value === null || value === undefined || (Array.isArray(value) && value.length === 0);
 // jsonb returns object keys in its own order, so values compare with their keys sorted.
 const canonical = (value: unknown): unknown =>
   Array.isArray(value) ? value.map(canonical)
@@ -92,20 +90,20 @@ const canonical = (value: unknown): unknown =>
 const sameValue = (a: unknown, b: unknown) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 
 /**
- * BP-19: the marks after a save. A fact the save changes is marked with the saving owner, the instant and
- * the new revision; one it clears loses its mark; one it leaves alone keeps the mark it had.
+ * BP-19: the marks after a save. A fact the save changes, clearing included, is marked with the saving
+ * owner, the instant and the new revision; one it leaves alone keeps the mark it had. The database refuses a
+ * change to hours, tone or policies that carries no new owner mark (BP-20).
  */
 function nextMarks(current: ProfileRow, changes: BusinessProfileChanges, mark: FactMark): FactMarks {
   const marks = { ...current.fact_marks } as Record<string, FactMark>;
   const before: Record<(typeof MARKED_FACTS)[number], unknown> = {
     displayName: current.display_name, description: current.description, services: current.services,
     timeZone: current.time_zone, hours: current.hours, tone: current.tone,
+    policies: current.policies.map(({ title, text }) => ({ title, text })),
   };
   for (const key of MARKED_FACTS) {
     if (!(key in changes)) continue;
-    const value = changes[key];
-    if (unset(value)) delete marks[key];
-    else if (!sameValue(value, before[key])) marks[key] = mark;
+    if (!sameValue(changes[key], before[key])) marks[key] = mark;
   }
   return marks as FactMarks;
 }

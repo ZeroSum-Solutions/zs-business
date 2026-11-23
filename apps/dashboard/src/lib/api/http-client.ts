@@ -27,7 +27,6 @@ import {
   MARKED_FACTS,
   WEEKDAYS,
   type BusinessHours,
-  type BusinessProfile,
   type FactMarks,
   contactEnrichmentSchema,
   enrichmentProposalListSchema,
@@ -127,6 +126,7 @@ import {
   type SitesApi,
   type TranscriptionApi,
   type WriteOptions,
+  type BusinessProfileView,
 } from "./types";
 
 export interface HttpClientConfig {
@@ -188,29 +188,37 @@ const NOTHING_CANCELLED = { cancelled: false, revokeFailed: false };
 const enrichmentOutputSchema = z.object({ actionId: uuidSchema, result: enrichmentRequestRecordSchema });
 /** BP-10: an API that predates the description and services fields omits them; they read as empty. */
 /**
- * The profile as the dashboard holds it (BP-10, BP-21): what an older API leaves out reads as not set,
- * and a fact in a shape this client does not know is not set rather than guessed.
+ * The profile as the dashboard holds it (BP-10, BP-16..BP-19). An older API leaves the company facts out
+ * and a newer one may send a shape this client does not know: either way `factsUnavailable` is set, the
+ * facts read as not known, and Settings shows them read-only and never sends them, so a save cannot wipe
+ * stored hours, tone or policies it could not read.
  */
-function withContent(profile: z.output<typeof businessProfileReadSchema>): BusinessProfile {
+const dayRead = z.object({ open: z.string(), close: z.string() }).nullable();
+const hoursRead = z.object({ mon: dayRead, tue: dayRead, wed: dayRead, thu: dayRead, fri: dayRead, sat: dayRead, sun: dayRead });
+const policiesRead = z.array(z.object({ title: z.string(), text: z.string(), setBy: z.string(), setAt: z.string(), revision: z.number().optional() }));
+const markRead = z.object({ setBy: z.string(), setAt: z.string(), revision: z.number().optional() });
+function withContent(profile: z.output<typeof businessProfileReadSchema>): BusinessProfileView {
   const { description, services, hours, tone, policies, factMarks, ...rest } = profile;
-  let week: BusinessHours | null = null;
-  if (hours && WEEKDAYS.every((day) => day in hours)) {
-    week = Object.fromEntries(WEEKDAYS.map((day) => [day, hours[day] ?? null])) as BusinessHours;
-    if (WEEKDAYS.every((day) => week![day] === null)) week = null;
-  }
+  const week = hours === null ? { success: true as const, data: null } : hoursRead.safeParse(hours);
+  const note = z.string().nullable().safeParse(tone);
+  const list = policiesRead.safeParse(policies);
+  const factsUnavailable = !week.success || !note.success || !list.success;
   const marks: FactMarks = {};
+  const rawMarks = factMarks !== null && typeof factMarks === "object" ? (factMarks as Record<string, unknown>) : {};
   for (const fact of MARKED_FACTS) {
-    const mark = factMarks?.[fact];
-    if (mark) marks[fact] = { setBy: mark.setBy, setAt: mark.setAt, revision: mark.revision ?? 0 };
+    const mark = markRead.safeParse(rawMarks[fact]);
+    if (mark.success) marks[fact] = { setBy: mark.data.setBy, setAt: mark.data.setAt, revision: mark.data.revision ?? 0 };
   }
+  const openWeek = week.success && week.data && WEEKDAYS.some((day) => week.data![day] !== null) ? (week.data as BusinessHours) : null;
   return {
     ...rest,
     description: description ?? null,
     services: services ?? [],
-    hours: week,
-    tone: tone ?? null,
-    policies: (policies ?? []).map((policy) => ({ title: policy.title, text: policy.text, setBy: policy.setBy, setAt: policy.setAt, revision: policy.revision ?? 0 })),
+    hours: factsUnavailable ? null : openWeek,
+    tone: factsUnavailable ? null : note.data ?? null,
+    policies: factsUnavailable ? [] : list.data!.map((policy) => ({ title: policy.title, text: policy.text, setBy: policy.setBy, setAt: policy.setAt, revision: policy.revision ?? 0 })),
     factMarks: marks,
+    ...(factsUnavailable ? { factsUnavailable: true as const } : {}),
   };
 }
 const businessOutputSchema = z.object({ actionId: uuidSchema, result: businessProfileReadSchema });

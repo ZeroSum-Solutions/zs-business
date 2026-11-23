@@ -318,7 +318,9 @@ rendered from an approved template revision and never call a model at run time:
   (G-5, G-8).
 - An owner may ask for a suggested wording (`POST /v1/agents/:agentKind/template-suggestion`,
   permission `agents`). Its input is the company facts (`business-profile.md` BP-21), the kind and the variable list, never
-  customer data, on the `no_personal_data` lane (G-18). Each suggestion is one model call
+  customer data, on the `no_personal_data` lane (G-18). The facts are the owner's own prose; the
+  Settings form asks owners to keep customer details out of them (a known limit of
+  `business-profile.md`). Each suggestion is one model call
   under G-15: it writes an `agent_model_calls` row (the requested kind, no `run_id`, key
   `agent:<kind>:suggestion:<idempotencyKey>`) and counts against that kind's
   `maxCostMicrosPerDay`, so a templated kind's cap is not zero once suggestions are used. At the

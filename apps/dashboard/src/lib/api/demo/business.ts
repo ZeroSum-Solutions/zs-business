@@ -1,8 +1,8 @@
 /**
  * The demo adapter's business profile (business-profile.md BP-5..BP-7, BP-11). It keeps the rules
  * the API enforces: any member reads it, only an owner saves, a save names the revision it started
- * from, a stale one is `stale_revision`, and field errors name their path. A changed company fact gets a
- * mark of who set it and when (BP-19); the demo has no member IDs, so the mark names the user. The data is in memory
+ * from, a stale one is `stale_revision`, and field errors name their path. A changed company fact, cleared
+ * or not, gets a mark of who set it and when (BP-19); the demo has no member IDs, so the mark names the user. The data is in memory
  * and starts again on every page load, so nothing a visitor types here is ever stored.
  */
 import type { z } from "zod";
@@ -44,10 +44,17 @@ export function createDemoBusiness(ctx: DemoBusinessContext): BusinessApi & Demo
 
   const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
-  /** A key set to null clears it; an absent key stays as it was. */
-  function apply(changes: BusinessProfileChanges, setBy = ctx.actor().userId): void {
+  /** The value a mark compares: a policy's own mark is not part of the list's content. */
+  const content = (fact: (typeof MARKED_FACTS)[number], from: BusinessProfile) =>
+    fact === "policies" ? from.policies.map(({ title, text }) => ({ title, text })) : from[fact];
+
+  /**
+   * A key set to null clears it; an absent key stays as it was. An owner's save marks every fact it
+   * changes, clearing included (BP-19); a setup step (`marked` false) drops the mark of what it changes.
+   */
+  function apply(changes: BusinessProfileChanges, marked = true): void {
     const next: BusinessProfile = { ...profile, revision: profile.revision + 1, updatedAt: ctx.now().toISOString() };
-    const mark: FactMark = { setBy, setAt: next.updatedAt, revision: next.revision };
+    const mark: FactMark = { setBy: ctx.actor().userId, setAt: next.updatedAt, revision: next.revision };
     if (changes.displayName !== undefined) next.displayName = changes.displayName;
     if (changes.legalName !== undefined) next.legalName = changes.legalName;
     if (changes.phoneE164 !== undefined) next.phoneE164 = changes.phoneE164;
@@ -62,12 +69,11 @@ export function createDemoBusiness(ctx: DemoBusinessContext): BusinessApi & Demo
       next.policies = changes.policies.map((policy) =>
         profile.policies.find((old) => old.title === policy.title && old.text === policy.text) ?? { ...policy, ...mark });
     }
-    // A cleared fact loses its mark; a changed one gets this save's.
     const marks = { ...profile.factMarks };
     for (const fact of MARKED_FACTS) {
-      const value = next[fact];
-      if (value === null || (Array.isArray(value) && value.length === 0)) delete marks[fact];
-      else if (!same(value, profile[fact])) marks[fact] = mark;
+      if (same(content(fact, next), content(fact, profile))) continue;
+      if (marked) marks[fact] = mark;
+      else delete marks[fact];
     }
     next.factMarks = marks;
     profile = next;
@@ -101,7 +107,8 @@ export function createDemoBusiness(ctx: DemoBusinessContext): BusinessApi & Demo
     },
 
     confirmTimeZone(zone) {
-      apply({ timeZone: zone });
+      // A setup step, not an owner's save of the fact: the zone carries no mark (BP-19).
+      apply({ timeZone: zone }, false);
     },
 
     editBusinessElsewhere(changes = { legalName: `${profile.displayName} Ltd` }) {

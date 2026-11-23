@@ -128,43 +128,60 @@ write tool for the profile, so none is added for them.
 seven days `mon`..`sun`. A day is null (closed) or `{ open, close }` in 24-hour `HH:MM`, with
 `open` before `close`; `close` may be `24:00` for midnight. One range per day. At least one day is
 open, so "closed every day" is never stored in place of "not known"; the Settings form saves
-null when every day is off.
+null when every day is off. The form never fills in times: a day the owner turns on starts blank,
+and both times are required. Days left off are saved as closed, and the form says so.
 
 **BP-17. Tone of voice.** `business_profiles.tone` is null (not known) or 1..500 characters, not
-blank: how agents should sound when they write for the business.
+blank (whitespace alone is blank): how agents should sound when they write for the business.
+The form asks owners to leave customer details out of the tone and the policies, since agents
+read them.
 
 **BP-18. Policies.** `business_profiles.policies` is a JSON array of 0..10 policies, each a
 one-line title of 1..60 characters and a text of 1..1000, trimmed, titles unique ignoring case.
 `changes.policies` replaces the whole list as `[{ title, text }]` (an empty list clears it). A
 policy whose title and text are unchanged keeps its stored mark; any other policy gets the mark
-of this save.
+of this save. Settings shows each saved policy's own mark under it.
 
 **BP-19. Who set a fact.** Every company fact carries a mark `{ setBy, setAt, revision }`: the
 member ID of the owner who saved it, the action's clock instant and the profile revision that
-save made. Policies carry it on each entry; the single-value facts (`displayName`,
-`description`, `services`, `timeZone`, `hours`, `tone`) carry it in `fact_marks`, keyed by field.
-A save marks only the facts whose value changed, and a cleared fact loses its mark. A fact
-column that changes without its mark (a setup step or an operator script) loses the mark: the
-value stays, and who set it reads as not recorded. `GET /v1/business` returns `hours`, `tone`,
-`policies` and `factMarks`.
+save made. `fact_marks` holds the mark of each fact's last change, keyed by field (`displayName`,
+`description`, `services`, `timeZone`, `hours`, `tone`, `policies`); each policy also carries its
+own mark. A save marks every fact whose value it changed, clearing included, so a mark can sit on
+a fact that reads as not known: it records who cleared it. A change to `hours`, `tone` or
+`policies` without a new mark is refused (BP-20). Any other marked fact that changes without its
+mark (a setup step writing the time zone, or an operator script) loses the mark: the value
+stays, and who set it reads as not recorded. The trigger runs on insert as well as update.
+`GET /v1/business` returns `hours`, `tone`, `policies` and `factMarks`.
 
 **BP-20. The owner is the only writer.** The action needs the `business` permission, which only
 owners hold (BP-6). The database enforces it too: a trigger refuses any new or changed mark or
-policy whose `setBy` is not an owner member of the same tenant, with `check_violation`
-`business_profiles_fact_owner`, so a direct write as the runtime role cannot set a fact in a
-staff member's name or another tenant's.
+policy whose `setBy` is not an owner member of the same tenant, and any change to hours, tone or
+policies that carries no new mark, with `check_violation` `business_profiles_fact_owner`. So a
+direct write as the runtime role cannot set, change or clear those facts unmarked, or in a staff
+member's name or another tenant's. The database has no actor setting and cannot tell which owner
+is acting; the action stamps the acting owner's own member ID. A malformed `fact_marks` or
+`policies` value fails its own CHECK (`business_profiles_fact_marks`,
+`business_profiles_policies`), which match the contract: marks need a UUID, an instant with
+milliseconds and a whole revision from 2.
 
 **BP-21. One read for agents.** `readCompanyFacts(tx, tenantId)` in `packages/core/src/business`
 is the only way an agent prompt builder reads the business: it returns the name, description,
-services, time zone, hours, tone and policies, each as `{ status: "known", value, setBy, setAt }`
-or `{ status: "not_known" }`. A null value or an empty list is not known; a fact with no mark is
-known with null provenance. `companyFactsForPrompt` turns it into the prompt form, where a
-missing fact is the words `not known`, and every prompt system text carries
-`COMPANY_FACTS_RULE`, which tells the model never to guess a fact that is not known. Provenance
-stays out of the prompt. A static test in `packages/core/test/company-facts.test.ts` finds every
-prompt builder in core and fails when one reads `business_profiles`, `tenants` or
-`getBusinessProfile` in any other way. An older API that sends none of the facts is read by the
-dashboard as not set (BP-10), and a save stored before this revision replays with them empty.
+services, time zone, hours, tone and policies. Each single fact is `{ status: "known", value,
+setBy, setAt }` or `{ status: "not_known" }`; policies are `{ status: "known", value }` with the
+list of policies, each carrying its own `setBy` and `setAt`, or not known. A null value or an empty
+list is not known, whatever mark it carries; a fact with no mark is known with null provenance.
+`companyFactsForPrompt` turns it into the prompt form, where a missing fact is the words `not
+known`, and every system text of a prompt that carries company facts carries `COMPANY_FACTS_RULE`,
+which tells the model never to guess a fact that is not known. A prompt with no business in it
+(the browser planner) carries neither. Provenance stays out of the prompt. A static test in
+`packages/core/test/company-facts.test.ts` finds every prompt builder in core (a `TextModelRequest`,
+a `system` text, a `.complete(` call or a `*Prompt` input) and fails when the builder, or a
+helper it imports from its own feature folder, reads `business_profiles`, the tenant's name or
+`getBusinessProfile` in any other way, or when a builder puts the facts in a prompt without the
+rule. The dashboard checks each fact the API sends: when an older API sends none, or a newer one
+sends a shape it does not know, the facts read as not known, Settings shows them read-only, and a
+save never sends them, so it cannot wipe facts it did not see (BP-10). A save stored before this
+revision replays with them empty.
 
 **BP-12. Tenancy.** A member of tenant A cannot read or update tenant B's profile through the
 route, the action or direct SQL as the runtime role: a two-tenant denial test covers all three.
@@ -193,18 +210,28 @@ description of 2001 characters, a blank description, two services that differ on
 Acceptance test for revision 3: an owner saves hours, a tone and two policies; the response marks
 each with the owner's member ID, the save's instant and revision. A second owner who changes one
 policy and the tone marks only those; the unchanged policy keeps the first mark. Clearing the
-tone removes its mark. Staff are 403. As the runtime role, a direct update whose mark names a
-staff member, an unknown member or a member of tenant B is refused with
-`business_profiles_fact_owner`, and tenant B cannot read or update tenant A's facts. The
+tone marks who cleared it, and the tone reads as not known. Staff are 403. As the runtime role, a
+direct update of hours, tone or policies without a new mark, or whose mark names a staff member,
+an unknown member or a member of tenant B, is refused with `business_profiles_fact_owner`, and
+tenant B cannot read or update tenant A's facts. The
 follow-up draft prompt and the template suggestion prompt both read the facts through
 `readCompanyFacts`, with `not known` for each missing fact. The dashboard e2e, at phone width,
-turns on Monday, sets a tone and adds a policy; after the save each shows "Set by an owner".
+turns on Monday, types its times, sets a tone and adds a policy; after the save each shows "Set by
+an owner".
 
 ## Known limits
 
 - Booking availability and per-location details stay on booking resources; the opening hours
   are one range per day, with no breaks, holidays or seasonal hours.
 - The Settings screen says "Set by an owner" and the date; it does not yet name which owner.
+- The database cannot tell which owner is acting (there is no actor setting), so a direct write
+  as the runtime role could name another owner of the same tenant. The action always stamps the
+  acting owner.
+- The template suggestion runs on the `no_personal_data` lane and carries the description, tone
+  and policies as the owner wrote them. The form asks owners to keep customer details out; it does
+  not check.
+- Rolling the API back past this revision: an older API refuses a retried save that names the new
+  fields, and replays a stored result with the new keys only if its reader accepts extra keys.
 - Changing the profile currency does not touch the wallet; a tenant whose wallet is in another
   currency sees prices in the wallet's currency (`delivery.md` D-5).
 - The Home screen still shows the viewer's zone for dates; moving business-day logic (for

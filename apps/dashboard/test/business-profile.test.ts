@@ -2,7 +2,7 @@
 // `changes` a save sends: only what changed, a phone in E.164, an address all or nothing.
 import { describe, expect, it } from "vitest";
 import type { BusinessProfile } from "@zs/contracts";
-import { countryChoices, factProvenance, fieldFromIssuePath, newerProfile, readBusinessForm, toBusinessForm } from "../src/lib/business-profile";
+import { countryChoices, factProvenance, fieldFromIssuePath, newerProfile, normalizedForm, readBusinessForm, toBusinessForm } from "../src/lib/business-profile";
 
 const profile = (change: Partial<BusinessProfile> = {}): BusinessProfile => ({
   displayName: "Halden & Rowe", legalName: null, phoneE164: null, timeZone: null, currency: "USD", postalAddress: null,
@@ -167,6 +167,13 @@ describe("newerProfile", () => {
     expect(newerProfile(profile({ revision: 3 }), incoming)).toBe(incoming);
     expect(newerProfile(undefined, incoming)).toBe(incoming);
   });
+
+  it("keeps the cached facts on a tie when an older API answered the refetch without them", () => {
+    const cached = profile({ revision: 3, tone: "Warm." });
+    const older = { ...profile({ revision: 3 }), factsUnavailable: true as const };
+    expect(newerProfile(cached, older)).toBe(cached);
+    expect(newerProfile(older, cached)).toBe(cached);
+  });
 });
 
 describe("company facts (BP-16..BP-20)", () => {
@@ -224,6 +231,34 @@ describe("company facts (BP-16..BP-20)", () => {
     expect(factProvenance(profile(), "policies")).toEqual({ known: false });
     expect(factProvenance(profile({ tone: "Warm." }), "tone")).toEqual({ known: true, mark: null });
     expect(factProvenance(profile({ tone: "Warm.", factMarks: { tone: mark } }), "tone")).toEqual({ known: true, mark: { setBy: mark.setBy, setAt: mark.setAt } });
+  });
+
+  it("reads a cleared fact as not known even with its mark, and the policies from the list's own mark", () => {
+    expect(factProvenance(profile({ tone: null, factMarks: { tone: mark } }), "tone")).toEqual({ known: false });
+    const later = { ...mark, setAt: "2026-11-23T10:00:00.000Z", revision: 3 };
+    const listed = profile({ policies: [{ title: "Refunds", text: "Within 14 days.", ...mark }], factMarks: { policies: later } });
+    expect(factProvenance(listed, "policies")).toEqual({ known: true, mark: { setBy: later.setBy, setAt: later.setAt } });
+    expect(factProvenance({ ...listed, factMarks: {} }, "policies")).toEqual({ known: true, mark: { setBy: mark.setBy, setAt: mark.setAt } });
+  });
+
+  it("compares hours by their times, not by the order of their keys", () => {
+    const saved = profile({ hours: { ...CLOSED, mon: { open: "09:00", close: "17:00" } } });
+    const reordered = { ...saved, hours: { ...saved.hours!, mon: { close: "17:00", open: "09:00" } } };
+    expect(readBusinessForm(reordered, toBusinessForm(saved))).toEqual({ ok: true, changes: {} });
+  });
+
+  it("does not count a closed day's old times or an empty policy row as a change", () => {
+    const saved = toBusinessForm(profile());
+    const touched = { ...saved, hours: { ...saved.hours, mon: { isOpen: false, open: "09:00", close: "17:00" } }, policies: [{ title: " ", text: "" }] };
+    expect(normalizedForm(touched)).toEqual(normalizedForm(saved));
+    expect(normalizedForm({ ...saved, policies: [{ title: "Refunds", text: "" }] })).not.toEqual(normalizedForm(saved));
+  });
+
+  it("never sends the facts when the API could not give them, so a save cannot wipe them", () => {
+    const unavailable = { ...profile(), factsUnavailable: true as const };
+    const form = { ...toBusinessForm(unavailable), legalName: "Halden Ltd", tone: "", policies: [], hours: toBusinessForm(profile()).hours };
+    form.hours.mon = { isOpen: true, open: "", close: "" };
+    expect(readBusinessForm(unavailable, form)).toEqual({ ok: true, changes: { legalName: "Halden Ltd" } });
   });
 
   it("maps the API's issue paths for the facts to their fields", () => {

@@ -181,8 +181,12 @@ export const TOOLS: readonly ToolDefinition[] = Object.freeze([
   read("home_results", "results:read", "Leads, bookings and won revenue by source, this week so far against the same span of last week, in an IANA zone.",
     resultsQuerySchema, async (query, { principal, reads }) => ({ ...(await reads.homeResults(principal, query)) })),
 
-  read("get_business", "business:read", "Read the business profile (name, description, services, contact details, address, currency, time zone).", nothing,
-    async (_args, { principal, reads }) => ({ ...(await reads.getBusiness(principal)) })),
+  read("get_business", "business:read", "Read the business profile (name, description, services, contact details, address, currency, time zone, opening hours, tone of voice and policies).", nothing,
+    async (_args, { principal, reads }) => {
+      // Who set each fact (member IDs) stays inside the hub (business-profile.md BP-21): an outside agent gets the facts only.
+      const { factMarks: _marks, policies, ...profile } = await reads.getBusiness(principal);
+      return { ...profile, policies: policies.map(({ title, text }) => ({ title, text })) };
+    }),
 
   connectionTool("list_connections", "List the business's connected apps (stores) that can be read: connectionId, app, label and status (active or reauthorize), at most 20.",
     listConnectionsToolInputSchema, connectionHints, async (_args, { principal, reads, connections }) => {

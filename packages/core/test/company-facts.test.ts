@@ -3,7 +3,7 @@
 // that fails when a prompt builder reads the profile another way.
 import { randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ActionError, companyFactsForPrompt, NOT_KNOWN, type BusinessHours, type MemberRole } from "@zs/contracts";
@@ -62,7 +62,7 @@ beforeAll(async () => {
 });
 afterAll(async () => { await database?.close(); });
 
-describe("missing facts read as not known (BP-20)", () => {
+describe("missing facts read as not known (BP-21)", () => {
   it("a new profile has a name and nothing else, and the prompt says so in words", async () => {
     const read = await facts();
     expect(read.name).toEqual({ status: "known", value: "Tenant A", setBy: null, setAt: null });
@@ -127,17 +127,18 @@ describe("saving hours, tone and policies (BP-16..BP-19)", () => {
       ],
     });
     const mark = { setBy: secondOwner.memberId, setAt: new Date(now).toISOString(), revision: saved.result.revision };
-    expect(saved.result.factMarks).toEqual({ ...before.factMarks, tone: mark });
+    expect(saved.result.factMarks).toEqual({ ...before.factMarks, tone: mark, policies: mark });
     expect(saved.result.policies).toEqual([
       before.policies[0],
       { title: "Refunds", text: "Refunds go back to the card within 10 days.", ...mark },
     ]);
   });
 
-  it("clearing a fact removes its mark and it reads as not known again", async () => {
+  it("clearing a fact marks who cleared it, and it reads as not known again", async () => {
     const saved = await save(owner, { tone: null, policies: [] });
     expect(saved.result).toMatchObject({ tone: null, policies: [] });
-    expect(saved.result.factMarks).not.toHaveProperty("tone");
+    const mark = { setBy: owner.memberId, setAt: new Date(now).toISOString(), revision: saved.result.revision };
+    expect(saved.result.factMarks).toMatchObject({ tone: mark, policies: mark });
     const read = await facts();
     expect(read.tone).toEqual({ status: "not_known" });
     expect(read.policies).toEqual({ status: "not_known" });
@@ -190,13 +191,22 @@ describe("the owner is the only writer (BP-19)", () => {
     const write = (marks: Record<string, unknown>) => database.db.tenant(tenantId, (tx) => tx.query(
       "UPDATE business_profiles SET tone='Pushy.', fact_marks=fact_marks || $2::jsonb WHERE tenant_id=$1", [tenantId, JSON.stringify(marks)]));
     const markOf = (setBy: string) => ({ tone: { setBy, setAt: new Date(now).toISOString(), revision: 99 } });
-    await expect(write(markOf(staff.memberId))).rejects.toThrow(/Only an owner/);
-    await expect(write(markOf(randomUUID()))).rejects.toThrow(/Only an owner/);
+    await expect(write(markOf(staff.memberId))).rejects.toMatchObject({ code: "23514", constraint: "business_profiles_fact_owner", message: expect.stringMatching(/Only an owner/) });
+    await expect(write(markOf(randomUUID()))).rejects.toMatchObject({ code: "23514", constraint: "business_profiles_fact_owner", message: expect.stringMatching(/Only an owner/) });
     // Tenant B's owner is no owner of A.
-    await expect(write(markOf(ownerB.memberId))).rejects.toThrow(/Only an owner/);
+    await expect(write(markOf(ownerB.memberId))).rejects.toMatchObject({ code: "23514", constraint: "business_profiles_fact_owner", message: expect.stringMatching(/Only an owner/) });
+    // A policy entry in a staff member's name is refused even when the list carries an owner's mark.
     const policy = [{ title: "Refunds", text: "None.", setBy: staff.memberId, setAt: new Date(now).toISOString(), revision: 99 }];
+    const listMark = { policies: { setBy: owner.memberId, setAt: new Date(now).toISOString(), revision: 99 } };
     await expect(database.db.tenant(tenantId, (tx) => tx.query(
-      "UPDATE business_profiles SET policies=$2::jsonb WHERE tenant_id=$1", [tenantId, JSON.stringify(policy)]))).rejects.toThrow(/Only an owner/);
+      "UPDATE business_profiles SET policies=$2::jsonb, fact_marks=fact_marks || $3::jsonb WHERE tenant_id=$1",
+      [tenantId, JSON.stringify(policy), JSON.stringify(listMark)]))).rejects.toMatchObject({ code: "23514", constraint: "business_profiles_fact_owner", message: expect.stringMatching(/Only an owner/) });
+    // Hours, tone and policies never change without a new mark, so no direct write sets or clears them unmarked.
+    const ownerPolicy = [{ ...policy[0], setBy: owner.memberId }];
+    for (const set of ["tone='Pushy.'", `policies='${JSON.stringify(ownerPolicy)}'::jsonb`, "hours=NULL"]) {
+      await expect(database.db.tenant(tenantId, (tx) => tx.query(`UPDATE business_profiles SET ${set} WHERE tenant_id=$1`, [tenantId])))
+        .rejects.toThrow(/changes only with the mark/);
+    }
     expect((await facts()).tone).toEqual({ status: "not_known" });
   });
 
@@ -222,31 +232,126 @@ describe("the owner is the only writer (BP-19)", () => {
   });
 });
 
-// BP-20: every agent prompt builder reads the business only through readCompanyFacts. A prompt builder is a
-// core source file that builds a model request (`TextModelRequest`, a `system:` text) or a `*Prompt` input.
+// BP-21: every agent prompt builder reads the business only through readCompanyFacts. A prompt builder is a
+// core source file that builds a model request (`TextModelRequest`, a `system` text, a `.complete(` call)
+// or a `*Prompt` input. The check covers the builder and every module it imports from its own feature
+// folder (its helpers), outside src/business (where the one read lives).
 const SOURCE = fileURLToPath(new URL("../src", import.meta.url));
-const stripComments = (source: string) => source.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+
+/** Drops comments and keeps strings and template literals whole, so "https://" or "/*" in a string hides nothing. */
+function stripComments(source: string): string {
+  let out = "";
+  let i = 0;
+  while (i < source.length) {
+    const c = source[i]!;
+    const next = source[i + 1];
+    if (c === "/" && next === "/") {
+      while (i < source.length && source[i] !== "\n") i++;
+    } else if (c === "/" && next === "*") {
+      const end = source.indexOf("*/", i + 2);
+      i = end === -1 ? source.length : end + 2;
+    } else if (c === "'" || c === '"' || c === "`") {
+      let j = i + 1;
+      while (j < source.length && source[j] !== c) j += source[j] === "\\" ? 2 : 1;
+      out += source.slice(i, j + 1);
+      i = j + 1;
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out;
+}
+
 function isPromptBuilder(source: string): boolean {
   const code = stripComments(source);
-  return /\bTextModelRequest\b/.test(code) || /\b[A-Z]\w*Prompt\b/.test(code) || /\bsystem\s*:/.test(code);
+  return /\bTextModelRequest\b/.test(code) || /\b[A-Z]\w*Prompt\b/.test(code) || /\bsystem\s*[:,}]/.test(code) || /\.complete\s*\(/.test(code);
 }
+
+const TENANTS = String.raw`(?:ONLY\s+)?(?:"?public"?\s*\.\s*)?"?tenants"?\b`;
 /** The ways a builder could read the business that are not the one read. */
-function otherProfileReads(source: string): string[] {
+function otherProfileReads(source: string, inBuilder = true): string[] {
   const code = stripComments(source);
   const patterns: [RegExp, string][] = [
     [/\bbusiness_profiles\b/, "reads business_profiles"],
-    [/\b(?:FROM|JOIN)\s+(?:public\.)?tenants\b/i, "reads tenants"],
     [/\bgetBusinessProfile\b/, "calls getBusinessProfile"],
+    [/\.getBusiness\s*\(/, "calls a getBusiness read"],
+    [/\bmemberProfile\s*\(/, "reads the business name through memberProfile"],
+    // An imported module may read tenants for other reasons (a kill switch); only the name is the business.
+    [new RegExp(String.raw`\bSELECT\b[^;]*?\bname\b[^;]*?\bFROM\s+(?:[^;]*?,\s*)?${TENANTS}`, "is"), "reads the tenant's name"],
   ];
+  if (inBuilder) patterns.push([new RegExp(String.raw`\b(?:FROM|JOIN)\s+(?:[^;()]*?,\s*)?${TENANTS}`, "i"), "reads tenants"]);
   return patterns.filter(([pattern]) => pattern.test(code)).map(([, label]) => label);
 }
 
-describe("one read for every prompt builder (BP-20)", () => {
+/** The core modules a file imports, resolved to their .ts sources. */
+function importsOf(file: string, source: string, known: Set<string>): string[] {
+  const code = stripComments(source);
+  const found: string[] = [];
+  for (const match of code.matchAll(/(?:\bfrom\s*|\bimport\s*\(?\s*)["'](\.{1,2}\/[^"']+)["']/g)) {
+    const base = join(dirname(file), match[1]!).replace(/\.js$/, "");
+    const target = [`${base}.ts`, join(base, "index.ts")].find((candidate) => known.has(candidate));
+    if (target) found.push(target);
+  }
+  return found;
+}
+
+async function coreSources(): Promise<Map<string, string>> {
+  const files = new Map<string, string>();
+  async function visit(path: string): Promise<void> {
+    for (const item of await readdir(path, { withFileTypes: true })) {
+      const file = join(path, item.name);
+      if (item.isDirectory()) await visit(file);
+      else if (/\.ts$/.test(file)) files.set(file, await readFile(file, "utf8"));
+    }
+  }
+  await visit(SOURCE);
+  return files;
+}
+
+/** What one builder breaks, checking it and every core module it reaches outside src/business. */
+function builderViolations(builder: string, files: Map<string, string>, root = SOURCE): string[] {
+  const known = new Set(files.keys());
+  const business = join(root, "business") + "/";
+  const feature = join(root, relative(root, builder).split("/")[0]!) + "/";
+  const seen = new Set<string>([builder]);
+  const queue = [builder];
+  const violations: string[] = [];
+  let usesFacts = false;
+  let carriesRule = false;
+  while (queue.length > 0) {
+    const file = queue.shift()!;
+    const source = files.get(file)!;
+    const code = stripComments(source);
+    usesFacts ||= /\bcompanyFactsForPrompt\b/.test(code);
+    carriesRule ||= /\bCOMPANY_FACTS_RULE\b/.test(code);
+    violations.push(...otherProfileReads(source, file === builder).map((label) => `${relative(root, file)}: ${label}`));
+    if (file === builder && usesFacts && !/\breadCompanyFacts\b/.test(code))
+      violations.push(`${relative(root, file)}: renders company facts it did not read with readCompanyFacts`);
+    for (const next of importsOf(file, source, known)) {
+      // The walk stays in the builder's own feature folder: its helpers. Shared modules elsewhere read the
+      // profile for their own screens and do not build prompts.
+      if (seen.has(next) || next.startsWith(business) || !next.startsWith(feature)) continue;
+      seen.add(next);
+      queue.push(next);
+    }
+  }
+  if (usesFacts && !carriesRule) violations.push(`${relative(root, builder)}: puts company facts in a prompt without COMPANY_FACTS_RULE`);
+  return violations;
+}
+
+describe("one read for every prompt builder (BP-21)", () => {
   it.each([
     ["SQL on the profile", "const r = await tx.query('SELECT tone FROM business_profiles WHERE tenant_id=$1'); const p: FollowUpPrompt = r;"],
     ["the tenant's name", "const x = { system: S, input: await tx.query(`SELECT name FROM tenants WHERE tenant_id=$1`) };"],
     ["a JOIN on tenants", "const q = `SELECT t.name FROM intake_items i JOIN tenants t ON t.tenant_id=i.tenant_id`; let r: TextModelRequest;"],
+    ["a quoted, qualified table", "const q = 'SELECT name FROM \"public\".\"tenants\"'; let r: TextModelRequest;"],
+    ["a comma join", "const q = 'SELECT t.name FROM intake_items i, tenants t'; let r: TextModelRequest;"],
+    ["FROM ONLY", "const q = 'SELECT name FROM ONLY tenants'; let r: TextModelRequest;"],
+    ["the session's read", "const p = await reads.getBusiness(principal); let r: TextModelRequest;"],
+    ["the member profile", "const p = await memberProfile(tx, tenantId, memberId); let r: TextModelRequest;"],
     ["the profile handler", "const p = await getBusinessProfile(tx, id); const req: TextModelRequest = { system: S, input: p };"],
+    ["a read hidden after a URL", "const u = 'https://example.test'; const q = 'SELECT tone FROM business_profiles'; model.complete({ system, input: q });"],
   ])("flags a prompt builder that reads %s", (_label, source) => {
     expect(isPromptBuilder(source)).toBe(true);
     expect(otherProfileReads(source).length).toBeGreaterThan(0);
@@ -258,33 +363,33 @@ describe("one read for every prompt builder (BP-20)", () => {
     expect(otherProfileReads(source)).toEqual([]);
   });
 
+  it("follows a builder into the helpers it imports, and wants COMPANY_FACTS_RULE with the facts", () => {
+    const root = "/core";
+    const files = new Map([
+      [`${root}/agents/builder.ts`, "import { load } from './helper.js'; const req: TextModelRequest = { system: S, input: await load(tx) };"],
+      [`${root}/agents/helper.ts`, "export const load = (tx) => tx.query('SELECT tone FROM business_profiles');"],
+      [`${root}/agents/kill.ts`, "export const killed = (tx) => tx.query('SELECT killed_at FROM tenants');"],
+      [`${root}/agents/clean.ts`, "import { killed } from './kill.js'; const company = companyFactsForPrompt(await readCompanyFacts(tx, id)); model.complete({ system, input: company });"],
+    ]);
+    expect(builderViolations(`${root}/agents/builder.ts`, files, root)).toEqual(["agents/helper.ts: reads business_profiles"]);
+    expect(builderViolations(`${root}/agents/clean.ts`, files, root)).toEqual(["agents/clean.ts: puts company facts in a prompt without COMPANY_FACTS_RULE"]);
+  });
+
   it("no prompt builder in core reads the profile or the tenant's name another way, and each one with business facts uses readCompanyFacts", async () => {
-    const files: string[] = [];
-    async function visit(path: string): Promise<void> {
-      for (const item of await readdir(path, { withFileTypes: true })) {
-        const file = join(path, item.name);
-        if (item.isDirectory()) await visit(file);
-        else if (/\.ts$/.test(file)) files.push(file);
-      }
-    }
-    await visit(SOURCE);
+    const files = await coreSources();
     const builders: string[] = [];
     const violations: string[] = [];
-    for (const file of files) {
-      const source = await readFile(file, "utf8");
+    for (const [file, source] of files) {
       if (!isPromptBuilder(source)) continue;
-      const name = relative(SOURCE, file);
-      builders.push(name);
-      violations.push(...otherProfileReads(source).map((label) => `${name}: ${label}`));
-      if (/\bcompanyFactsForPrompt\b/.test(stripComments(source)) && !/\breadCompanyFacts\b/.test(stripComments(source)))
-        violations.push(`${name}: renders company facts it did not read with readCompanyFacts`);
+      builders.push(relative(SOURCE, file));
+      violations.push(...builderViolations(file, files));
     }
     // The detector finds the builders that exist today, so it is not passing on an empty list.
     expect(builders).toEqual(expect.arrayContaining(["agents/candidates.ts", "templates/suggest.ts", "browser/fake-runner.ts"]));
-    expect(violations).toEqual([]);
+    expect([...new Set(violations)]).toEqual([]);
     // The two builders that put the business in a prompt read it through the one read.
     for (const name of ["agents/candidates.ts", "templates/suggest.ts"]) {
-      expect(stripComments(await readFile(join(SOURCE, name), "utf8"))).toMatch(/\breadCompanyFacts\(/);
+      expect(stripComments(files.get(join(SOURCE, name))!)).toMatch(/\breadCompanyFacts\(/);
     }
   });
 });

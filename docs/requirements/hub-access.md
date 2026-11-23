@@ -360,7 +360,8 @@ Owners see this text when they choose scopes.
 - `inbox:read`: website requests and replies with customer identities and message text,
   and the names and emails of staff who replied.
 - `results:read`: lead, booking and revenue totals by source.
-- `business:read`: the business profile (name, contact details, address, currency, zone).
+- `business:read`: the business profile (name, contact details, address, currency, zone, opening
+  hours, tone of voice and policies; who set each fact stays in the hub).
 - `sites:publish` (not a read scope; revision 4): "Publish and roll back the named sites.
   Cannot read customers." The owner sees the names of the bound sites next to it.
 

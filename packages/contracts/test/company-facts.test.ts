@@ -66,7 +66,7 @@ describe("tone and policies in a save (BP-17, BP-18)", () => {
   });
 });
 
-describe("the prompt form (BP-20)", () => {
+describe("the prompt form (BP-21)", () => {
   const mark = { setBy: "6f1c2a9e-3b4d-4e8f-9a1b-2c3d4e5f6a70", setAt: "2026-11-22T09:00:00.000Z" };
   const missing = { status: "not_known" } as const;
 

@@ -129,8 +129,12 @@ export const businessPolicySchema = z.strictObject({
   revision: z.number().int().min(2).max(2_147_483_647),
 });
 export type BusinessPolicy = z.infer<typeof businessPolicySchema>;
-/** BP-19: the facts with a single value, each with its mark; a key is absent when no mark is recorded. */
-export const MARKED_FACTS = ["displayName", "description", "services", "timeZone", "hours", "tone"] as const;
+/**
+ * BP-19: the facts whose last change is marked, keyed by field; a key is absent when no mark is recorded.
+ * The mark names who last changed the value, clearing included, so a mark can sit on a fact that reads
+ * as not known. `policies` marks the last change to the list; each policy also carries its own mark.
+ */
+export const MARKED_FACTS = ["displayName", "description", "services", "timeZone", "hours", "tone", "policies"] as const;
 export type MarkedFact = (typeof MARKED_FACTS)[number];
 export const factMarksSchema = z.strictObject({
   displayName: factMarkSchema.optional(),
@@ -139,6 +143,7 @@ export const factMarksSchema = z.strictObject({
   timeZone: factMarkSchema.optional(),
   hours: factMarkSchema.optional(),
   tone: factMarkSchema.optional(),
+  policies: factMarkSchema.optional(),
 });
 export type FactMarks = z.infer<typeof factMarksSchema>;
 
@@ -160,6 +165,11 @@ export const businessProfileSchema = z.strictObject({
   updatedAt: instantSchema,
 });
 export type BusinessProfile = z.infer<typeof businessProfileSchema>;
+/** BP-21: the profile an outside agent reads (MCP `get_business`): the facts without who set them. */
+export const agentBusinessProfileSchema = businessProfileSchema.omit({ factMarks: true }).extend({
+  policies: z.array(z.strictObject({ title: z.string(), text: z.string() })),
+});
+export type AgentBusinessProfile = z.infer<typeof agentBusinessProfileSchema>;
 
 /** The editable fields (BP-6): `displayName` and `currency` cannot be cleared. */
 export const businessProfileChangesSchema = z.strictObject({
@@ -206,11 +216,13 @@ export const businessProfileReadSchema = z.object({
   // BP-10: an older API sends neither; the reader then shows an empty description and no services.
   description: z.string().nullable().optional(),
   services: z.array(z.string()).optional(),
-  // BP-21: an older API sends none of the company facts; the reader then shows them as not set.
-  hours: z.record(z.string(), z.object({ open: z.string(), close: z.string() }).nullable()).nullable().optional(),
-  tone: z.string().nullable().optional(),
-  policies: z.array(z.object({ title: z.string(), text: z.string(), setBy: z.string(), setAt: z.string(), revision: z.number().optional() })).optional(),
-  factMarks: z.record(z.string(), z.object({ setBy: z.string(), setAt: z.string(), revision: z.number().optional() })).optional(),
+  // BP-16..BP-19: an older API sends none of the company facts, and a newer one may send a shape this
+  // reader does not know. They are read here as they come; the client checks each one, and a fact it cannot
+  // read is shown read-only and never sent back, so a save cannot wipe what it could not see.
+  hours: z.unknown().optional(),
+  tone: z.unknown().optional(),
+  policies: z.unknown().optional(),
+  factMarks: z.unknown().optional(),
   revision: z.number().int(),
   updatedAt: z.string(),
 });

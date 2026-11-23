@@ -1,4 +1,4 @@
-// Company facts (docs/requirements/business-profile.md BP-19, BP-20): the one read every agent prompt
+// Company facts (docs/requirements/business-profile.md BP-19, BP-21): the one read every agent prompt
 // builder uses for what the business is, says and does. A guard test (packages/core/test/company-facts.test.ts)
 // fails when a prompt builder reads the profile or the tenant's name any other way.
 import type { CompanyFacts, Fact, FactMark, FactMarks } from "@zs/contracts";

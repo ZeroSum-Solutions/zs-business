@@ -323,7 +323,7 @@ export const costWarnOutputSchema = z.lazy(() => actionResultSchema.extend({ res
 
 /** G-9: what the model sees about one inquiry, and nothing else. */
 export const followUpPromptSchema = z.strictObject({
-  /** business-profile.md BP-20: the company facts, from the one read every prompt builder uses. */
+  /** business-profile.md BP-21: the company facts, from the one read every prompt builder uses. */
   company: companyFactsPromptSchema,
   customerName: z.string(),
   requestedAt: instantSchema,

@@ -90,7 +90,7 @@ export async function checkCandidate(
 
 /**
  * G-9: what the model sees about one inquiry: the business, the customer and their request. The
- * business comes only from the company facts read (business-profile.md BP-20).
+ * business comes only from the company facts read (business-profile.md BP-21).
  */
 export async function buildPrompt(tx: Transaction, tenantId: string, candidate: Candidate): Promise<FollowUpPrompt> {
   const company = companyFactsForPrompt(await readCompanyFacts(tx, tenantId));

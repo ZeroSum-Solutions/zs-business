@@ -1,5 +1,5 @@
 // Wording suggestions for a templated kind (agents.md G-19). Original code. The owner asks for a
-// suggested wording; the input is the company facts (business-profile.md BP-20), the kind, the channel
+// suggested wording; the input is the company facts (business-profile.md BP-21), the kind, the channel
 // and the variable names, never customer data, so the request goes to the `no_personal_data` lane (G-18). Each suggestion
 // is one model call under G-15: a reserved `agent_model_calls` row (no run), counted against the
 // kind's `maxCostMicrosPerDay`, and refused with `Conflict` `cost_cap` before any provider call
