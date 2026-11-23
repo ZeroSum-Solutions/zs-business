@@ -14,6 +14,9 @@ export type CursorKey = readonly [value: string, id: string];
 
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const MICROS = /^-?[0-9]{1,18}$/;
+/** Postgres timestamps start at 4713 BC; an earlier value would fail in SQL instead of as bad input. */
+const MIN_MICROS = -210_866_803_200_000_000n;
+const inRange = (value: string) => MICROS.test(value) && BigInt(value) >= MIN_MICROS;
 
 export function encodeCursor(kind: CursorKind, key: CursorKey): string {
   return Buffer.from(JSON.stringify([kind, ...key]), "utf8").toString("base64url");
@@ -34,7 +37,7 @@ export function decodeCursor(kind: CursorKind, query: { cursor?: string | undefi
   if (!Array.isArray(value) || value.length !== 3 || value[0] !== kind) throw invalid("cursor", "Not a cursor for this list");
   const [, sortValue, id] = value as unknown[];
   const valid = typeof sortValue === "string" && typeof id === "string" && ID.test(id) &&
-    (kind === "contacts.name" || kind === "outreach.prospects" ? sortValue.length <= 1000 && !sortValue.includes("\0") : MICROS.test(sortValue));
+    (kind === "contacts.name" || kind === "outreach.prospects" ? sortValue.length <= 1000 && !sortValue.includes("\0") : inRange(sortValue));
   if (!valid) throw invalid("cursor", "Not a cursor for this list");
   return [sortValue as string, id as string];
 }

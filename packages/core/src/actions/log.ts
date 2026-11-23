@@ -1,10 +1,10 @@
 // The owner's action log (docs/direction.md rule 6, backlog B05). Reads committed actions under
 // the runtime role and turns each into a redacted receipt: actor, type, target, approval, outcome
-// and time. The payload and the result never leave this file; only a short status word from the
-// result does, and only when it matches ACTION_OUTCOME_PATTERN, so no text or address can pass.
+// and time. The payload and the result never leave this file. From the result only a status word on
+// OUTCOMES, a notice code, and a committed contact's ID are read; nothing else can pass.
 import {
-  ACTION_OUTCOME_PATTERN,
   AGENT_KINDS,
+  QUEUE_ACTIONS,
   actionLogEntrySchema,
   type ActionActor,
   type ActionLogEntry,
@@ -17,6 +17,7 @@ import {
 import type { Transaction } from "@zs/db";
 import { agentActorId } from "../agents/controls.js";
 import { derivedId } from "../edge/ids.js";
+import { outreachOperatorActorId } from "../edge/outreach-session.js";
 import { decodeCursor, encodeCursor, microsToTimestamp, timestampToMicros } from "../reads/cursor.js";
 import { page } from "../reads/page.js";
 
@@ -44,6 +45,7 @@ async function serviceActors(tx: Transaction, tenantId: string): Promise<Map<str
   const actors = new Map<string, ServiceActor>();
   for (const agent of AGENT_KINDS) actors.set(agentActorId(tenantId, agent), { kind: "agent", agent });
   for (const [name, part] of SYSTEM_ID_PARTS) actors.set(derivedId(tenantId, part, "actor"), { kind: "system", name });
+  actors.set(outreachOperatorActorId(tenantId), { kind: "system", name: "outreach" });
   const tokens = (await tx.query<{ id: string }>("SELECT id FROM automation_tokens WHERE tenant_id=$1", [tenantId])).rows;
   for (const token of tokens) actors.set(derivedId(tenantId, "activepieces", token.id, "actor"), { kind: "system", name: "automation" });
   return actors;
@@ -58,6 +60,7 @@ interface ActionLogRow {
   approval_id: string | null;
   approval_status: ApprovalStatus | null;
   result_status: string | null;
+  result_notice: string | null;
   member_id: string | null;
   member_role: MemberRole | null;
   created_at: Date;
@@ -65,25 +68,58 @@ interface ActionLogRow {
 }
 
 /**
- * Only these columns are read. `payload` and `result` are not selected; the result's top-level
- * `status`, when it is a string, is the one value taken from it.
+ * The result words an owner may see as the outcome. A status is often a record's state; the list
+ * keeps out anything a callback or provider could fill with free text.
+ */
+const OUTCOMES: ReadonlySet<string> = new Set([
+  "queued", "sent", "delivered", "undelivered", "failed", "dead", "completed", "applied", "discarded",
+  "confirmed", "cancelled", "approved", "rejected", "revoked", "expired", "published", "connected",
+  "disconnected", "active", "invited", "granted", "denied", "skipped",
+]);
+
+const UUID_TEXT = "'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'";
+const text = (path: string) => `CASE WHEN jsonb_typeof(${path}) = 'string' THEN left(${path} #>> '{}', 41) END`;
+
+/**
+ * Only these columns are read; `payload` and `result` are never selected whole.
+ * - Approval: a row in `approvals`. Direct writes carry a derived approval_reference with no row, so
+ *   the join leaves them null. A templated send (A-15) ran under the standing approval named in its
+ *   payload; only that ID is read, to join on.
+ * - Target: a contact create-or-find that matched an existing contact names it in the result; the
+ *   requested ID was never written, so the receipt points to the matched one.
+ * - Outcome: the result's top-level `status` and `notice` strings, cut to 41 characters.
  */
 const SELECT = `
-  SELECT x.id, x.actor_id, x.action_type, x.target->>'type' AS target_type, x.target->>'id' AS target_id,
-         x.approval_reference->>'id' AS approval_id, ap.status AS approval_status,
-         CASE WHEN jsonb_typeof(x.result) = 'object' AND jsonb_typeof(x.result->'status') = 'string'
-              THEN left(x.result->>'status', 41) END AS result_status,
+  SELECT x.id, x.actor_id, x.action_type, x.target->>'type' AS target_type,
+         CASE WHEN x.target->>'type' = 'contact' AND jsonb_typeof(x.result) = 'object'
+               AND jsonb_typeof(x.result->'contact') = 'object' AND (x.result->'contact'->>'id') ~ ${UUID_TEXT}
+              THEN x.result->'contact'->>'id' ELSE x.target->>'id' END AS target_id,
+         ap.id AS approval_id, ap.status AS approval_status,
+         CASE WHEN jsonb_typeof(x.result) = 'object' THEN ${text("x.result->'status'")} END AS result_status,
+         CASE WHEN jsonb_typeof(x.result) = 'object' THEN ${text("x.result->'notice'")} END AS result_notice,
          m.id AS member_id, m.role::text AS member_role, x.created_at, ${timestampToMicros("x.created_at")} AS sort_value
     FROM actions x
-    LEFT JOIN approvals ap ON ap.tenant_id = x.tenant_id AND x.approval_reference IS NOT NULL
-     AND ap.id = (x.approval_reference->>'id')::uuid
+    LEFT JOIN approvals ap ON ap.tenant_id = x.tenant_id AND ap.id = (
+      CASE WHEN x.action_type IN (${Object.values(QUEUE_ACTIONS).map((type) => `'${type}'`).join(", ")})
+           THEN CASE WHEN (x.payload->>'standingApprovalId') ~ ${UUID_TEXT} THEN (x.payload->>'standingApprovalId')::uuid END
+           WHEN (x.approval_reference->>'id') ~ ${UUID_TEXT} THEN (x.approval_reference->>'id')::uuid END)
     LEFT JOIN tenant_members m ON m.tenant_id = x.tenant_id AND m.user_id = x.actor_id`;
+
+/**
+ * How the action ended, in one allowlisted word. A notice other than "queued" means the action
+ * committed but sent nothing (no customer, no email, already cancelled): "skipped".
+ */
+function outcomeOf(status: string | null, notice: string | null): string {
+  if (status !== null && OUTCOMES.has(status)) return status;
+  if (notice !== null) return notice === "queued" ? "queued" : "skipped";
+  return "done";
+}
 
 /** Exported for the redaction tests: one row as the owner sees it. */
 export function actionLogEntry(row: Omit<ActionLogRow, "sort_value">, services: ReadonlyMap<string, ServiceActor>): ActionLogEntry {
   const actor: ActionActor = services.get(row.actor_id) ??
     { kind: "person", memberId: row.member_id, role: row.member_role };
-  const outcome = row.result_status !== null && ACTION_OUTCOME_PATTERN.test(row.result_status) ? row.result_status : "done";
+  const outcome = outcomeOf(row.result_status, row.result_notice);
   // Parse on the way out: a strict schema refuses any field this file did not mean to send.
   return actionLogEntrySchema.parse({
     id: row.id,

@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tray, TrayBody, TrayHeader, TrayTitle } from "@/components/ui/card";
 import { EmptyState, ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
+import { isApiError } from "@/lib/api";
 import { actionLabel, actorLabel, approvalBadge, outcomeLabel, recordLabel, shortId } from "@/lib/action-log";
 import { useActionLog, useActionReceipt, useDisplayZone } from "@/lib/queries";
 import { useCan } from "@/lib/session";
@@ -46,8 +47,8 @@ function ActionRow({ entry }: { entry: ActionLogEntry }) {
       >
         <ActorIcon actor={entry.actor} />
         <span className="min-w-0 flex-1">
-          <span className="block truncate font-bold text-fg">{actionLabel(entry.actionType)}</span>
-          <span className="block truncate text-sm text-muted">{actorLabel(entry.actor)} · {when(entry.createdAt)}</span>
+          <span className="block font-bold [overflow-wrap:anywhere] text-fg">{actionLabel(entry.actionType)}</span>
+          <span className="block text-sm text-muted">{actorLabel(entry.actor)} · <span className="whitespace-nowrap">{when(entry.createdAt)}</span></span>
           {approval ? (
             <span className="mt-1.5 flex flex-wrap gap-1.5">
               <Badge tone={approval.tone}><SealCheck aria-hidden />{approval.label}</Badge>
@@ -55,7 +56,7 @@ function ActionRow({ entry }: { entry: ActionLogEntry }) {
             </span>
           ) : null}
         </span>
-        <Badge tone="neutral">{outcomeLabel(entry.outcome)}</Badge>
+        <Badge tone="neutral" className="shrink-0">{outcomeLabel(entry.outcome)}</Badge>
         <CaretRight size={16} aria-hidden className="shrink-0 text-meta" />
       </Link>
     </li>
@@ -78,15 +79,17 @@ export function ActivityView() {
           <TrayHeader><TrayTitle id="activity-list-title">Recent actions</TrayTitle></TrayHeader>
           <TrayBody className="px-2 pb-2">
             {log.isPending ? <LoadingRows rows={5} label="Loading actions" /> : null}
-            {log.isError ? <ErrorNote error={log.error} retry={() => void log.refetch()} /> : null}
+            {log.isError && !log.isFetchNextPageError ? <ErrorNote error={log.error} retry={() => void log.refetch()} /> : null}
             {log.isSuccess && entries.length === 0 ? <EmptyState title="Nothing yet">Actions show here as you and your agents work.</EmptyState> : null}
             {entries.length > 0 ? (
               <ul className="grid grid-cols-1 gap-1.5 lg:gap-2" aria-label="Actions">
                 {entries.map((entry) => <ActionRow key={entry.id} entry={entry} />)}
               </ul>
             ) : null}
+            {/* A failed "Show older" keeps the rows already shown, with the error under them. */}
+            {log.isFetchNextPageError ? <div className="mt-2"><ErrorNote error={log.error} retry={() => void log.fetchNextPage()} /></div> : null}
             {log.hasNextPage ? (
-              <Button variant="secondary" className="mt-1" onClick={() => void log.fetchNextPage()} disabled={log.isFetchingNextPage}>
+              <Button variant="secondary" className="mt-1" onClick={() => void log.fetchNextPage()} disabled={log.isFetchingNextPage} aria-busy={log.isFetchingNextPage}>
                 {log.isFetchingNextPage ? "Loading" : "Show older"}
               </Button>
             ) : null}
@@ -128,7 +131,7 @@ export function ReceiptView({ id }: { id: string }) {
           <TrayHeader><TrayTitle id="receipt-title">{entry ? actionLabel(entry.actionType) : "Action"}</TrayTitle></TrayHeader>
           <div className="px-2 pb-2">
             {receipt.isPending ? <LoadingRows rows={4} label="Loading receipt" /> : null}
-            {receipt.isError ? <ErrorNote error={receipt.error} retry={() => void receipt.refetch()} /> : null}
+            {receipt.isError ? <ErrorNote error={receipt.error} retry={isApiError(receipt.error, "not_found") ? undefined : () => void receipt.refetch()} /> : null}
             {entry ? (
               <dl data-receipt={entry.id} className="divide-y divide-border-soft rounded-md bg-surface px-3 shadow-card">
                 <Field label="By">{actorLabel(entry.actor)}</Field>

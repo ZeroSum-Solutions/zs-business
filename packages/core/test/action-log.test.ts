@@ -13,6 +13,7 @@ import {
   imageActorId,
   inboundSmsActorId,
   intakeWorkerActorId,
+  outreachOperatorActorId,
   publicIntakeActorId,
   smsStatusActorId,
   transcriptionActorId,
@@ -83,6 +84,8 @@ async function insertApproval(tenant: string, decidedBy: string): Promise<string
 let sendActionId: string;
 let approvalId: string;
 let tokenId: string;
+let contactId: string;
+let standingActionId: string;
 
 beforeAll(async () => {
   database = await createTestDatabase();
@@ -96,7 +99,12 @@ beforeAll(async () => {
   ownerB = (await addMember(tenantB, "owner")).userId;
 
   // A real action through the one action path: a contact with a name, an address and a phone.
-  await sessionFor(ownerA).upsertContact({ displayName: "Mira Rowe", email: EMAIL, phone: PHONE }, randomUUID());
+  const saved = await sessionFor(ownerA).upsertContact({ displayName: "Mira Rowe", email: EMAIL, phone: PHONE }, randomUUID());
+  contactId = (saved.result as { contact: { id: string } }).contact.id;
+  // The same address under a new key finds that contact; its requested ID is never written.
+  clock.now = () => at(1);
+  await sessionFor(ownerA).upsertContact({ displayName: "Mira Rowe", email: EMAIL }, randomUUID());
+  clock.now = () => new Date(START);
 
   approvalId = await insertApproval(tenantA, ownerA);
   sendActionId = await insertAction(tenantA, {
@@ -114,6 +122,21 @@ beforeAll(async () => {
     "INSERT INTO automation_tokens (tenant_id,id,name,created_by,created_at) VALUES ($1,$2,'Zap',$3,$4)", [tenantA, tokenId, ownerA, at(0)],
   ));
   await insertAction(tenantA, { actorId: automationActorId(tenantA, tokenId), actionType: "approval.request", createdAt: at(40) });
+  // A-15: a templated send runs under the standing approval named in its payload; its own
+  // approval_reference is derived and has no approvals row.
+  standingActionId = await insertAction(tenantA, {
+    actorId: agentActorId(tenantA, "appointment_reminder"), actionType: "agent.reminder.queue", approvalId: randomUUID(),
+    payload: { standingApprovalId: approvalId, values: { name: "Mira" } }, result: { status: "queued" }, createdAt: at(50),
+  });
+  // A status word off the allowlist is not shown, even one that looks like a code.
+  await insertAction(tenantA, {
+    actorId: smsStatusActorId(tenantA), actionType: "sms.status", result: { status: "mira_rowe_haldenrowe" }, createdAt: at(60),
+  });
+  // A notice other than "queued" means the action sent nothing.
+  await insertAction(tenantA, {
+    actorId: publicIntakeActorId(tenantA), actionType: "booking.confirmation_send", result: { notice: "no_email" }, createdAt: at(70),
+  });
+  await insertAction(tenantA, { actorId: outreachOperatorActorId(tenantA), actionType: "outreach.mailbox.connect", createdAt: at(80) });
 
   // Tenant B's own action, with A's address in it, must never reach A's log.
   await insertAction(tenantB, { actorId: ownerB, actionType: "contact.upsert", payload: { email: EMAIL }, createdAt: at(15) });
@@ -164,6 +187,27 @@ describe("redaction", () => {
     const byType = Object.fromEntries(page.items.map((item) => [item.actionType, item]));
     expect(byType["reply.send"]!.outcome).toBe("queued");
     expect(byType["intake.submit"]!.outcome).toBe("done");
+    expect(byType["sms.status"]!.outcome).toBe("done");
+    expect(byType["booking.confirmation_send"]!.outcome).toBe("skipped");
+  });
+
+  it("shows an approval only where an approvals row stands behind the action", async () => {
+    const page = await sessionFor(ownerA).listActions({ limit: 100 });
+    // Direct writes carry a derived approval_reference with no approvals row: no approval card.
+    const contacts = page.items.filter((item) => item.actionType === "crm.contact.create-or-find");
+    expect(contacts).toHaveLength(2);
+    for (const item of contacts) expect(item.approval).toBeNull();
+    expect(page.items.filter((item) => item.approval !== null).map((item) => item.id).sort())
+      .toEqual([sendActionId, standingActionId].sort());
+    expect(await sessionFor(ownerA).getAction(standingActionId)).toMatchObject({
+      approval: { id: approvalId, status: "approved" }, outcome: "queued", actor: { kind: "agent", agent: "appointment_reminder" },
+    });
+  });
+
+  it("points a contact receipt at the contact that was written, also when an existing one matched", async () => {
+    const page = await sessionFor(ownerA).listActions({ limit: 100 });
+    const contacts = page.items.filter((item) => item.actionType === "crm.contact.create-or-find");
+    expect(contacts.map((item) => item.target)).toEqual([{ type: "contact", id: contactId }, { type: "contact", id: contactId }]);
   });
 
   it("points each row to its source record and its approval", async () => {
@@ -188,6 +232,7 @@ describe("actors", () => {
     expect(byType["reply.send"]).toEqual({ kind: "agent", agent: "inquiry_followup" });
     expect(byType["intake.submit"]).toEqual({ kind: "system", name: "public_intake" });
     expect(byType["approval.request"]).toEqual({ kind: "system", name: "automation" });
+    expect(byType["outreach.mailbox.connect"]).toEqual({ kind: "system", name: "outreach" });
     // A member who left is still a person, with no member ID.
     expect(page.items.some((item) => item.actor.kind === "person" && item.actor.memberId === null)).toBe(true);
   });
@@ -227,5 +272,8 @@ describe("paging", () => {
     const foreign = Buffer.from(JSON.stringify(["approvals.recent", "1", randomUUID()])).toString("base64url");
     await expect(sessionFor(ownerA).listActions({ cursor: foreign })).rejects.toMatchObject({ code: "ValidationFailed" });
     await expect(sessionFor(ownerA).listActions({ limit: "500" })).rejects.toMatchObject({ code: "ValidationFailed" });
+    // Before Postgres's first timestamp: bad input, not a server error.
+    const ancient = Buffer.from(JSON.stringify(["actions.recent", "-999999999999999999", randomUUID()])).toString("base64url");
+    await expect(sessionFor(ownerA).listActions({ cursor: ancient })).rejects.toMatchObject({ code: "ValidationFailed" });
   });
 });
