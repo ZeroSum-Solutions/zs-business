@@ -123,6 +123,8 @@ export function cancellationNotice(input: {
     contactId: input.contactId,
     channel: "email",
     purpose: "transactional",
+    // delivery.md D-6: a booking notice binds no address; it goes to the contact's current one.
+    destination: null,
     subject: `Your appointment on ${when} is cancelled`,
     body: [
       `Hi ${firstName(input.displayName)},`,

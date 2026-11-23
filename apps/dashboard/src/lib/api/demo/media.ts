@@ -301,7 +301,7 @@ export function createDemoMedia(options: { clock?: DemoClock; newId?: () => stri
           target: { tenantId: DEMO_TENANT_ID, type: "media_variant", id: input.variantId },
           payload: { variantId: input.variantId, sha256: body.sha256 }, summary: "Approve an edited image",
           status: "pending", standing: "pending", requestedBy: DEMO_OWNER.userId, requestedAt: iso(now), expiresAt: iso(now + 7 * DAY),
-          decidedBy: null, decidedAt: null, decisionNote: null, revokedBy: null, revokedAt: null, revokeNote: null, executedActionId: null,
+          decidedBy: null, decidedAt: null, decisionNote: null, revokedBy: null, revokedAt: null, revokeNote: null, executedActionId: null, send: null,
         };
         approvals.set(approval.id, approval);
         return approval;

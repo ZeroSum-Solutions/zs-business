@@ -55,6 +55,21 @@ export const rejectApprovalCommandSchema = decisionCommand("approval.reject");
 export const revokeApprovalCommandSchema = decisionCommand("approval.revoke");
 export type DecideApprovalCommand = z.infer<typeof approveApprovalCommandSchema>;
 
+/**
+ * A-16: what a proposal to send one message will send, resolved for the approvals queue: the
+ * customer, the channel, the address the proposal binds and the exact words. The address is the
+ * one stored with the proposal, never a fresh lookup, so the queue shows what approval binds.
+ */
+export const approvalSendSchema = z.strictObject({
+  contactId: idSchema,
+  channel: z.enum(["email", "sms"]),
+  /** Null when the customer had no address when the send was proposed (or a proposal from before A-16). */
+  destination: z.string().nullable(),
+  subject: z.string().nullable(),
+  body: z.string(),
+});
+export type ApprovalSend = z.infer<typeof approvalSendSchema>;
+
 export const approvalRecordSchema = z.strictObject({
   id: idSchema,
   tenantId: idSchema,
@@ -75,6 +90,8 @@ export const approvalRecordSchema = z.strictObject({
   revokeNote: z.string().nullable(),
   /** A-11: the action that ran under this approval, if one has. */
   executedActionId: idSchema.nullable(),
+  /** A-16: the resolved send for a message-send proposal, else null. Absent in results stored before A-16. */
+  send: approvalSendSchema.nullable().default(null),
 });
 export type ApprovalRecord = z.infer<typeof approvalRecordSchema>;
 export const approvalOutputSchema = z.lazy(() => actionResultSchema.extend({ result: approvalRecordSchema }));

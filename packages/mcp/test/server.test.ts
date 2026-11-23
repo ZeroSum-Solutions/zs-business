@@ -424,7 +424,7 @@ describe("MCP tools over an in-memory transport", () => {
     const pending = approvalPageSchema.parse((await callTool(client, "list_approvals", { status: "pending" })).value).items
       .filter((approval) => approval.actionType === "inbox.reply.send");
     expect(pending).toEqual([expect.objectContaining({
-      target: { tenantId: fixture.a.tenantId, type: "inbox_reply", id: reply.id }, payload: { replyId: reply.id },
+      target: { tenantId: fixture.a.tenantId, type: "inbox_reply", id: reply.id }, payload: { replyId: reply.id, destination: "maren@example.com" },
     })]);
     const owner = createSession({ db: database.db, clock, generateId: randomUUID }, { tenantId: fixture.a.tenantId, actorId: ownerId });
     const approved = await owner.approveReply(reply.id, {}, "ra-1");
@@ -434,7 +434,7 @@ describe("MCP tools over an in-memory transport", () => {
     const events = await fixture.service((tx) => tx.query<{ payload: unknown }>(
       "SELECT payload FROM outbox WHERE tenant_id=$1 AND event_type=$2", [fixture.a.tenantId, MESSAGE_SEND_REQUESTED]));
     expect(events.rows).toEqual([{ payload: {
-      messageId: reply.id, contactId, channel: "email", purpose: "transactional", subject: "Your ring", body: "Your ring is ready.",
+      messageId: reply.id, contactId, channel: "email", purpose: "transactional", subject: "Your ring", body: "Your ring is ready.", destination: "maren@example.com",
     } }]);
 
     const second = replyOutputSchema.parse((await callTool(client, "draft_reply", { idempotencyKey: "r-2", contactId, body: "Never mind." })).value).result;

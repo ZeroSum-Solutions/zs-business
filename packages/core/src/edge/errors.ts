@@ -78,7 +78,7 @@ export function validationError(message: string, issues: readonly { path: readon
 const CONFLICT_REASONS = new Set([
   "slot_unavailable", "overlap", "stale_revision", "id_in_use", "idempotency_key_reused",
   "binding_mismatch", "concurrent_update", "split_identity", "identity_mismatch", "last_owner", "member_exists",
-  "disclosure_changed", "already_reviewed", "not_draft", "no_email", "approved_by_other", "topup_closed", "wallet_currency",
+  "disclosure_changed", "already_reviewed", "not_draft", "no_email", "approved_by_other", "destination_changed", "topup_closed", "wallet_currency",
   "approval_not_pending", "approval_expired", "approval_not_approved", "approval_not_revocable", "stale_source",
   "endpoint_limit", "token_limit", "proposal_limit", "not_dead_letter",
   "stale_release", "host_in_use", "grant_changed", "invalid_currency", "already_connected", "attempt_changed", "account_mismatch", "cancel_in_progress",
@@ -146,6 +146,13 @@ function conflictDetails(details: Readonly<Record<string, JsonValue>>): Record<s
     safe.status = details.status;
   if (safe.reason === "approved_by_other" && typeof details.approvedBy === "string" && UUID.test(details.approvedBy))
     safe.approvedBy = details.approvedBy;
+  // approvals.md A-16: the address the send would go to now, and the new proposal or draft to approve.
+  if (safe.reason === "destination_changed") {
+    if (details.destination === null || (typeof details.destination === "string" && details.destination.length >= 1 && details.destination.length <= 254))
+      safe.destination = details.destination;
+    if (typeof details.approvalId === "string" && UUID.test(details.approvalId)) safe.approvalId = details.approvalId;
+    if (typeof details.replyId === "string" && UUID.test(details.replyId)) safe.replyId = details.replyId;
+  }
   if (safe.reason === "invalid_currency" && typeof details.currency === "string" && STORED_CURRENCY.test(details.currency))
     safe.currency = details.currency;
   // C-30: a stage with deals says how many, so the owner sees what moves.

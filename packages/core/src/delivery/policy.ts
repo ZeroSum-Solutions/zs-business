@@ -48,15 +48,17 @@ export interface DigestContent {
   readonly purpose: DeliveryPurpose;
   readonly subject: string | null;
   readonly body: string;
+  /** D-6 revision 6: the address the send is bound to; null (or absent) on a send from before revision 6. */
+  readonly destination?: string | null;
 }
 
 /**
  * D-6: the digest an approval is checked against: SHA-256 over a fixed-order JSON array, so
- * any change of recipient, channel, purpose or wording is another digest.
+ * any change of contact, bound address, channel, purpose or wording is another digest.
  */
 export function deliveryContentDigest(content: DigestContent): string {
-  const canonical = JSON.stringify(["zs-delivery-v1", content.messageId, content.contactId, content.channel,
-    content.purpose, content.subject, content.body]);
+  const canonical = JSON.stringify(["zs-delivery-v2", content.messageId, content.contactId, content.channel,
+    content.purpose, content.subject, content.body, content.destination ?? null]);
   return createHash("sha256").update(canonical).digest("hex");
 }
 
@@ -98,6 +100,17 @@ export const isVoiceGrant = (source: string | null | undefined) => typeof source
  */
 export function usableEmail(address: string | null): string | null {
   return address && !/[@.]invalid$/i.test(address) ? address : null;
+}
+
+/**
+ * D-6 revision 6: the normalized address a send on this channel goes to now, from the contact's
+ * stored `normalized_email` or `e164_phone`; null when there is none. Producers bind it into the
+ * approval and the send event; the worker compares it again before every attempt.
+ */
+export function channelDestination(
+  channel: DeliveryChannel, contact: { readonly normalized_email: string | null; readonly e164_phone: string | null },
+): string | null {
+  return channel === "email" ? usableEmail(contact.normalized_email) : contact.e164_phone;
 }
 
 /** Exponential backoff from the attempt count (1-based), capped. Deterministic: no jitter source is injected. */

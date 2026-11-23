@@ -293,7 +293,7 @@ export function createDemoTemplates(ctx: DemoTemplateContext): TemplatedKindsApi
           target: { tenantId: DEMO_TENANT_ID, type: "message_template_revision", id: stored.id }, payload,
           summary: `Send the ${kind === "appointment_reminder" ? "appointment reminder" : "review request"} wording, revision ${stored.revision}`,
           status: "approved", standing: "approved", requestedBy: ctx.actor().userId, requestedAt: at, expiresAt,
-          decidedBy: ctx.actor().userId, decidedAt: at, decisionNote: null, revokedBy: null, revokedAt: null, revokeNote: null, executedActionId: executionId,
+          decidedBy: ctx.actor().userId, decidedAt: at, decisionNote: null, revokedBy: null, revokedAt: null, revokeNote: null, executedActionId: executionId, send: null,
         };
         return { approval: { actionId: ctx.newId(), result: approval }, execution: { actionId: executionId, result: payload } };
       });

@@ -435,8 +435,11 @@ export interface InboxApi {
   /** Throws `not_found` for an unknown or malformed thread ID, or one that moved (a linked visitor). */
   getThread(id: string, options?: ReadOptions): Promise<ThreadDetail>;
   draftReply(input: NewReply, options: WriteOptions): Promise<ReplyRecord>;
-  /** Owners only. A conflict with reason `not_draft` or `no_email` when it cannot be approved. */
-  approveReply(replyId: string, options: WriteOptions): Promise<ReplyRecord>;
+  /**
+   * Owners only. A conflict with reason `not_draft` or `no_email` when it cannot be approved, or
+   * `destination_changed` when `destination` (the address the owner saw) is no longer the customer's.
+   */
+  approveReply(replyId: string, options: WriteOptions, destination?: string | null): Promise<ReplyRecord>;
   /** A conflict with reason `not_draft` once it was approved or discarded. */
   discardReply(replyId: string, options: WriteOptions): Promise<ReplyRecord>;
 }

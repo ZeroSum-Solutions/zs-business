@@ -4,6 +4,7 @@
 import {
   NotFound,
   THREAD_ENTRY_LIMIT,
+  type DeliveryFinalReason,
   type IntakeChannel,
   type IntakeStatus,
   type ListThreadsQuery,
@@ -55,15 +56,18 @@ interface ReplyRow {
   approved_at: Date | null;
   discarded_at: Date | null;
   settled_at: Date | null;
+  delivery_reason: DeliveryFinalReason | null;
 }
 
 // Actor emails come from the current members; a removed member shows as an ID only.
 const REPLY_SELECT = `
   SELECT r.id, r.tenant_id, r.contact_id, r.channel, r.subject, r.body, r.status, r.drafted_by, d.email AS drafted_by_email,
-         r.created_at, r.approved_by, a.email AS approved_by_email, r.approved_at, r.discarded_at, r.settled_at
+         r.created_at, r.approved_by, a.email AS approved_by_email, r.approved_at, r.discarded_at, r.settled_at,
+         CASE WHEN r.status = 'failed' THEN m.final_reason END AS delivery_reason
     FROM inbox_replies r
     LEFT JOIN tenant_members d ON d.tenant_id = r.tenant_id AND d.user_id = r.drafted_by
-    LEFT JOIN tenant_members a ON a.tenant_id = r.tenant_id AND a.user_id = r.approved_by`;
+    LEFT JOIN tenant_members a ON a.tenant_id = r.tenant_id AND a.user_id = r.approved_by
+    LEFT JOIN message_deliveries m ON m.tenant_id = r.tenant_id AND m.message_id = r.id`;
 
 function replyRecord(row: ReplyRow): ReplyRecord {
   return {
@@ -80,6 +84,7 @@ function replyRecord(row: ReplyRow): ReplyRecord {
     approvedAt: row.approved_at?.toISOString() ?? null,
     discardedAt: row.discarded_at?.toISOString() ?? null,
     settledAt: row.settled_at?.toISOString() ?? null,
+    deliveryReason: row.delivery_reason,
   };
 }
 

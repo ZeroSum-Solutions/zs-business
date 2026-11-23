@@ -440,6 +440,9 @@ function queueHandler(kind: TemplatedKind, schema: typeof reminderQueueCommandSc
 
       const email = revision.channel === "email";
       const address = email ? usableEmail(contact.email) : contact.phone;
+      // approvals.md A-16: the send binds the address the runner read; another one now (or none) is
+      // a changed send. With none then and none now, nothing is sent.
+      if ((payload.destination ?? null) !== address) throw new Conflict("The customer's address changed", { reason: "destination_changed" });
       if (!address) return recordSkip(tx, tenantId, ref, "no_address", now);
       const blocked = consentBlock({
         channel: revision.channel, purpose: revision.purpose,
@@ -459,7 +462,7 @@ function queueHandler(kind: TemplatedKind, schema: typeof reminderQueueCommandSc
       const content = renderedContent(revision, values);
       const send = parseOrFail(messageSendRequestedSchema, {
         messageId: payload.messageId, contactId: payload.contactId, channel: revision.channel, purpose: revision.purpose,
-        subject: content.subject, body: content.body,
+        subject: content.subject, body: content.body, destination: address,
       });
       await tx.query(
         `INSERT INTO agent_decisions (tenant_id, id, run_id, agent_kind, subject_type, subject_id, contact_id, outcome, message_id, approval_id, created_at)

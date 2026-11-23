@@ -232,7 +232,7 @@ describe("draft (I-5)", () => {
     expect(first.result).toEqual({
       id: first.result.id, tenantId: fixture.a.tenantId, contactId: customer, channel: "email",
       subject: DEFAULT_SUBJECT, body: "Your table is ready.", status: "draft", draftedBy: { userId: owner.userId, email: owner.email },
-      createdAt: at, approvedBy: null, approvedAt: null, discardedAt: null, settledAt: null,
+      createdAt: at, approvedBy: null, approvedAt: null, discardedAt: null, settledAt: null, deliveryReason: null,
     });
     const replay = await draft(a, customer, "  \n Your table is ready.  \t", key);
     expect(replay).toEqual(first);
@@ -302,7 +302,7 @@ describe("approve and discard (I-6, I-7)", () => {
     });
     expect((await approvedEvents(drafted.result.id)).map((row) => row.payload)).toEqual([{
       messageId: drafted.result.id, contactId: customer, channel: "email", purpose: "transactional",
-      subject: DEFAULT_SUBJECT, body: "See you Tuesday.",
+      subject: DEFAULT_SUBJECT, body: "See you Tuesday.", destination: "rhea@example.com",
     }]);
     const events = await fixture.service((tx) => tx.query<{ event_type: string }>(
       "SELECT o.event_type FROM outbox o JOIN actions x ON x.tenant_id=o.tenant_id AND x.id=o.action_id WHERE o.tenant_id=$1 AND x.id=$2",
@@ -745,11 +745,21 @@ describe("sending through M3b approval records (I-6, approvals.md A-5..A-10)", (
     const { replyId, approvalId } = await approvedButUnsent(a, customer, "Ready when you are.");
     await giveEmail(customer, "abel@example.com");
     tick();
+    // A-16: the approval bound no address; the next call withdraws it, proposes the send for the
+    // address the customer has now, and answers 409 so the owner approves that one.
+    const rebindKey = randomUUID();
+    const stale = await rejection(a.approveReply(replyId, {}, rebindKey));
+    expect(stale).toMatchObject({ code: "Conflict", details: { reason: "destination_changed", destination: "abel@example.com" } });
+    expect((await rejection(a.approveReply(replyId, {}, rebindKey))).details).toMatchObject({ reason: "destination_changed" });
+    const fresh = (await proposals(replyId)).find((p) => p.status === "pending");
+    expect(fresh?.id).not.toBe(approvalId);
+    expect(await approvedEvents(replyId)).toHaveLength(0);
+    tick();
     const key = randomUUID();
     const sent = await a.approveReply(replyId, {}, key);
     expect(sent.result).toMatchObject({ status: "approved", approvedBy: { userId: owner.userId } });
     const check = await fixture.service((tx) => approvalForAction(tx, fixture.a.tenantId, sent.actionId, new Date(now)));
-    expect(check).toMatchObject({ kind: "stored", approval: { id: approvalId } });
+    expect(check).toMatchObject({ kind: "stored", approval: { id: fresh!.id } });
     // The same key replays the send (I-6); a new key is not_draft; one event in all.
     expect(await a.approveReply(replyId, {}, key)).toEqual(sent);
     expect((await rejection(a.approveReply(replyId, {}, randomUUID()))).details).toMatchObject({ reason: "not_draft", status: "approved" });
@@ -770,6 +780,8 @@ describe("sending through M3b approval records (I-6, approvals.md A-5..A-10)", (
     expect(error).toMatchObject({ code: "Conflict", details: { reason: "approved_by_other", approvedBy: owner.userId } });
     expect(mapError(error).body.error.details).toEqual({ reason: "approved_by_other", approvedBy: owner.userId });
     expect(await replyRow(replyId)).toMatchObject({ status: "draft" });
+    // The deciding owner's approval bound no address (A-16): it is proposed again first.
+    expect((await rejection(approve(a, replyId))).details).toMatchObject({ reason: "destination_changed" });
     await approve(a, replyId);
     expect(await replyRow(replyId)).toMatchObject({ status: "approved" });
   });

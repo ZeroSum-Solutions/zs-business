@@ -75,7 +75,7 @@ export interface DeliveryApprovals {
 /** M3b's re-check result (approvals.md A-10), typed by shape so this module needs no import of it. */
 export type ApprovalRecordCheck =
   | { readonly kind: "direct" }
-  | { readonly kind: "stored"; readonly standing: "pending" | "approved" | "rejected" | "revoked" | "expired" }
+  | { readonly kind: "stored"; readonly standing: "pending" | "approved" | "rejected" | "revoked" | "expired"; readonly contentMatches?: boolean }
   | {
       readonly kind: "standing";
       readonly standing: "pending" | "approved" | "rejected" | "revoked" | "expired";
@@ -107,7 +107,8 @@ export function approvalsFromRecords(
         if (found.standing !== "approved" || !found.current) return "revoked";
         return found.contentMatches ? "approved" : "missing";
       }
-      if (found.standing === "approved") return "approved";
+      // A-16: an approved reply send whose event differs from what was approved is not approved.
+      if (found.standing === "approved") return found.contentMatches === false ? "missing" : "approved";
       return found.standing === "pending" ? "missing" : "revoked";
     },
   };

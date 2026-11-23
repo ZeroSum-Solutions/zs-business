@@ -21,7 +21,7 @@ import {
 import type { Transaction } from "@zs/db";
 import type { ActionHandler } from "../actions/dispatch.js";
 import { idInUse, parseOrFail, pgCode } from "../crm/rows.js";
-import { usableEmail } from "../delivery/policy.js";
+import { channelDestination, usableEmail } from "../delivery/policy.js";
 import { loadReply } from "../reads/inbox.js";
 
 export const DRAFT_REPLY_ACTION = "inbox.reply.draft";
@@ -38,6 +38,30 @@ export async function requireEmail(tx: Transaction, tenantId: string, contactId:
   if (usableEmail(email) === null)
     throw new Conflict("The customer has no email address to reply to", { reason: "no_email" });
 }
+
+/** D-6 revision 6: the customer's normalized email address now, or null when they have no real one. */
+export async function currentEmail(tx: Transaction, tenantId: string, contactId: string): Promise<string | null> {
+  const contact = (await tx.query<{ normalized_email: string | null; e164_phone: string | null }>(
+    "SELECT normalized_email, e164_phone FROM crm_contacts WHERE tenant_id=$1 AND id=$2", [tenantId, contactId],
+  )).rows[0];
+  return contact ? channelDestination("email", contact) : null;
+}
+
+/**
+ * approvals.md A-16: the payload a proposal to send this reply stores. It binds the customer's
+ * normalized address as it is now (null when they have none), next to the reply's fixed words
+ * (I-4), so the approver approves one address and the send goes nowhere else.
+ */
+export async function replySendPayload(tx: Transaction, tenantId: string, replyId: string): Promise<{ replyId: string; destination: string | null }> {
+  const reply = (await tx.query<{ contact_id: string }>(
+    "SELECT contact_id FROM inbox_replies WHERE tenant_id=$1 AND id=$2", [tenantId, replyId],
+  )).rows[0];
+  return { replyId, destination: reply ? await currentEmail(tx, tenantId, reply.contact_id) : null };
+}
+
+export const destinationChanged = (destination: string | null, details: Record<string, unknown> = {}) =>
+  new Conflict("The customer's address changed after this send was proposed; approve it again for the new address",
+    { reason: "destination_changed", destination, ...details });
 
 async function resolveReply(tx: Transaction, target: Target): Promise<Target | null> {
   if (target.type !== "inbox_reply") throw new ValidationFailed("Inbox reply actions require an inbox_reply target");
@@ -107,15 +131,20 @@ export const sendReplyHandler: ActionHandler = {
     const { payload } = parseOrFail(sendReplyCommandSchema, command);
     const tenantId = binding.tenantId;
     const draft = await lockDraft(tx, tenantId, payload.replyId);
-    await requireEmail(tx, tenantId, draft.contact_id);
+    // A-16: the approval names one address. The contact row is read in this transaction, and the
+    // worker compares it again before every attempt (delivery.md D-6). An approval with no address
+    // for a customer with none is `no_email`; a bound address that was cleared is a change.
+    const destination = await currentEmail(tx, tenantId, draft.contact_id);
+    if (destination === null && !payload.destination) await requireEmail(tx, tenantId, draft.contact_id);
+    if (!payload.destination || payload.destination !== destination) throw destinationChanged(destination);
     await tx.query(
       "UPDATE inbox_replies SET status='approved', approved_by=$3, approved_at=$4 WHERE tenant_id=$1 AND id=$2",
       [tenantId, payload.replyId, binding.actorId, now],
     );
-    // I-6, delivery.md D-1: the exact approved words; the worker resolves the address.
+    // I-6, delivery.md D-1, D-6: the exact approved words and the approved address.
     const event: MessageSendRequested = {
       messageId: payload.replyId, contactId: draft.contact_id, channel: "email", purpose: "transactional",
-      subject: draft.subject, body: draft.body,
+      subject: draft.subject, body: draft.body, destination,
     };
     return { ...(await replyResult(tx, tenantId, payload.replyId)), event: { type: MESSAGE_SEND_REQUESTED, payload: { ...event } } };
   },
@@ -166,18 +195,20 @@ export interface SendApproval {
   readonly status: "pending" | "approved";
   readonly requestedBy: string;
   readonly decidedBy: string | null;
+  /** A-16: the address the proposal binds; null when it binds none (none then, or made before A-16). */
+  readonly destination: string | null;
 }
 
 /** I-6: the newest unexpired pending or approved proposal to send this reply, if any. */
 export async function openSendApproval(tx: Transaction, tenantId: string, replyId: string, now: Date): Promise<SendApproval | null> {
-  const row = (await tx.query<{ id: string; status: "pending" | "approved"; requested_by: string; decided_by: string | null }>(
-    `SELECT id, status, requested_by, decided_by FROM approvals
+  const row = (await tx.query<{ id: string; status: "pending" | "approved"; requested_by: string; decided_by: string | null; destination: string | null }>(
+    `SELECT id, status, requested_by, decided_by, payload->>'destination' AS destination FROM approvals
       WHERE tenant_id=$1 AND action_type=$2 AND target_type='inbox_reply' AND target_id=$3
         AND status IN ('pending','approved') AND expires_at > $4
       ORDER BY requested_at DESC, id DESC LIMIT 1`,
     [tenantId, SEND_REPLY_ACTION, replyId, now],
   )).rows[0];
-  return row ? { id: row.id, status: row.status, requestedBy: row.requested_by, decidedBy: row.decided_by } : null;
+  return row ? { id: row.id, status: row.status, requestedBy: row.requested_by, decidedBy: row.decided_by, destination: row.destination } : null;
 }
 
 /**
