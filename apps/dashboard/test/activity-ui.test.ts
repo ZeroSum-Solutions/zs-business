@@ -29,6 +29,7 @@ describe("demo action log", () => {
     expect(new Set(all.map((item) => item.id)).size).toBe(all.length);
     expect(all.map((item) => item.createdAt)).toEqual([...all.map((item) => item.createdAt)].sort().reverse());
     await expect(api.getAction("00000000-0000-4000-8000-000000000000")).rejects.toSatisfy((error) => isApiError(error, "not_found"));
+    await expect(api.listActions({ cursor: "" })).rejects.toSatisfy((error) => isApiError(error, "validation"));
     await expect(api.listActions({ cursor: "00000000-0000-4000-8000-000000000000" })).rejects.toSatisfy((error) => isApiError(error, "validation"));
   });
 });

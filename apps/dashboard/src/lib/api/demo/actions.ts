@@ -9,6 +9,7 @@ import { ApiError } from "../errors";
 import type { ActionLogApi } from "../types";
 import { ACTION_PAGE_SIZE } from "../types";
 import type { DemoClock } from "./adapter";
+import { contactId } from "./seed";
 
 const OWNER_MEMBER = "4c2e8a10-6b3d-4f5a-9e71-0d2c4b6a8e01";
 const STAFF_MEMBER = "4c2e8a10-6b3d-4f5a-9e71-0d2c4b6a8e02";
@@ -38,11 +39,11 @@ const SEED: Seed[] = [
   },
   {
     id: id(5), actionType: "agent.reminder.queue", actor: { kind: "agent", agent: "appointment_reminder" },
-    target: { type: "booking", id: record(4) }, approval: null, outcome: "skipped", minutesAgo: 185,
+    target: { type: "agent_decision", id: record(5) }, approval: null, outcome: "skipped", minutesAgo: 185,
   },
   {
     id: id(6), actionType: "crm.contact.create-or-find", actor: { kind: "person", memberId: OWNER_MEMBER, role: "owner" },
-    target: { type: "contact", id: record(6) }, approval: null, outcome: "done", minutesAgo: 24 * 60 + 30,
+    target: { type: "contact", id: contactId(1) }, approval: null, outcome: "done", minutesAgo: 24 * 60 + 30,
   },
   {
     id: id(7), actionType: "site.release.publish", actor: { kind: "person", memberId: OWNER_MEMBER, role: "owner" },
@@ -68,8 +69,8 @@ export function createDemoActions(options: { clock?: DemoClock; latencyMs?: numb
     async listActions(query = {}) {
       await wait();
       const limit = query.limit ?? ACTION_PAGE_SIZE;
-      const after = query.cursor ? all.findIndex((entry) => entry.id === query.cursor) : -1;
-      if (query.cursor && after === -1) throw new ApiError("validation", "That page of the log is no longer available.", 400, "ValidationFailed");
+      const after = query.cursor === undefined ? -1 : all.findIndex((entry) => entry.id === query.cursor);
+      if (query.cursor !== undefined && after === -1) throw new ApiError("validation", "That page of the log is no longer available.", 400, "ValidationFailed");
       const from = after + 1;
       const items = all.slice(from, from + limit);
       const more = from + limit < all.length;

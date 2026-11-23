@@ -3,9 +3,25 @@
 // and time. The payload is never read and the result never leaves this file: only an allowlisted
 // outcome word, a record ID and an approval ID are taken from it (see SELECT).
 import {
+  ACTION_OUTCOME_PATTERN,
   AGENT_KINDS,
+  BROWSER_RUN_STATUSES,
+  ENRICHMENT_STATUSES,
+  IMAGE_STATUSES,
+  OUTREACH_CAMPAIGN_STATUSES,
+  OUTREACH_PROSPECT_STATUSES,
   QUEUE_ACTIONS,
   actionLogEntrySchema,
+  approvalStatusSchema,
+  connectionStatusSchema,
+  deliveryStatusSchema,
+  documentIntakeStatusSchema,
+  followUpRunStatusSchema,
+  intakeStatusSchema,
+  replyStatusSchema,
+  topUpStatusSchema,
+  transcriptionStatusSchema,
+  webhookDeliveryStatusSchema,
   type ActionActor,
   type ActionLogEntry,
   type ActionLogPage,
@@ -74,14 +90,20 @@ interface ActionLogRow {
 
 /**
  * The result words an owner may see as the outcome. Handlers name how an action ended in
- * `outcome` (agents, voice, booking outcomes) or `status` (jobs, deliveries, records); the list
- * keeps out anything a callback or provider could fill with free text.
+ * `outcome` (agents, voice, booking outcomes) or `status` (jobs, deliveries, records). Every word
+ * comes from a contract's fixed status set or this list, so a callback or provider can never put
+ * free text here.
  */
-const OUTCOMES: ReadonlySet<string> = new Set([
+export const OUTCOMES: ReadonlySet<string> = new Set([
   "queued", "sent", "delivered", "undelivered", "failed", "dead", "completed", "applied", "discarded",
   "confirmed", "cancelled", "approved", "rejected", "revoked", "expired", "published", "connected",
   "disconnected", "active", "invited", "granted", "denied", "skipped", "drafted", "requested", "no_show",
-]);
+  ...transcriptionStatusSchema.options, ...documentIntakeStatusSchema.options, ...deliveryStatusSchema.options,
+  ...replyStatusSchema.options, ...approvalStatusSchema.options, ...connectionStatusSchema.options,
+  ...followUpRunStatusSchema.options, ...intakeStatusSchema.options, ...webhookDeliveryStatusSchema.options,
+  ...topUpStatusSchema.options, ...BROWSER_RUN_STATUSES, ...ENRICHMENT_STATUSES, ...IMAGE_STATUSES,
+  ...OUTREACH_CAMPAIGN_STATUSES, ...OUTREACH_PROSPECT_STATUSES,
+].filter((word) => ACTION_OUTCOME_PATTERN.test(word)));
 
 const UUID_TEXT = "'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'";
 /** A top-level string field of the result, cut short; null when absent or not a string. */

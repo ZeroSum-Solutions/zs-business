@@ -2,7 +2,7 @@
 
 import { ArrowLeft, CaretRight, GearSix, Robot, SealCheck, UserCircle } from "@phosphor-icons/react";
 import Link from "next/link";
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { ActionLogEntry } from "@zs/contracts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -77,6 +77,14 @@ function OwnerOnly() {
   return <EmptyState title="Owners only">{ACTIVITY_OWNER_ONLY}</EmptyState>;
 }
 
+/** True once the API refused this viewer; a later error of another kind does not bring rows back. */
+function useDenied(owner: boolean, error: unknown): boolean {
+  const [refused, setRefused] = useState(false);
+  const forbidden = isApiError(error, "forbidden");
+  useEffect(() => { if (forbidden) setRefused(true); }, [forbidden]);
+  return !owner || refused || forbidden;
+}
+
 export function ActivityView() {
   const owner = useCan("reports");
   const log = useActionLog(owner);
@@ -91,7 +99,7 @@ export function ActivityView() {
     focusFrom.current = null;
   }, [entries.length]);
   // A 403 after a role change hides what was loaded before it.
-  const denied = !owner || isApiError(log.error, "forbidden");
+  const denied = useDenied(owner, log.error);
   return (
     <>
       <PageHeader title="Activity" description={ACTIVITY_DESCRIPTION} />
@@ -147,7 +155,7 @@ export function ReceiptView({ id }: { id: string }) {
   const owner = useCan("reports");
   const receipt = useActionReceipt(id, owner);
   const when = useWhen();
-  const denied = !owner || isApiError(receipt.error, "forbidden");
+  const denied = useDenied(owner, receipt.error);
   const entry = receipt.isError ? undefined : receipt.data;
   const record = entry ? recordHref(entry.target) : null;
   return (

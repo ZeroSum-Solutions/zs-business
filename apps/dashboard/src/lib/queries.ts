@@ -371,8 +371,10 @@ export function useActionLog(allowed: boolean) {
     queryFn: ({ pageParam, signal }) => api.listActions(pageParam ? { cursor: pageParam } : {}, { signal }),
     initialPageParam: null as string | null,
     getNextPageParam: (last: Page<ActionLogEntry>) => last.nextCursor ?? undefined,
-    // Every write adds a row; a log the owner opens again should show it.
+    // Every write adds a row; a log the owner opens again should show it. Nothing is kept once the
+    // screen closes, so rows loaded before a role change never show again.
     staleTime: 0,
+    gcTime: 0,
   });
 }
 
@@ -380,7 +382,7 @@ export function useActionLog(allowed: boolean) {
 export function useActionReceipt(id: string, allowed: boolean) {
   const api = useApi();
   const { keys, enabled } = useKeys();
-  return useQuery({ enabled: enabled && allowed, queryKey: keys.action(id), queryFn: ({ signal }) => api.getAction(id, { signal }), staleTime: 0 });
+  return useQuery({ enabled: enabled && allowed, queryKey: keys.action(id), queryFn: ({ signal }) => api.getAction(id, { signal }), staleTime: 0, gcTime: 0 });
 }
 
 /** The inbox list, a page at a time by keyset cursor (inbox-home.md I-8). */

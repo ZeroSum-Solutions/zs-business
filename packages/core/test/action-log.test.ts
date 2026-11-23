@@ -23,7 +23,7 @@ import {
   type Session,
 } from "../src/index.js";
 import { derivedId } from "../src/edge/ids.js";
-import { serviceActors } from "../src/actions/log.js";
+import { OUTCOMES, serviceActors } from "../src/actions/log.js";
 
 const START = Date.parse("2026-11-20T09:00:00.000Z");
 const clock = { now: () => new Date(START) };
@@ -206,6 +206,11 @@ describe("redaction", () => {
       expect(text).not.toContain(secret);
     const receipt = JSON.stringify(await sessionFor(ownerA).getAction(sendActionId));
     for (const secret of [EMAIL, BODY, SECRET]) expect(receipt).not.toContain(secret);
+  });
+
+  it("takes every fixed job and record status from the contracts, and only short words", () => {
+    for (const word of ["dead_letter", "review", "blocked", "uncertain", "stopped", "bounced", "no_match"]) expect(OUTCOMES.has(word), word).toBe(true);
+    for (const word of OUTCOMES) expect(word).toMatch(/^[a-z][a-z_]{0,39}$/);
   });
 
   it("keeps a short status word as the outcome and drops anything else", async () => {
