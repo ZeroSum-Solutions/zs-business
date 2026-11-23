@@ -51,8 +51,8 @@ variables go on which project, and the known limits of the split.
 On since 2026-10-20 (both targets): Supabase Auth sessions (an owner signs in by email link;
 prod owner devszerosum@gmail.com), public booking, unsubscribe links, the Resend bounce webhook
 and Activepieces with its 5-minute cron. Off until their settings exist: the delivery runner
-(needs `DELIVERY_PRICE_*`), Stripe top-ups, Twilio SMS, Google Calendar, site publishing (R2)
-and the follow-up agent (no model provider yet).
+(needs `DELIVERY_PRICE_*`), Stripe top-ups, Twilio SMS, Google Calendar and site publishing (R2).
+The follow-up agent drafts with Cerebras on the workers project (`docs/requirements/agents.md`).
 
 ## Development
 

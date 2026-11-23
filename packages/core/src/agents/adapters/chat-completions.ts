@@ -25,6 +25,8 @@ export interface ChatCompletionsConfig<L extends AgentLane> {
   readonly maxTokensParameter: "max_completion_tokens" | "max_tokens";
   /** The vendor's JSON-mode request fields, and any change to the system text they need. */
   readonly jsonMode: (request: TextModelRequest) => { readonly responseFormat: unknown; readonly system: string };
+  /** Fixed vendor-specific request fields (no tenant data), sent with every request. */
+  readonly extraBody?: Readonly<Record<string, string>>;
 }
 
 /** The part of a chat-completions answer the adapters read; everything else is ignored. */
@@ -48,7 +50,9 @@ export function createChatCompletionsModel<L extends AgentLane>(config: ChatComp
     model: config.model,
     async complete(request, signal): Promise<TextModelResult> {
       const mode = config.jsonMode(request);
+      // The vendor extras come first, so they can never replace a field set here.
       const body = JSON.stringify({
+        ...config.extraBody,
         model: config.model,
         messages: [
           { role: "system", content: mode.system },

@@ -1,5 +1,6 @@
 // G-18: the personal-data lane's real model, on Cerebras (docs/integrations.md: prepaid, US).
-// The default model ID and its price (`VENDOR_MODEL_PRICES`) are unverified against the vendor.
+// The default model ID and its price (`VENDOR_MODEL_PRICES`) were checked against
+// cerebras.ai/pricing and GET /v1/models on 2026-11-22 (ZSB-45).
 import { z } from "zod";
 import { createChatCompletionsModel, type FetchLike } from "./chat-completions.js";
 import type { TextModel } from "../model.js";
@@ -13,6 +14,16 @@ export interface CerebrasConfig {
   readonly fetch: FetchLike;
   readonly model?: string;
   readonly baseUrl?: string;
+}
+
+/**
+ * gpt-oss models reason before they answer, and the reasoning counts against
+ * `max_completion_tokens`. At the default effort a follow-up's reasoning reached 558 of the
+ * 600-token cap (G-9) in live probes on 2026-11-22, and one preview run on 2026-11-11 was cut off
+ * at 600 and refused as invalid. Low effort kept every probe near 200 tokens.
+ */
+function cerebrasExtraBody(model: string): Readonly<Record<string, string>> | undefined {
+  return model.startsWith("gpt-oss-") ? { reasoning_effort: "low" } : undefined;
 }
 
 /** Strict mode wants every object closed (`additionalProperties: false`) and every property required. */
@@ -38,13 +49,16 @@ export function createCerebrasModel(config: CerebrasConfig): TextModel<"personal
   let host = "";
   try { host = new URL(baseUrl).hostname; } catch { /* refused below */ }
   if (host !== CEREBRAS_HOST) throw new Error(`Cerebras: the base URL must be on ${CEREBRAS_HOST}`);
+  const model = config.model ?? CEREBRAS_DEFAULT_MODEL;
+  const extraBody = cerebrasExtraBody(model);
   return createChatCompletionsModel({
     lane: "personal_data",
     vendor: "Cerebras",
     baseUrl,
     apiKey: config.apiKey,
-    model: config.model ?? CEREBRAS_DEFAULT_MODEL,
+    model,
     fetch: config.fetch,
+    ...(extraBody ? { extraBody } : {}),
     maxTokensParameter: "max_completion_tokens",
     jsonMode: (request) => {
       try {
