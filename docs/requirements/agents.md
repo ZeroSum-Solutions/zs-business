@@ -6,12 +6,27 @@ B5-02): G-8 adds the skip reason `superseded`, for an inquiry the customer follo
 request before its draft committed (the draft action re-checks G-7's latest-request condition
 under the customer's row lock), and G-10 names the database guard that keeps closed runs as
 they are. Revision 3 (2026-10-22 audit B3, review round 2): G-4 and G-5 read the draft's time
-after its locks. Revision 4 (2026-10-22, phase 2 specs): adds G-14..G-21, which are not built
-yet: agent kinds, usage and daily cost caps, `stalled` runs, an abort signal and usage on the
+after its locks. Revision 4 (2026-10-22, phase 2 specs): adds G-14..G-21: agent kinds, usage and daily cost caps, `stalled` runs, an abort signal and usage on the
 model port, real model adapters per lane, templated reminder and review kinds under a standing
 template approval (`approvals.md` A-15), and a document intake kind. G-1..G-13 are unchanged,
 and so are `agent_followups` and the M6 tests; where a new rule replaces part of an old one
 (G-9's port, G-13's `FOLLOWUP_MODEL`), it says so and takes effect when it is built.
+
+Build state (checked against the code on 2026-11-22, ZSB-45; this note changes no rule):
+- Built: G-14 (kinds, per-kind settings, kills and actors; `agent_decisions`), G-15
+  (`agent_model_calls`, the daily cost cap, `agent.cost.warn`), G-16 (`agent.run.stall`), G-17
+  (the abort signal and usage on the port) and G-20 (review requests under marketing consent).
+- Built in part: G-18. The Cerebras and DeepSeek adapters, `AGENT_KIND_LANES` and the lane
+  guard at start run, but no hosted entry point uses the no-personal-data lane yet:
+  `AGENT_MODEL_NO_PERSONAL_DATA` is parsed and then ignored. G-19: templates, revisions,
+  standing approvals and the reminder and review queue actions run. The wording-suggestion
+  route exists, but no hosted entry point passes a suggestion model, so it answers 404 on
+  preview and production (`apps/api/README.md`).
+- Not built: G-21. `document_intake` cannot be turned on (`Conflict` `kind_not_available`).
+- Hosted: the workers project sets `FOLLOWUP_AGENT`, `AGENT_MODEL_PERSONAL_DATA=cerebras` and
+  `CEREBRAS_API_KEY` for both preview and production. On 2026-11-22 a scheduled preview run for
+  the demo tenant drafted a reply through Cerebras `gpt-oss-120b` and recorded its model call
+  (outcome `ok`, 460 input and 177 output tokens, 294 micros) (ZSB-45).
 
 Scope: one agent. It finds website inquiries nobody has answered, asks a model port for a
 follow-up email, and leaves it in the Inbox as a draft with a pending send proposal. An owner
@@ -360,9 +375,8 @@ the `document-intake.md` DL-8 limit, default 20; a longer document is skipped `t
 ## Known limits (revision 1)
 
 - `POST /runs` runs inside one HTTP request and its deadline. If the deadline fires mid-run the
-  caller gets 503 and the run may stay `running`; a retry with the same key continues it. The
-  model port takes no abort signal yet. M5 should size `maxCandidatesPerRun` for its model or
-  run the agent from the scheduler only. (G-16 and G-17 close this once built.)
+  caller gets 503 and the run may stay `running` until a retry with the same key continues it
+  or the G-16 stall sweep closes it. Model calls abort at their deadline (G-17).
 - A member run checks `agents` in its own transaction just before the run, so a demotion that
   commits in that gap still lets one run start; its writes are limited to the agent actions.
 - Every run that has room left after the undecided inquiries records a skip again for an
@@ -375,15 +389,15 @@ the `document-intake.md` DL-8 limit, default 20; a longer document is skipped `t
   question.
 - No vision lane is approved. No kind reads images, and any task that needs vision waits for a
   business-billed lane (`docs/integrations.md`, open question 2).
-- Bookings have no cancelled, completed or no-show status yet (`booking.md` B-24). Until one
-  lands, a booking that did not happen still gets its reminder and a review request; the owner
-  stops a kind with its kill switch.
+- Templated kinds queue only for `confirmed` bookings, and a review request only for one marked
+  `completed` (`booking.md` B-43), rechecked at delivery. A reminder queued before a cancel or a
+  no-show is not rechecked and can still be sent.
 - G-20 reads a `granted` channel as `marketing_updates` consent. Once a second consent purpose
   exists, G-20 must check the purpose itself.
 - A standing template approval expires within 30 days (`approvals.md` A-5); templated sends
   then skip `template_not_approved` until an owner approves the revision again.
 - `document_intake` depends on `document-intake.md` for the document, the diff schema and its
-  approval; G-21 can land only after that contract's first slice.
+  approval; G-21 is not built yet.
 
 ## First slice (revision 4)
 
@@ -410,10 +424,10 @@ it, and the catalog isolation suite over the new tables.
 `apps/api/test/followup-runner.test.ts` and `followup-worker.test.ts` cover G-13: the
 environment, the cron route, one run per slot, the switches and quiet hours, the daily cap,
 least-recently-run order, the budget, a failing tenant, and the worker entry point.
-Revision 4 (not built) adds: one kind's actor denied another kind's actions; each kind off by
+Revision 4 adds (`agent-kinds.test.ts`, `template-approvals.test.ts`, `agent-adapters.test.ts`): one kind's actor denied another kind's actions; each kind off by
 default and killed on its own; the cost cap, the 80% warning once per local date and worst-case
 recording; a stalled run closed and its late step refused `run_closed`; the lane guard at
 start; templated sends refused before the grant, covered after it, and stopped by a new
-revision (`approvals.md` A-15); a review request skipped `consent_missing` without a grant; a
-document whose text asks for a send yielding only a diff proposal; two-tenant isolation over the
-new tables.
+revision (`approvals.md` A-15); a review request skipped `consent_missing` without a grant;
+two-tenant isolation over the new tables. Not yet written, with G-21: a document whose text asks
+for a send yielding only a diff proposal.

@@ -139,6 +139,8 @@ export async function runTemplatedKind(
         const reason = error.details.reason;
         // Another call resuming this run reached its limit or finished it: nothing is left to do.
         if (reason === "run_limit" || reason === "run_closed") break;
+        // PL-27: the plan's email allowance is used up; the rest of the run would be refused the same way.
+        if (reason === "plan_limit") break;
         // The booking changed under the plan, or was queued by another run: it is not ours to decide now.
         if (reason === "not_a_candidate" || reason === "already_queued" || reason === "values_changed") continue;
         const done = reason === "id_in_use" ? await decidedElsewhere().catch(() => null) : null;

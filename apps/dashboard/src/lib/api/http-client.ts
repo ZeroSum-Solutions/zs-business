@@ -78,6 +78,8 @@ import {
   intakeJobListSchema,
   transcriptionDetailSchema,
   transcriptionListSchema,
+  actionLogEntrySchema,
+  actionLogPageSchema,
   threadDetailSchema,
   threadIdSchema,
   threadPageSchema,
@@ -121,6 +123,8 @@ import {
   type BillingApi,
   type SitesApi,
   type TranscriptionApi,
+  type ActionLogApi,
+  ACTION_PAGE_SIZE,
   type WriteOptions,
 } from "./types";
 
@@ -204,7 +208,7 @@ const PAGE_LIMIT = 100;
  */
 export const MAX_PAGES = 20;
 
-export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & ManagedConnectionsApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi & SetupApi & BillingApi;
+export type HttpApi = ActionLogApi & BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & ManagedConnectionsApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi & SetupApi & BillingApi;
 
 export function createHttpClient(config: HttpClientConfig): HttpApi {
   const doFetch = config.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
@@ -319,7 +323,7 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
 
   return {
     getBillingPlan(options = {}) {
-      return request({ method: "GET", path: "/v1/billing/plan?features=1", schema: billingPlanSchema, signal: options.signal });
+      return request({ method: "GET", path: "/v1/billing/plan?features=1&free=1", schema: billingPlanSchema, signal: options.signal });
     },
 
     getWallet(options = {}) {
@@ -511,6 +515,21 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
 
     async listBookingPages() {
       return (await request({ method: "GET", path: "/v1/booking/pages", schema: bookingPageListSchema })).items;
+    },
+
+    async listActions(query = {}, options = {}) {
+      const page = await request({
+        method: "GET",
+        path: "/v1/actions",
+        query: { limit: query.limit ?? ACTION_PAGE_SIZE, cursor: query.cursor },
+        schema: actionLogPageSchema,
+        signal: options.signal,
+      });
+      return { items: page.items, nextCursor: page.nextCursor };
+    },
+
+    getAction(id, options = {}) {
+      return request({ method: "GET", path: `/v1/actions/${encodeURIComponent(id)}`, schema: actionLogEntrySchema, signal: options.signal });
     },
 
     async listThreads(query = {}, options = {}) {

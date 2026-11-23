@@ -77,7 +77,7 @@ Counts (recounted from the rows on 2026-11-20): 36 conforms, 22 fixed, 0 partial
 One row per `inbound-email.md` rule that slice 1 builds, at revision 3. Rules of later slices are
 not listed. Short paths: `db` is `packages/db/test/inbound-email.test.ts`, `core` is
 `packages/core/test/inbound-email.test.ts`, `api` is `apps/api/test/resend-inbound-webhook.test.ts`,
-and the migration is `supabase/migrations/20261122100000_inbound_email.sql`. Counts: 9 conforms,
+and the migration is `supabase/migrations/20261122110000_inbound_email.sql`. Counts: 9 conforms,
 2 partial (11 rules).
 
 | ID | Status | Code | Test | Note |
@@ -91,7 +91,7 @@ and the migration is `supabase/migrations/20261122100000_inbound_email.sql`. Cou
 | IE-21 | conforms | packages/core/src/reads/inbox.ts (sender threads keyed by `inboundSenderKey`) | core "a member sees one sender thread with needsReview" | No contact and no consent from an unknown sender; slice 1 has no matching. |
 | IE-24 | conforms | reads/inbox.ts (`includeEmail`, `VISIBLE_EMAIL`, `senderThread`); edge/session.ts (member reads only); packages/contracts/src/inbox.ts (`e_`, `sender`, `email` entry); apps/dashboard/src/components/inbox/inbox-view.tsx | core "sender threads (IE-24, test 14)" (dropped, rejected, spam and duplicate rows; MCP and plain sessions); apps/api/test/inbox.test.ts "sender threads over HTTP"; apps/dashboard/test/inbox-view.test.ts "a sender thread" | Test 14, slice 1 part: metadata only, content pending, `needsReview`; dropped, rejected and duplicate rows hidden; MCP and token reads see none. `inbox-home.md` revision 5. |
 | IE-31 | conforms | migration (RLS forced, policies, column grants to the runtime role and `zs_dispatcher`) | db "emails under the runtime role (IE-31, test 1)"; packages/db/test/isolation.test.ts; core "tenant B's member reads none of A's sender threads" | Test 1 for these two tables, under the runtime role. |
-| IE-32 | conforms | packages/core/src/billing/plan-gate.ts (`READ_ONLY_ALLOWED_ACTIONS`) | core "a read-only tenant still receives (test 15)"; packages/core/test/billing/plans.test.ts | `plans.md` revision 9. Settle joins in slice 2. |
+| IE-32 | conforms | packages/core/src/billing/plan-gate.ts (`READ_ONLY_ALLOWED_ACTIONS`) | core "a read-only tenant still receives (test 15)"; packages/core/test/billing/plans.test.ts | `plans.md` revision 10. Settle joins in slice 2. |
 | IE-35 | conforms | migration (`inbound_emails_guard`, the no-truncate trigger, `inbound_emails_link_audit`) | db "the content guard (IE-35)" | Slice 1 part: the guard. A settle never links or rejects; only a ready row is linked or rejected. Known limit: the receive action payload keeps sender and subject (ZSB-64). The erasure runner and the erase script are slice 2. |
 
 ## Deferred, with reasons

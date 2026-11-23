@@ -810,7 +810,7 @@ notifications, mailbox OAuth (decision 1 B), recording our own `Message-ID` from
 
 ## Built, and left out
 
-Built (slice 1, ZSB-46, dark): migration `20261122100000_inbound_email.sql` (the two tables, the
+Built (slice 1, ZSB-46, dark): migration `20261122110000_inbound_email.sql` (the two tables, the
 guard, `inbound_email_route`, the backfill and the tenant-insert trigger, RLS and grants);
 `POST /webhooks/resend/inbound` in `apps/api/src/public/resend-inbound-webhook.ts` (on only with
 `RESEND_INBOUND_WEBHOOK_SECRET` and `INBOUND_EMAIL_DOMAIN`); routing in

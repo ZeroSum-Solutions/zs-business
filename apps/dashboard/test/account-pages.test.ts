@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createElement as h, type ReactNode } from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { billingNotice, featureLines, grantSummary, PLAN_BADGE, planDateLine, PlanView, planFeaturesFresh, SHOPIFY_ADMIN_HINT } from "../src/components/account/plan-view";
+import { billingNotice, featureLines, grantSummary, onFreeFallback, PLAN_BADGE, planDateLine, PlanView, planFeaturesFresh, SHOPIFY_ADMIN_HINT } from "../src/components/account/plan-view";
 import { BUSINESS_DEMO_NOTE, BUSINESS_NOT_AVAILABLE, BUSINESS_OWNER_ONLY, SettingsView } from "../src/components/account/settings-view";
 import { ToastProvider } from "../src/components/ui/toast";
 import { PLAN_CATALOG, PLAN_FEATURE_OFF_REASONS, planFeatures, type BillingPlan, type BusinessProfile } from "@zs/contracts";
@@ -49,6 +49,29 @@ describe("plan", () => {
     expect(failed).toEqual({ tone: "warn", text: expect.stringContaining("Update your card by Saturday, November 21") });
     expect(billingNotice(plan({ status: "unpaid", readOnly: true }), "UTC")?.tone).toBe("danger");
     expect(JSON.stringify(failed)).not.toMatch(/refund/i);
+  });
+
+  // plans.md PL-27: a self-signed-up business is never told it turns read-only, and with no paid plan it sees its free allowances.
+  it("tells a free-tier business it moves to the free allowances and shows them (PL-27)", () => {
+    const failing = plan({ freeTier: true, status: "past_due", paymentFailedAt: "2026-11-14T00:00:00.000Z", readOnlyAfter: NEAR_MIDNIGHT_UTC });
+    const failed = billingNotice(failing, "UTC", Date.parse(NEAR_MIDNIGHT_UTC) - 1);
+    expect(failed?.text).toContain("the business moves to the free allowances");
+    expect(failed?.text).not.toMatch(/read-only/);
+    // Past the grace the status still says past_due, but the free allowances apply: the banner says so, not a past date.
+    expect(onFreeFallback(failing, Date.parse(NEAR_MIDNIGHT_UTC))).toBe(true);
+    expect(billingNotice(failing, "UTC", Date.parse(NEAR_MIDNIGHT_UTC))?.text).toBe(
+      "Your last payment failed, so the business now has the free allowances. Update your card to return to your plan.");
+    expect(onFreeFallback({ ...failing, freeTier: false }, Date.parse(NEAR_MIDNIGHT_UTC))).toBe(false);
+    const ending = plan({ freeTier: true, status: "canceled", readOnlyAfter: NEAR_MIDNIGHT_UTC });
+    expect(billingNotice(ending, "UTC", Date.parse(NEAR_MIDNIGHT_UTC) - 1)?.text).toContain("moves to the free allowances");
+    expect(billingNotice(ending, "UTC", Date.parse(NEAR_MIDNIGHT_UTC))).toBeNull();
+    const free = plan({ freeTier: true, status: "none", plan: null, interval: null,
+      limits: { ...base.catalog[0]!.limits, seats: 1, managedConnections: 1, automationTokens: 1, emailsPerMonth: 100 } });
+    const html = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, free));
+    expect(html).toContain("Free allowances");
+    expect(html).toContain("100 emails a month");
+    expect(html).toContain("1 automation token<");
+    expect(html).toContain("Choose a plan");
   });
 
   // plans.md PL-22: an operator-granted plan shows "Included plan: <name>" and its end, with no checkout prompt or billing notice.

@@ -1,4 +1,4 @@
-import type { Connection, ConnectionStatus, PendingConnection } from "@zs/contracts";
+import type { ActionLogEntry, Connection, ConnectionStatus, PendingConnection } from "@zs/contracts";
 import type {
   BillingPlan,
   WalletSummary,
@@ -751,6 +751,17 @@ export interface MediaApi {
 }
 
 /** The approvals path (approvals.md A-7): approving also runs the action. */
+/** Backlog B05: the owner's redacted action log. Owners only (`reports`); staff get 403. */
+export interface ActionLogApi {
+  /** Newest first, keyset paged by `cursor`. */
+  listActions(query?: { cursor?: string | undefined; limit?: number | undefined }, options?: ReadOptions): Promise<Page<ActionLogEntry>>;
+  /** One action's receipt; an unknown ID is a 404. */
+  getAction(id: string, options?: ReadOptions): Promise<ActionLogEntry>;
+}
+
+/** Rows per page of the action log. */
+export const ACTION_PAGE_SIZE = 30;
+
 export interface ApprovalsApi {
   approveApproval(approvalId: string, options: WriteOptions): Promise<ApproveApprovalResponse>;
 }
@@ -812,7 +823,7 @@ export interface BillingApi {
   openBillingPortal(): Promise<BillingPortalResponse>;
 }
 
-export type ZsApi = BillingApi & BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & ManagedConnectionsApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi & SetupApi;
+export type ZsApi = ActionLogApi & BillingApi & BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & ManagedConnectionsApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi & SetupApi;
 
 
 /** Strip the formatting people type into phone fields; the API wants E.164. */

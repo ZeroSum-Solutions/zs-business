@@ -19,7 +19,7 @@ import {
   type Target,
 } from "@zs/contracts";
 import { DatabaseUnavailable, type ScopedDatabase, type Transaction } from "@zs/db";
-import { planGate } from "../billing/plan-gate.js";
+import { emailAllowanceGate, lockForGates, planGate } from "../billing/plan-gate.js";
 
 export type DispatchConfig = Readonly<Record<string, unknown>>;
 export interface DispatchContext<Config = DispatchConfig> {
@@ -199,6 +199,9 @@ export function createDispatcher<Config = DispatchConfig>(
           throw new BindingMismatch();
         // Reads never go backward within one dispatch: a clock that steps back is held at the
         // latest instant seen, so an expiry an earlier read reached stays reached.
+        // PL-27: an action a gate decides under a lock waits for it before the clock is read, so the gates and the
+        // handler see the instant after the wait (a lock already held is taken again at no cost).
+        await lockForGates(tx, binding.tenantId, binding.actionType, binding.payload);
         let latest = -Infinity;
         const readClock = () => {
           const instant = ctx.clock.now().getTime();
@@ -208,8 +211,9 @@ export function createDispatcher<Config = DispatchConfig>(
           return new Date(latest);
         };
         const now = readClock();
-        // PL-8: a read-only plan refuses most actions; counted limits refuse one more.
-        await planGate(tx, binding.tenantId, binding.actionType, now);
+        // PL-8, PL-27: a read-only plan refuses most actions; counted limits refuse one more; a plan without
+        // model agents refuses to start one.
+        await planGate(tx, binding.tenantId, binding.actionType, now, binding.payload);
         let reservedActionId: string | undefined;
         const actionIdFor = () => (reservedActionId ??= generateId());
         const handled = await runHandler(() =>
@@ -228,6 +232,8 @@ export function createDispatcher<Config = DispatchConfig>(
         const parsedResult = jsonValueSchema.safeParse(handled.result);
         if (!parsedResult.success) throw new ValidationFailed(parsedResult.error.message);
         const result = parsedResult.data;
+        // PL-27: an action that queues an email is refused when the plan's email allowance is used up.
+        await emailAllowanceGate(tx, binding.tenantId, binding.actionType, handled.event, new Date(latest));
         const actionId = reservedActionId ?? generateId();
         const event = handled.event ?? {
           type: binding.actionType,

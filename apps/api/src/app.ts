@@ -41,6 +41,7 @@ import { agentKindRoutes, followUpRoutes } from "./routes/agents.js";
 import { businessRoutes } from "./routes/business.js";
 import { browserRoutes, browserRunnerRoutes, type BrowserApiConfig } from "./routes/browser.js";
 import { billingRoutes } from "./routes/billing.js";
+import { actionRoutes } from "./routes/actions.js";
 import { approvalRoutes } from "./routes/approvals.js";
 import { calendarRoutes } from "./routes/calendar.js";
 import { connectionsRoutes } from "./routes/connections.js";
@@ -407,6 +408,7 @@ export function createApp(deps: AppDependencies) {
   // Off without image config: /v1/media is then an unknown route (404), like sites (IM-21).
   if (images) app.route("/v1/media", mediaRoutes);
   app.route("/v1", billingRoutes);
+  app.route("/v1/actions", actionRoutes);
   app.route("/v1/approvals", approvalRoutes);
   // Off without an OUTREACH_TENANTS allowlist: /v1/outreach is then an unknown route (404), like sites.
   if (deps.outreach) app.route("/v1/outreach", outreachRoutes((c) => createOutreachSession(requestEdge(c), c.var.session.principal)));

@@ -1,4 +1,4 @@
-// Inbound email storage rules (20261122100000_inbound_email.sql; inbound-email.md IE-2, IE-3, IE-31, IE-35, test 1):
+// Inbound email storage rules (20261122110000_inbound_email.sql; inbound-email.md IE-2, IE-3, IE-31, IE-35, test 1):
 // addresses come with the tenant and only the service role writes them; the route function names an active or
 // retiring handle's tenant and nothing else; the runtime role reads its tenant's emails without the lease columns,
 // inserts only the receive columns; and the content guard holds for every role, the table owner included.
@@ -15,7 +15,7 @@ import { createTestDatabase, createTwoTenantFixture, withTestDatabase, type Test
 
 const T0 = "2026-11-22T16:00:00.000Z";
 const T1 = "2026-11-22T16:05:00.000Z";
-const MIGRATION = "20261122100000_inbound_email.sql";
+const MIGRATION = "20261122110000_inbound_email.sql";
 const migrations = new URL("../../../supabase/migrations/", import.meta.url);
 
 let database: TestDatabase;

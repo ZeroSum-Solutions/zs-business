@@ -92,7 +92,7 @@ const expectedPath: Record<string, string> = {
   // Enrichment (20261023600000_enrichment.sql, E-7): a changed email or phone clears the region mark.
   "crm_contacts_clear_region_attest()": "pg_catalog, pg_temp",
   "inbox_replies_guard()": "pg_catalog, pg_temp",
-  // Inbound email slice 1 (20261122100000_inbound_email.sql, IE-2, IE-3, IE-12, IE-35): the handle generator and the
+  // Inbound email slice 1 (20261122110000_inbound_email.sql, IE-2, IE-3, IE-12, IE-35): the handle generator and the
   // tenant-insert trigger, the References check, the content guard, and the definer that routes a handle.
   "inbound_email_addresses_create()": "pg_catalog, pg_temp",
   "inbound_email_new_handle()": "pg_catalog, pg_temp",
