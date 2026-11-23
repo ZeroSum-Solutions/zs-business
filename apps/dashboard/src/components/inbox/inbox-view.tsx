@@ -206,6 +206,8 @@ export function ReplyBubble({ reply, zone, agentId = null, viewerId = null, chil
         Drafted by {actorName(reply.draftedBy, agentId, viewerId)}, <When instant={reply.createdAt} zone={zone} />
         {reply.approvedAt ? <><br />Approved by {actorName(reply.approvedBy, agentId, viewerId)}, <When instant={reply.approvedAt} zone={zone} /></> : null}
         {reply.settledAt ? <><br />{reply.status === "failed" ? "Delivery failed" : "Delivered"} <When instant={reply.settledAt} zone={zone} /></> : null}
+        {/* approvals.md A-16: nothing went out because the customer's address changed after approval. */}
+        {reply.deliveryReason === "destination_changed" ? <><br />Not sent: the customer&apos;s address changed after approval.</> : null}
       </p>
       {children}
     </li>
@@ -238,7 +240,7 @@ export function stepNotice(error: unknown, thread: Pick<ThreadDetail, "entries">
       return { tone: "info", message: `${by}. ${STEP_OUTCOME[reply.reply.status] ?? STEP_OUTCOME.approved}` };
     }
   }
-  if (error.reason === "not_draft" || error.reason === "approved_by_other") return { tone: "danger", message: `${message} The thread was reloaded.` };
+  if (error.reason === "not_draft" || error.reason === "approved_by_other" || error.reason === "destination_changed") return { tone: "danger", message: `${message} The thread was reloaded.` };
   return { tone: "danger", message };
 }
 

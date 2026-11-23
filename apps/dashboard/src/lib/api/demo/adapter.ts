@@ -887,7 +887,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
         const reply: ReplyRecord = {
           id: newId(), tenantId: DEMO_TENANT_ID, contactId: request.contactId, channel: "email",
           subject: request.subject ?? DEMO_BUSINESS_SUBJECT, body: request.body, status: "draft",
-          draftedBy: actor.role === "owner" ? DEMO_OWNER : DEMO_STAFF, createdAt: nowIso(), approvedBy: null, approvedAt: null, discardedAt: null, settledAt: null,
+          draftedBy: actor.role === "owner" ? DEMO_OWNER : DEMO_STAFF, createdAt: nowIso(), approvedBy: null, approvedAt: null, discardedAt: null, settledAt: null, deliveryReason: null,
         };
         replies.set(reply.id, reply);
         return reply;

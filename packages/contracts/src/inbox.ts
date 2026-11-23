@@ -3,6 +3,7 @@ import { actionCommandSchema, actionResultSchema, targetSchema, uuidSchema } fro
 import { bookingInstantSchema } from "./booking.js";
 import { crmInstantSchema } from "./crm.js";
 import { intakeChannelSchema, intakeStatusSchema } from "./intake.js";
+import { deliveryFinalReasonSchema, sendDestinationSchema } from "./delivery.js";
 import { isPostgresText } from "./json.js";
 import { pageQuerySchema, pageSchema } from "./page.js";
 
@@ -59,11 +60,21 @@ export const resumeReplyCommandSchema = z.lazy(() => actionCommandSchema.extend(
   payload: resumeReplyInputSchema,
 }).refine((command) => command.target.id === command.payload.replyId, "Target must equal the reply"));
 export type ResumeReplyCommand = z.infer<typeof resumeReplyCommandSchema>;
+/**
+ * I-6, approvals.md A-16: the proposal binds the customer's normalized address when it is made
+ * (null when they had none). The send refuses `destination_changed` unless it is still their
+ * address. Absent only on proposals from before A-16, which the send refuses the same way.
+ */
+export const sendReplyInputSchema = z.strictObject({
+  replyId: idSchema,
+  destination: z.lazy(() => sendDestinationSchema).nullable().optional(),
+});
+export type SendReplyInput = z.infer<typeof sendReplyInputSchema>;
 /** I-6: runs only through an owner's stored approval (approvals.md A-7), never directly. */
 export const sendReplyCommandSchema = z.lazy(() => actionCommandSchema.extend({
   actionType: z.literal("inbox.reply.send"),
   target: targetSchema.extend({ type: z.literal("inbox_reply") }),
-  payload: replyRefInputSchema,
+  payload: sendReplyInputSchema,
 }).refine((command) => command.target.id === command.payload.replyId, "Target must equal the reply"));
 export type SendReplyCommand = z.infer<typeof sendReplyCommandSchema>;
 export const discardReplyCommandSchema = z.lazy(() => actionCommandSchema.extend({
@@ -91,6 +102,11 @@ export const replyRecordSchema = z.strictObject({
   approvedAt: crmInstantSchema.nullable(),
   discardedAt: crmInstantSchema.nullable(),
   settledAt: crmInstantSchema.nullable(),
+  /**
+   * Why delivery ended without a send, for a `failed` reply (delivery.md D-6), else null. With
+   * `destination_changed` the owner approves again (I-6). Absent in results stored before it.
+   */
+  deliveryReason: z.lazy(() => deliveryFinalReasonSchema).nullable().default(null),
 });
 export type ReplyRecord = z.infer<typeof replyRecordSchema>;
 export const replyOutputSchema = z.lazy(() => actionResultSchema.extend({ result: replyRecordSchema }));

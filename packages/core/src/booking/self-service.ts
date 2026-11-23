@@ -170,6 +170,8 @@ export function confirmationMessage(input: {
     contactId: input.contactId,
     channel: "email",
     purpose: "transactional",
+    // delivery.md D-6: a booking notice binds no address; it goes to the contact's current one.
+    destination: null,
     subject: moved ? `Your appointment is moved to ${when}` : `Your appointment on ${when} is confirmed`,
     body: [
       `Hi ${greetingName(input.displayName)},`,

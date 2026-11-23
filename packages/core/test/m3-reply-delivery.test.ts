@@ -189,6 +189,87 @@ describe("Inbox reply through the delivery worker", () => {
     expect(await reply(second.replyId)).toMatchObject({ status: "failed" });
   });
 
+  describe("the approved address (approvals.md A-16, delivery.md D-6 revision 6)", () => {
+    const setAddress = (contactId: string, column: "normalized_email" | "e164_phone", value: string) => service((tx) => tx.query(
+      `UPDATE crm_contacts SET ${column}=$3 WHERE tenant_id=$1 AND id=$2`, [tenantId, contactId, value]));
+
+    it("the approval read shows the address, subject and body the owner approves", async () => {
+      const { contactId, email } = await customer();
+      const draft = await sessionFor(staff).draftReply({ contactId, subject: "Your booking", body: "See you at 7." }, randomUUID());
+      const pending = (await rows<{ id: string; payload: unknown }>(
+        "SELECT id, payload FROM approvals WHERE tenant_id=$1 AND target_id=$2 AND status='pending'", [tenantId, draft.result.id]))[0]!;
+      expect(pending.payload).toEqual({ replyId: draft.result.id, destination: email });
+      const record = await sessionFor(owner).getApproval(pending.id);
+      expect(record.send).toEqual({ contactId, channel: "email", destination: email, subject: "Your booking", body: "See you at 7." });
+      const page = await sessionFor(owner).listApprovals({ status: "pending" });
+      expect(page.items.find((item) => item.id === pending.id)?.send).toEqual(record.send);
+    });
+
+    it("a changed email between approval and delivery ends the send with no provider call; the owner re-approves the new address", async () => {
+      const { contactId } = await customer();
+      const { replyId } = await approvedReply(contactId);
+      await setAddress(contactId, "normalized_email", "moved@haldenrowe.example");
+      const before = await balance();
+      await worker().runOnce();
+      expect(provider.calls).toHaveLength(0);
+      expect(await delivery(replyId)).toMatchObject({ status: "blocked", final_reason: "destination_changed", attempts: 0 });
+      expect(await reply(replyId)).toMatchObject({ status: "failed" });
+      expect(await balance()).toBe(before);
+      // The owner sees why on the reply.
+      const thread = await sessionFor(owner).getThread(`c_${contactId}`);
+      expect(thread.entries.flatMap((entry) => (entry.type === "reply" && entry.reply.id === replyId ? [entry.reply] : [])))
+        .toEqual([expect.objectContaining({ status: "failed", deliveryReason: "destination_changed" })]);
+
+      // Approving the failed reply drafts the same words again for the new address and answers 409.
+      const key = randomUUID();
+      const error = await sessionFor(owner).approveReply(replyId, {}, key).then(() => null, (caught: unknown) => caught);
+      expect(error).toMatchObject({ code: "Conflict", details: { reason: "destination_changed", destination: "moved@haldenrowe.example" } });
+      const copyId = (error as { details: { replyId: string } }).details.replyId;
+      expect(copyId).not.toBe(replyId);
+      // A retry of that call names the same copy and makes no second one.
+      expect(await sessionFor(owner).approveReply(replyId, {}, key).then(() => null, (caught: unknown) => caught))
+        .toMatchObject({ details: { reason: "destination_changed", replyId: copyId } });
+      expect(await rows("SELECT 1 FROM inbox_replies WHERE tenant_id=$1 AND contact_id=$2", [tenantId, contactId])).toHaveLength(2);
+      const proposal = (await rows<{ id: string }>(
+        "SELECT id FROM approvals WHERE tenant_id=$1 AND target_id=$2 AND status='pending'", [tenantId, copyId]))[0]!;
+      expect((await sessionFor(owner).getApproval(proposal.id)).send).toMatchObject({
+        destination: "moved@haldenrowe.example", subject: "Your booking", body: "Your table is ready at 7.",
+      });
+      expect((await sessionFor(owner).approveReply(copyId, {}, randomUUID())).result.status).toBe("approved");
+      await worker().runOnce();
+      expect(provider.delivered).toHaveLength(1);
+      expect(provider.delivered[0]!.request).toMatchObject({ to: "moved@haldenrowe.example" });
+      expect(await reply(copyId)).toMatchObject({ status: "sent" });
+    });
+
+    it("a proposal made for an old address is proposed again, not approved", async () => {
+      const { contactId } = await customer();
+      const draft = await sessionFor(staff).draftReply({ contactId, subject: "Your booking", body: "See you at 7." }, randomUUID());
+      await setAddress(contactId, "normalized_email", "new@haldenrowe.example");
+      const error = await sessionFor(owner).approveReply(draft.result.id, {}, randomUUID()).then(() => null, (caught: unknown) => caught);
+      expect(error).toMatchObject({ code: "Conflict", details: { reason: "destination_changed", destination: "new@haldenrowe.example" } });
+      expect(await rows<{ status: string; destination: string }>(
+        "SELECT status, payload->>'destination' AS destination FROM approvals WHERE tenant_id=$1 AND target_id=$2 ORDER BY status",
+        [tenantId, draft.result.id])).toEqual(expect.arrayContaining([
+        { status: "revoked", destination: expect.stringMatching(/@haldenrowe\.example$/) },
+        { status: "pending", destination: "new@haldenrowe.example" },
+      ]));
+      expect((await sessionFor(owner).approveReply(draft.result.id, {}, randomUUID())).result.status).toBe("approved");
+      await worker().runOnce();
+      expect(provider.delivered[0]!.request).toMatchObject({ to: "new@haldenrowe.example" });
+    });
+
+    it("a changed phone does not stop an email reply", async () => {
+      const { contactId, email } = await customer();
+      const { replyId } = await approvedReply(contactId);
+      await setAddress(contactId, "e164_phone", "+15555550142");
+      await worker().runOnce();
+      expect(provider.delivered).toHaveLength(1);
+      expect(provider.delivered[0]!.request).toMatchObject({ to: email });
+      expect(await reply(replyId)).toMatchObject({ status: "sent" });
+    });
+  });
+
   it("never settles another tenant's reply from a worker pass over this tenant's deliveries", async () => {
     const { contactId } = await customer();
     const { replyId } = await approvedReply(contactId);

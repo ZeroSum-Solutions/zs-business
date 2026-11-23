@@ -22,9 +22,12 @@ import {
 } from "./replies.js";
 
 export {
+  currentEmail,
+  destinationChanged,
   DISCARD_REPLY_ACTION,
   DRAFT_REPLY_ACTION,
   openSendApproval,
+  replySendPayload,
   requireEmail,
   RESUME_REPLY_ACTION,
   SEND_REPLY_ACTION,

@@ -1,7 +1,10 @@
 # M3d: prepaid wallet and message delivery
 
-Status: draft contract for M3d (2026-10-20), revision 5 (2026-10-22), with a D-6 addition on 2026-11-11 (a queued review
-request needs a `completed` booking at send time). Code follows this file;
+Status: draft contract for M3d (2026-10-20), revision 6 (2026-11-22), with a D-6 addition on 2026-11-11 (a queued review
+request needs a `completed` booking at send time). Revision 6 (ZSB-41, `approvals.md` A-16): an
+approved send binds the normalized destination and the rendered subject and body as shown to the
+approver; D-1's event carries the bound `destination`, the content digest covers it, and D-6
+blocks `destination_changed` when the contact's address is no longer the bound one. Code follows this file;
 a change to a numbered rule needs a new revision of this file first. Revision 5 changes D-6 and
 D-9 so a one-click unsubscribe stops marketing email only, and adds D-11 (wallet reservations
 for any priced job). D-11 is built (migration `20261023300000_wallet_job_reservations.sql`,
@@ -49,8 +52,13 @@ until then credits are a service-role call.
 `message.send_requested` in its action transaction. The payload (`messageSendRequestedSchema`)
 names the message, the contact, the channel (`email` or `sms`), the purpose
 (`transactional` or `marketing`) and the approved content (email subject and body, or SMS
-body). It never carries an address: the worker resolves the contact's current address at
-delivery time. It names no approval: the delivery keeps the outbox row's `action_id`, and the
+body), exactly as shown to the approver. It names no recipient (`to`): the worker resolves the
+contact's current address at delivery time. Since revision 6 it carries `destination`, the
+normalized address (email, or E.164 phone for SMS) the approval was bound to, or null for a
+send no approver saw an address for (booking notices, voice texts). Ingest stores it as the
+delivery's `bound_address` (migration `20261122100000_delivery_bound_destination.sql`). The
+content digest the approval check uses (`deliveryContentDigest`, version `zs-delivery-v2`) is
+over message, contact, channel, purpose, subject, body and destination. It names no approval: the delivery keeps the outbox row's `action_id`, and the
 approval of that action is what D-6 re-checks. The Inbox (M3c) emits this event when an
 owner approves a reply; M6 agents will too.
 
@@ -102,7 +110,11 @@ worker re-checks, for every attempt:
   mark to `no_show`, one queued before outcomes existed (its booking is unmarked), and one queued before a cancel
   (`booking.md` B-43, B-44, B-46). It reads the booking row inside the same transaction and runs after the approval
   checks, so a revoked approval still reports `approval_revoked`;
-- a usable address (`no_address`). The send goes to the contact's current address, except
+- a usable address (`no_address`), then the bound address (revision 6): a delivery with a
+  `bound_address` blocks `destination_changed` when the contact's current address for its
+  channel differs from it, and the provider is never called. The owner sees the reason on the
+  reply and approves again for the new address (`approvals.md` A-16). A delivery with no bound
+  address (null) skips this check. The send goes to the contact's current address, except
   that while an outcome is unknown it may only be repeated to the address it went to; if the
   contact's address changed, the delivery blocks `address_changed` (after a lookup, D-8). A
   marketing campaign delivery (`marketing-email.md` M-6) is bound to its snapshot address on

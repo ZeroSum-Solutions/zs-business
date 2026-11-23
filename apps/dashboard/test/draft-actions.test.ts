@@ -11,7 +11,7 @@ const reply: ReplyRecord = {
   id: "e7f9a1b3-5c7d-4e9f-8a1b-000000000001", tenantId: "6f1c2a9e-3b4d-4e8f-9a1b-2c3d4e5f6a70",
   contactId: "5e0c1a2b-7d3f-4c8a-9b1e-000000000001", channel: "email", subject: "Hello", body: "Hi", status: "draft",
   draftedBy: { userId: "9a1b3c5d-7e9f-4a1b-8c2d-000000000002", email: "staff@example.com" }, createdAt: "2026-10-20T12:00:00.000Z",
-  approvedBy: null, approvedAt: null, discardedAt: null, settledAt: null,
+  approvedBy: null, approvedAt: null, discardedAt: null, settledAt: null, deliveryReason: null,
 };
 const render = (role: "owner" | "staff") => renderToString(h(DraftActions, {
   reply, canApprove: roleCan(role, APPROVE_REPLIES), canDiscard: roleCan(role, "inbox.drafts"), busy: false, onStep: () => undefined,

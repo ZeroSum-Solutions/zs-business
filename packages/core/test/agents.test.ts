@@ -173,7 +173,7 @@ describe("drafts but never sends (G-6, G-12)", () => {
     expect(reply).toEqual({ status: "draft", drafted_by: agentActorId(tenantId), subject: "Following up from Tenant A" });
     const approval = (await sessionFor(owner).getApproval(decision!.approvalId!));
     expect(approval).toMatchObject({
-      actionType: "inbox.reply.send", target: { type: "inbox_reply", id: replyId }, payload: { replyId },
+      actionType: "inbox.reply.send", target: { type: "inbox_reply", id: replyId }, payload: { replyId, destination: email },
       status: "pending", requestedBy: agentActorId(tenantId),
     });
     // The Inbox shows it as a waiting draft in the customer's thread.
@@ -209,6 +209,35 @@ describe("drafts but never sends (G-6, G-12)", () => {
     now += 60_000;
     expect(await worker.runOnce()).toMatchObject({ ingested: 0, claimed: 0 });
     expect(provider.calls).toHaveLength(1);
+  });
+
+  it("an agent draft is bound to the address the owner approved: a changed email stops it with no provider call (A-16)", async () => {
+    const { contactId, email } = await inquiry({ name: "Ione Drew" });
+    now += 25 * HOUR;
+    const run = await agent(createFakeFollowUpModel()).runScheduled(tenantId, randomUUID());
+    const decision = run.decisions.find((item) => item.contactId === contactId)!;
+    expect((await sessionFor(owner).getApproval(decision.approvalId!)).send).toMatchObject({ channel: "email", destination: email });
+    now += 60_000;
+    await sessionFor(owner).approveReply(decision.replyId!, {}, randomUUID());
+    // Both addresses change after the approval, before the worker runs.
+    await service((tx) => tx.query("UPDATE crm_contacts SET normalized_email=$3, e164_phone=$4 WHERE tenant_id=$1 AND id=$2",
+      [tenantId, contactId, "ione.new@example.com", "+15555550143"]));
+    const provider = createFakeProvider({ clock });
+    const worker = createDeliveryWorker({
+      service, providers: { email: provider, sms: provider }, approvals: approvalsFromRecords(approvalForAction, clock),
+      onSettled: async (tx, tenant, messageId, outcome, at) => { await settleReplyDelivery(tx, tenant, messageId, outcome, at); },
+      clock, generateId: randomUUID, report: () => undefined,
+      config: {
+        workerId: "m6-bound", leaseMs: 60_000, providerTimeoutMs: 5_000, pricing: { currency: "usd", email: 2, smsSegment: 3 },
+        unsubscribe: { secret: "unsubscribe-test-secret-0123456789abcdef", baseUrl: "https://api.example.test/public/v1/unsubscribe" },
+      },
+    });
+    now += 60_000;
+    await worker.runOnce();
+    expect(provider.calls).toHaveLength(0);
+    expect(await rows("SELECT status, final_reason, bound_address FROM message_deliveries WHERE tenant_id=$1 AND message_id=$2",
+      [tenantId, decision.replyId])).toEqual([{ status: "blocked", final_reason: "destination_changed", bound_address: email }]);
+    expect(await rows("SELECT status FROM inbox_replies WHERE tenant_id=$1 AND id=$2", [tenantId, decision.replyId])).toEqual([{ status: "failed" }]);
   });
 
   it("staff cannot approve an agent draft, and the agent principal can neither approve nor send", async () => {

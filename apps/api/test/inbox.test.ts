@@ -197,7 +197,7 @@ describe("replies (I-4..I-7)", () => {
       id: reply.id, tenantId: h.a.tenantId, contactId, channel: "email", subject: "Your pearl strand",
       body: "Yes, we restring pearls on site. Bring it in any weekday.", status: "draft",
       draftedBy: { userId: h.a.actorId, email: h.a.email }, createdAt: draftedAt,
-      approvedBy: null, approvedAt: null, discardedAt: null, settledAt: null,
+      approvedBy: null, approvedAt: null, discardedAt: null, settledAt: null, deliveryReason: null,
     });
     // A replay is the same draft; a draft writes no outbox event.
     expect(await draft(body, h.a.token, key)).toMatchObject({ status: 201, body: drafted.body });
@@ -218,7 +218,7 @@ describe("replies (I-4..I-7)", () => {
       event_type: MESSAGE_SEND_REQUESTED,
       payload: {
         messageId: reply.id, contactId, channel: "email", purpose: "transactional",
-        subject: "Your pearl strand", body: "Yes, we restring pearls on site. Bring it in any weekday.",
+        subject: "Your pearl strand", body: "Yes, we restring pearls on site. Bring it in any weekday.", destination: expect.stringMatching(/^mira\.[0-9a-f]{8}@haldenrowe\.example$/),
       },
     }]);
     const answered = threadDetailSchema.parse((await get(`/v1/inbox/threads/c_${contactId}`)).body);

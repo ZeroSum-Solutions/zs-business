@@ -540,6 +540,65 @@ describe("appointment reminders (G-19)", () => {
     expect(await deliveryOf(s.bookingId)).toMatchObject({ status: "blocked", final_reason: "approval_missing" });
   });
 
+  describe("the address a queued message is bound to (approvals.md A-16, delivery.md D-6 revision 6)", () => {
+    const calls = () => provider.calls.length;
+    const setAddress = (contactId: string, column: "normalized_email" | "e164_phone", value: string) => service((tx) => tx.query(
+      `UPDATE crm_contacts SET ${column}=$3 WHERE tenant_id=$1 AND id=$2`, [tenantId, contactId, value]));
+
+    it("an email reminder whose customer changed email after the queue is stopped with no provider call", async () => {
+      const s = await booked();
+      await ready("appointment_reminder");
+      await runNow("appointment_reminder");
+      const [event] = await sendEvents(s.bookingId);
+      const email = (await rows<{ normalized_email: string }>(
+        "SELECT normalized_email FROM crm_contacts WHERE tenant_id=$1 AND id=$2", [tenantId, s.contactId]))[0]!.normalized_email;
+      expect(event!.payload).toMatchObject({ destination: email });
+      await setAddress(s.contactId, "normalized_email", `moved-${randomUUID().slice(0, 8)}@haldenrowe.example`);
+      await setAddress(s.contactId, "e164_phone", "+15555550144");
+      const before = calls();
+      now += 60_000;
+      await worker().runOnce();
+      expect(calls()).toBe(before);
+      expect(await deliveryOf(s.bookingId)).toMatchObject({ status: "blocked", final_reason: "destination_changed" });
+    });
+
+    it("an SMS reminder whose customer changed phone after the queue is stopped with no provider call", async () => {
+      const s = await booked({ email: null });
+      await service((tx) => tx.query(
+        `INSERT INTO crm_contact_consent (tenant_id,contact_id,channel,status,source,recorded_at)
+         VALUES ($1,$2,'sms'::crm_consent_channel,'granted','test',$3)`, [tenantId, s.contactId, new Date(now)]));
+      await write("appointment_reminder", { channel: "sms" });
+      await approve("appointment_reminder");
+      await enable("appointment_reminder");
+      await runNow("appointment_reminder");
+      const [event] = await sendEvents(s.bookingId);
+      expect(event!.payload).toMatchObject({ channel: "sms", destination: "+15555550123" });
+      await setAddress(s.contactId, "e164_phone", "+15555550145");
+      const before = calls();
+      now += 60_000;
+      await worker().runOnce();
+      expect(calls()).toBe(before);
+      expect(await deliveryOf(s.bookingId)).toMatchObject({ status: "blocked", final_reason: "destination_changed" });
+    });
+
+    it("an event that names another address than the one approved does not match the approval (approval_missing)", async () => {
+      const s = await booked();
+      await ready("appointment_reminder");
+      await runNow("appointment_reminder");
+      const other = `other-${randomUUID().slice(0, 8)}@haldenrowe.example`;
+      await setAddress(s.contactId, "normalized_email", other);
+      await service((tx) => tx.query(
+        `UPDATE outbox SET payload = jsonb_set(payload, '{destination}', to_jsonb($3::text))
+          WHERE tenant_id=$1 AND event_type='message.send_requested' AND payload->>'messageId' IN
+            (SELECT message_id::text FROM agent_decisions WHERE tenant_id=$1 AND subject_id=$2)`, [tenantId, s.bookingId, other]));
+      const before = calls();
+      now += 60_000;
+      await worker().runOnce();
+      expect(calls()).toBe(before);
+      expect(await deliveryOf(s.bookingId)).toMatchObject({ status: "blocked", final_reason: "approval_missing" });
+    });
+  });
+
   it("holds the revision's own timing: a longer lead time reaches a booking further ahead", async () => {
     const s = await booked({ hour: 10 });
     now = s.base - 2 * DAY;

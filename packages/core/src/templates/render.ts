@@ -15,14 +15,15 @@ export function renderedContent(
   };
 }
 
-/** D-6: the digest of the delivery a send must produce: the revision rendered with its recorded values. */
+/** D-6: the digest of the delivery a send must produce: the revision rendered with its recorded values, to its bound address. */
 export function sendDigest(
   revision: Wording, values: Readonly<Record<string, string>>,
-  messageId: string, contactId: string,
+  messageId: string, contactId: string, destination: string | null,
 ): string {
   const content = renderedContent(revision, values);
   return deliveryContentDigest({
     messageId, contactId, channel: revision.channel, purpose: revision.purpose, subject: content.subject, body: content.body,
+    destination,
   });
 }
 

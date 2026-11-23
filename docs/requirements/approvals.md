@@ -7,6 +7,9 @@ replays accept any stored UTC ISO instant, and a derived `fresh_until` or a cloc
 range fails with `ValidationFailed`. Revision 4 (audit B3-01): A-6. Revision 5 (phase 2 specs):
 adds A-15, a standing approval of one message template revision, for the templated agent kinds
 (`agents.md` G-19, G-20). A-1..A-14 and F-1..F-8 are unchanged. A-15 is not built yet.
+Revision 6 (2026-11-22, ZSB-41): adds A-16, an approved send binds the normalized destination
+and the rendered subject and body as shown to the approver, and a change of address voids it.
+A-11 reads gain the `send` view. A-1..A-15 are otherwise unchanged.
 Code follows this file; a change to a numbered rule needs a new revision of this file first.
 
 Scope: two tenant records the rest of M3 builds on.
@@ -198,6 +201,44 @@ one template revision (`agents.md` G-19 owns the template tables):
 - A standing approval appears in A-11 reads like any other, with `standing` and the count of
   sends it covered.
 
+**A-16. An approved send binds its destination and content (revision 6).** An owner approves a
+message to one address, not to whatever address the contact has when the worker runs:
+- Binding at request. A proposal of `inbox.reply.send` (an owner's or staff draft through
+  A-5, or an agent draft, `agents.md` G-6) stores the payload `{replyId, destination}`, where
+  `destination` is the contact's normalized email at request time (null when it has no usable
+  one). The server resolves it; a requester cannot name an address. The stored payload is the
+  A-7 binding, so the address is part of what the approver approved, and A-4 keeps it fixed.
+- Content. A reply's subject and body never change once drafted: the runtime role may update
+  only its status and decision columns (`20261020200000_inbox_home.sql`), so the approved words
+  are the reply row's words. The send
+  event carries those words and `destination` (`delivery.md` D-1).
+- Run. The send handler compares the bound `destination` with the contact's current normalized
+  email under the reply lock; a missing or different one is `Conflict` `destination_changed`
+  with the current `destination`, and nothing is written.
+- Templated sends (A-15). The queue action's payload carries `destination`, the contact's
+  current address for the revision's channel (email or E.164 phone), and the send digest the
+  standing check compares covers it, so an event naming another address answers
+  `approval_missing`. When the address changed between the run's read and the queue action,
+  the action refuses `Conflict` `destination_changed` and records nothing, so a later run
+  queues the message for the new address.
+- Delivery. The worker stores the bound address on the delivery and blocks
+  `destination_changed` when the contact's current address for the channel differs
+  (`delivery.md` D-6). The provider is never called and the reservation is released.
+- Re-approve. `approveReply` on a draft whose open proposal is bound to another address (or to
+  none, made before revision 6) withdraws it (A-8, note `destination_changed`), proposes the
+  send again for the current address, and answers 409 `destination_changed` with the new
+  `approvalId`, so the owner approves the new address only after seeing it. On a reply whose
+  delivery ended `destination_changed` it drafts the same subject and body again as a new
+  reply, proposes that, and answers 409 `destination_changed` with the copy's `replyId`. A
+  retry of either call with the same key gives the same answer and creates nothing more.
+  An approval another owner decided stays theirs (409 `approved_by_other`) before any of this.
+- Read. A-11 records of `inbox.reply.send` carry `send: {contactId, channel, destination,
+  subject, body}`: the bound address from the stored payload and the reply's words, so the
+  queue shows what the owner approves. Other action types carry `send: null`.
+- Unbound sends. Booking notices and voice texts (`booking.md`, `twilio.md`) carry
+  `destination: null` and keep the earlier rule: they go to the contact's current address.
+  Deliveries ingested before revision 6 have no bound address and keep that rule too.
+
 ## Source record
 
 **F-1. Table.** `source_records` (migration `20261020100100_source_records.sql`): `tenant_id`,
@@ -266,6 +307,15 @@ recently observed first, each with `fresh`. Same permission as F-2.
   or expired grant blocks queued deliveries; a delivery whose content differs from the
   rendered revision blocks `approval_missing`; consent and suppression still block a covered
   send; two-tenant denial on the template tables.
+
+- A-16: `packages/core/test/m3-reply-delivery.test.ts` (owner draft: the approval read shows
+  the bound address and words; a changed email after approval blocks `destination_changed`
+  with no provider call, the reply shows why, and re-approving drafts a copy for the new
+  address that then sends; a stale proposal is proposed again; a changed phone does not stop
+  an email), `agents.test.ts` (agent draft, email and phone changed), `template-approvals.test.ts`
+  (email and SMS reminders, and an event naming another address answers `approval_missing`),
+  `inbox.test.ts` (the 409 and its replay) and `delivery/policy.test.ts` (the digest covers the
+  destination).
 
 ## First slice (A-15)
 

@@ -23,6 +23,7 @@ export type {
 export { createFakeProvider, type FakeBehaviour, type FakeDelivery, type FakeProvider } from "./fake-provider.js";
 export {
   backoffMs,
+  channelDestination,
   consentBlock,
   deliveryContentDigest,
   deliveryPrice,

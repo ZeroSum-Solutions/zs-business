@@ -111,6 +111,7 @@ const CONFLICT_MESSAGES: Record<string, string> = {
   member_exists: "That email is already on the team.",
   not_draft: "This reply is no longer a draft. Someone approved or discarded it first.",
   no_email: "This customer has no email address yet. Add one in Customers, then approve the reply.",
+  destination_changed: "The customer's address changed since this send was proposed. It was proposed again for the new address; check it and approve again.",
   approved_by_other: "Another owner already approved this reply. They finish sending it, or revoke their approval first.",
   stale_release: "Another version went live since you opened this page.",
   intake_not_in_review: "This price list is no longer waiting for review.",
@@ -231,9 +232,10 @@ export function demoValidationError(issues: readonly { path: readonly PropertyKe
 /**
  * A reply step that hit a reply someone else already moved on (`not_draft`), a customer with
  * no address to send to (`no_email`), or a send another owner approved and must finish
- * (`approved_by_other`) (inbox-home.md I-6, I-7).
+ * (`approved_by_other`), or a send proposed again for a changed address (`destination_changed`,
+ * approvals.md A-16) (inbox-home.md I-6, I-7).
  */
-export const REPLY_CONFLICT_REASONS: ReadonlySet<string> = new Set(["not_draft", "no_email", "approved_by_other"]);
+export const REPLY_CONFLICT_REASONS: ReadonlySet<string> = new Set(["not_draft", "no_email", "approved_by_other", "destination_changed"]);
 
 export function isReplyConflict(error: unknown): error is ApiError {
   return isApiError(error, "conflict") && error.reason !== null && REPLY_CONFLICT_REASONS.has(error.reason);

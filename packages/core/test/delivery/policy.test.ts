@@ -8,6 +8,7 @@ import {
   consentBlock,
   createDeliveryWorker,
   createFakeProvider,
+  channelDestination,
   deliveryContentDigest,
   signUnsubscribeToken,
   smsKeyword,
@@ -88,14 +89,25 @@ describe("content digest", () => {
     const digest = deliveryContentDigest(base);
     expect(deliveryContentDigest({ ...base })).toBe(digest);
     for (const change of [{ body: "See you Wednesday." }, { subject: "Hi" }, { contactId: randomUUID() },
-      { purpose: "marketing" as const }, { messageId: randomUUID() }])
+      { purpose: "marketing" as const }, { messageId: randomUUID() }, { destination: "ana@example.com" }])
       expect(deliveryContentDigest({ ...base, ...change })).not.toBe(digest);
+    // D-6 revision 6: the bound address is part of what the approval covers; an absent one is unbound (null).
+    const bound = deliveryContentDigest({ ...base, destination: "ana@example.com" });
+    expect(deliveryContentDigest({ ...base, destination: "ana.new@example.com" })).not.toBe(bound);
+    expect(deliveryContentDigest({ ...base, destination: null })).toBe(digest);
+  });
+  it("picks the channel's address: a usable email for email, the phone for SMS", () => {
+    const contact = { normalized_email: "ana@example.com", e164_phone: "+15555550123" };
+    expect(channelDestination("email", contact)).toBe("ana@example.com");
+    expect(channelDestination("sms", contact)).toBe("+15555550123");
+    expect(channelDestination("email", { ...contact, normalized_email: "x@placeholder.invalid" })).toBeNull();
+    expect(channelDestination("sms", { ...contact, e164_phone: null })).toBeNull();
   });
 });
 
 describe("message.send_requested payload (D-1)", () => {
   const ids = { messageId: randomUUID(), contactId: randomUUID() };
-  it("needs a one-line subject for email and none for SMS, and carries no address", () => {
+  it("needs a one-line subject for email and none for SMS, and names no `to` (the bound destination is checked, never used as the recipient)", () => {
     expect(messageSendRequestedSchema.safeParse({ ...ids, channel: "email", purpose: "transactional", subject: "Hi", body: "x" }).success).toBe(true);
     expect(messageSendRequestedSchema.safeParse({ ...ids, channel: "email", purpose: "transactional", body: "x" }).success).toBe(false);
     expect(messageSendRequestedSchema.safeParse({ ...ids, channel: "email", purpose: "transactional", subject: "a\nBcc: x", body: "x" }).success).toBe(false);
