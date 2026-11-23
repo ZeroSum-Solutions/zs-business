@@ -331,7 +331,7 @@ Errors always use `apiErrorBodySchema` from `@zs/contracts`:
 `NotFound` 404, `Conflict` 409 (`details.reason`: `slot_unavailable`, `overlap`,
 `stale_revision`, `id_in_use`, `idempotency_key_reused`, `binding_mismatch`,
 `concurrent_update`, `split_identity`, `identity_mismatch`, `last_owner`, `member_exists`,
-`disclosure_changed`, `already_reviewed`, `not_draft` (with the reply's `status`), `no_email`, `approved_by_other` (with `approvedBy`), `stale_release`, `host_in_use`, `grant_changed` (a Google grant replaced since the page showed it), `invalid_currency` (with the deal's stored `currency`);
+`disclosure_changed`, `already_reviewed`, `not_draft` (with the reply's `status`), `no_email`, `destination_changed` (with `destination`, and `approvalId` or `replyId` when the send was proposed again), `approved_by_other` (with `approvedBy`), `stale_release`, `host_in_use`, `grant_changed` (a Google grant replaced since the page showed it), `invalid_currency` (with the deal's stored `currency`);
 anything else is `conflict`),
 `Internal` 500 with no internal detail, `Unavailable` 503 with `Retry-After: 1`. Each code has
 one fixed `message`.

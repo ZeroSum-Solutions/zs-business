@@ -232,12 +232,15 @@ message to one address, not to whatever address the contact has when the worker 
   `approvalId`, so the owner approves the new address only after seeing it. On a reply whose
   delivery ended `destination_changed` it drafts the same subject and body again as a new
   reply, proposes that, and answers 409 `destination_changed` with the copy's `replyId`; one
-  failed reply gets one copy, whatever key asks. With no open proposal, one whose last proposal
+  failed reply gets one copy, whatever key or owner asks. With no open proposal, one whose last proposal
   was bound to another address is proposed again with the same 409 before any approval. A
   retry of either call with the same key gives the same answer and creates nothing more; the
   key cannot be reused on another reply (`IdempotencyConflict`). The call may name the address
   the owner saw (`{ destination }`); when it is not the current one, the answer is 409
-  `destination_changed` and nothing is recorded.
+  `destination_changed` and nothing is recorded. A proposal made during the call that binds
+  another address than the one the call checked (the address changed in between) is left
+  pending with the same 409, not approved. A call that withdrew a stale proposal and failed
+  before proposing again finishes both steps on a retry with the same key.
   An approval another owner decided stays theirs (409 `approved_by_other`) before any of this.
 - Read. A-11 records of `inbox.reply.send` carry `send: {contactId, channel, destination,
   subject, body}`: the bound address from the stored payload and the reply's words, so the
@@ -356,3 +359,5 @@ owner approves revision 2; a reminder from revision 1 still in the outbox is not
 - A standing template approval (A-15) approves a template revision, not an address. A templated
   send binds the address when its action is queued, and a change before delivery voids it.
 - Booking and voice notices are not owner-approved sends and stay unbound (`destination` null).
+- A templated send blocked `destination_changed` leaves its run decision `queued`, so a later run
+  does not queue a replacement for the same booking. Recovery is ZSB-65.

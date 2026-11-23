@@ -176,7 +176,7 @@ import { readClock } from "../booking/slots.js";
 import { archiveStage, createDeal, createOrFindContact, createStage, crmHandlers, moveDealStage, renameStage, reorderStages, restoreStage, stageHandlers } from "../crm/index.js";
 import { dealDetailsHandlers, setDealDetails } from "../deals/details.js";
 import {
-  currentEmail, destinationChanged, discardReply, draftReply, inboxHandlers, openSendApproval, requireEmail, RESUME_REPLY_ACTION,
+  currentEmail, destinationChanged, discardReply, draftReply, inboxHandlers, openSendApproval, RESUME_REPLY_ACTION,
   SEND_REPLY_ACTION,
 } from "../inbox/index.js";
 import { smsStatusHandlers } from "../delivery/sms-status.js";
@@ -835,7 +835,9 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       const request = parseInput(approveReplyRequestSchema, body);
       const idempotencyKey = parseInput(idempotencyKeySchema, key, "Idempotency-Key");
       const now = new Date(readClock(deps.clock));
-      const { reply, open, bound, current, rebound, previous } = await read("approve", async (tx) => {
+      // A-16: the one copy a failed reply is drafted again as, whichever owner or key asks for it.
+      const copyId = keyedEnvelope(stepKey(id, "redraft"), "inbox_reply").id;
+      const { reply, open, bound, current, rebound, previous, copy, copyOpen } = await read("approve", async (tx) => {
         const reply = await loadReply(tx, tenantId, id);
         // The proposal to send this reply that this key already approved or resumed: a retry of
         // that call. Found whatever its status is now, so a send that committed replays after its
@@ -846,15 +848,18 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
               AND a.action_type=$4 AND a.target_type='inbox_reply' AND a.target_id=$5`,
           [tenantId, idempotencyKey, RESUME_REPLY_ACTION, SEND_REPLY_ACTION, id],
         )).rows[0]?.id ?? null;
-        // A retry replays whatever the customer's address is now; a new call needs one.
         const redraft = reply?.status === "failed" && reply.deliveryReason === "destination_changed";
-        if (bound === null && (reply?.status === "draft" || redraft)) await requireEmail(tx, tenantId, reply!.contactId);
+        const copy = redraft ? await loadReply(tx, tenantId, copyId) : null;
+        const copyOpen = copy ? await openSendApproval(tx, tenantId, copyId, now) : null;
         const current = reply ? await currentEmail(tx, tenantId, reply.contactId) : null;
-        // A-16: the reply this key already proposed again for a changed address, if any.
+        // A-16: the reply this key already withdrew or proposed again for a changed address, if any.
+        // The withdrawal counts too, so a call that failed between the two steps finishes on retry.
         const rebound = (await tx.query<{ target_id: string }>(
           `SELECT a.target_id FROM actions x JOIN approvals a ON a.tenant_id=x.tenant_id AND a.id::text = lower(x.payload->>'approvalId')
-            WHERE x.tenant_id=$1 AND x.idempotency_key=$2 AND x.action_type='approval.request'`,
-          [tenantId, stepKey(idempotencyKey, "repropose")],
+            WHERE x.tenant_id=$1 AND ((x.idempotency_key=$2 AND x.action_type='approval.request')
+              OR (x.idempotency_key=$3 AND x.action_type='approval.revoke'))
+              AND a.action_type=$4 AND a.target_type='inbox_reply'`,
+          [tenantId, stepKey(idempotencyKey, "repropose"), stepKey(idempotencyKey, "rebind"), SEND_REPLY_ACTION],
         )).rows[0]?.target_id ?? null;
         const open = await openSendApproval(tx, tenantId, id, now);
         // With no open proposal, the address the newest earlier one bound (expired or withdrawn).
@@ -864,9 +869,13 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
             ORDER BY requested_at DESC, id DESC LIMIT 1`,
           [tenantId, SEND_REPLY_ACTION, id],
         )).rows[0] ?? null;
-        return { reply, open, bound, current, rebound, previous };
+        return { reply, open, bound, current, rebound, previous, copy, copyOpen };
       });
       if (!reply) throw new TenantDenied();
+      // A retry replays whatever the customer's address is now; a new decision needs one.
+      const needsEmail = () => {
+        if (current === null) throw new Conflict("The customer has no email address to reply to", { reason: "no_email" });
+      };
       const retry = bound !== null;
       // A-16: withdraw a proposal bound to an address that is no longer the customer's, propose the
       // send for the current one, and answer 409 with it, so the owner approves only what they saw.
@@ -886,17 +895,26 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       }
       if (!retry && reply.status === "failed" && reply.deliveryReason === "destination_changed") {
         // A-16: the same words again, as a new draft proposed for the address the customer has now.
-        // Keyed by the failed reply, not this call, so another click names the same one copy.
-        const { id: copyId, ...draftStep } = keyedEnvelope(stepKey(id, "redraft"), "inbox_reply");
-        const copy = await draftReply({
+        // Keyed by the failed reply, not this call, so another click names the same one copy. A copy
+        // already drafted (by any owner) is named again, not drafted again under another actor.
+        if (copy) {
+          const proposal = copyOpen
+            ? { id: copyOpen.id, destination: copyOpen.destination }
+            : await proposeSend(copy, stepKey(idempotencyKey, "redraft-propose")).then((p) => ({ id: p.id, destination: p.send?.destination ?? null }));
+          throw destinationChanged(proposal.destination, { replyId: copy.id, approvalId: proposal.id });
+        }
+        needsEmail();
+        const { id: _copy, ...draftStep } = keyedEnvelope(stepKey(id, "redraft"), "inbox_reply");
+        const drafted = await draftReply({
           actionType: "inbox.reply.draft", ...draftStep,
           payload: { replyId: copyId, contactId: reply.contactId, subject: reply.subject, body: reply.body },
         }, writeContext);
-        const fresh = await proposeSend(copy.result, stepKey(id, "redraft-propose"));
-        throw destinationChanged(fresh.send?.destination ?? null, { replyId: copy.result.id, approvalId: fresh.id });
+        const fresh = await proposeSend(drafted.result, stepKey(id, "redraft-propose"));
+        throw destinationChanged(fresh.send?.destination ?? null, { replyId: drafted.result.id, approvalId: fresh.id });
       }
       // Once the reply has left draft, only a retry of the call that sent it replays.
       if (reply.status !== "draft" && !retry) throw notDraft(reply.status);
+      if (!retry) needsEmail();
       // Only the deciding owner runs an approved action (A-7), whatever address it is bound to.
       if (!retry && open?.status === "approved" && open.decidedBy !== actorId)
         throw new Conflict("Another owner approved this reply", { reason: "approved_by_other", approvedBy: open.decidedBy });
@@ -916,7 +934,15 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
         const { id: _id, ...rest } = envelope(idempotencyKey, "inbox_reply", id);
         await run({ actionType: RESUME_REPLY_ACTION, ...rest, payload: { replyId: id, approvalId: open.id } });
       } else if (!retry) {
-        approvalId ??= (await proposeSend(reply, stepKey(idempotencyKey, "propose"))).id;
+        if (approvalId === undefined) {
+          // A-16: the proposal binds the address read in its own transaction. When that is not the
+          // one this call checked (it changed in between), leave it pending for the owner to see.
+          const created = await proposeSend(reply, stepKey(idempotencyKey, "propose"));
+          const seen = request.destination !== undefined ? request.destination : current;
+          if ((created.send?.destination ?? null) !== seen)
+            throw destinationChanged(created.send?.destination ?? null, { approvalId: created.id });
+          approvalId = created.id;
+        }
         const { id: _id, ...rest } = envelope(idempotencyKey, "approval", approvalId);
         await run({ actionType: "approval.approve", ...rest, payload: { approvalId } });
       }

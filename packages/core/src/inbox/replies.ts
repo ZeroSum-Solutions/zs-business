@@ -131,10 +131,11 @@ export const sendReplyHandler: ActionHandler = {
     const { payload } = parseOrFail(sendReplyCommandSchema, command);
     const tenantId = binding.tenantId;
     const draft = await lockDraft(tx, tenantId, payload.replyId);
-    await requireEmail(tx, tenantId, draft.contact_id);
     // A-16: the approval names one address. The contact row is read in this transaction, and the
-    // worker compares it again before every attempt (delivery.md D-6).
+    // worker compares it again before every attempt (delivery.md D-6). An approval with no address
+    // for a customer with none is `no_email`; a bound address that was cleared is a change.
     const destination = await currentEmail(tx, tenantId, draft.contact_id);
+    if (destination === null && !payload.destination) await requireEmail(tx, tenantId, draft.contact_id);
     if (!payload.destination || payload.destination !== destination) throw destinationChanged(destination);
     await tx.query(
       "UPDATE inbox_replies SET status='approved', approved_by=$3, approved_at=$4 WHERE tenant_id=$1 AND id=$2",

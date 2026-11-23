@@ -111,7 +111,7 @@ const CONFLICT_MESSAGES: Record<string, string> = {
   member_exists: "That email is already on the team.",
   not_draft: "This reply is no longer a draft. Someone approved or discarded it first.",
   no_email: "This customer has no email address yet. Add one in Customers, then approve the reply.",
-  destination_changed: "The customer's address changed since this send was proposed. It was proposed again for the new address; check it and approve again.",
+  destination_changed: "The customer's address changed since you opened this reply. Nothing was sent. Check the new address, then approve again.",
   approved_by_other: "Another owner already approved this reply. They finish sending it, or revoke their approval first.",
   stale_release: "Another version went live since you opened this page.",
   intake_not_in_review: "This price list is no longer waiting for review.",

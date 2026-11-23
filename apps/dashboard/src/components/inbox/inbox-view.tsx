@@ -335,6 +335,7 @@ function ThreadEntries({ thread, zone }: { thread: ThreadDetail; zone: string })
               />
             ) : canApprove && entry.reply.status === "failed" && entry.reply.deliveryReason === "destination_changed" ? (
               <RedraftAction
+                noEmailRecord={noEmailRecord}
                 busy={step.isPending && step.variables?.replyId === entry.reply.id}
                 onRedraft={() => step.mutate({ kind: "approve", replyId: entry.reply.id })}
               />
@@ -396,12 +397,20 @@ export function DraftActions({ reply, canApprove, canDiscard, noEmailRecord = nu
  * it was proposed (409 `destination_changed`), the thread reloads, and the new draft waits for
  * an approval like any other.
  */
-export function RedraftAction({ busy, onRedraft }: { busy: boolean; onRedraft: () => void }) {
+export function RedraftAction({ busy, onRedraft, noEmailRecord = null }: {
+  busy: boolean;
+  onRedraft: () => void;
+  /** The customer record to open when the customer has no email address now. */
+  noEmailRecord?: string | null;
+}) {
   return (
     <div className="mt-2 flex max-w-[85%] flex-col items-end gap-2">
-      <Button variant="secondary" disabled={busy} aria-busy={busy} onClick={onRedraft}>
+      <Button variant="secondary" disabled={busy || noEmailRecord !== null} aria-busy={busy} onClick={onRedraft}>
         <PaperPlaneTilt aria-hidden />Draft again for the new address
       </Button>
+      {noEmailRecord !== null ? (
+        <Link href={noEmailRecord} className="-mb-2 inline-flex min-h-11 items-center font-bold text-accent-ink underline-offset-4 hover:underline">Add an email in the customer record</Link>
+      ) : null}
     </div>
   );
 }

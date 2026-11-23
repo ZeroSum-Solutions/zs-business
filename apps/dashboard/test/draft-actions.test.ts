@@ -40,6 +40,9 @@ describe("draft actions", () => {
     expect(html).toContain("Draft again for the new address");
     expect(html).not.toContain('disabled=""');
     expect(renderToString(h(RedraftAction, { busy: true, onRedraft: () => undefined }))).toContain('disabled=""');
+    const noEmail = renderToString(h(RedraftAction, { busy: false, onRedraft: () => undefined, noEmailRecord: "/customers/x" }));
+    expect(noEmail).toContain('disabled=""');
+    expect(noEmail).toContain('href="/customers/x"');
   });
 
   it("never says an approved reply was sent", () => {

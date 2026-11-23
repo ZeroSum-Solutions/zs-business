@@ -338,8 +338,11 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
     // D-6 revision 6: a send goes only to the address it was approved for. The approver saw that
     // address; any other one (a cleared address too) ends the send with no provider call, and
     // the owner approves again. A withdrawn approval still says so: the owner meant it not to go.
-    if (row.bound_address !== null && row.bound_address !== address)
-      return { reason: (await approvalStanding(tx, row)) === "revoked" ? "approval_revoked" : "destination_changed", address: null };
+    if (row.bound_address !== null && row.bound_address !== address) {
+      const standing = await approvalStanding(tx, row);
+      const reason = standing === "revoked" ? "approval_revoked" : standing === "approved" ? "destination_changed" : "approval_missing";
+      return { reason, address: null };
+    }
     if (!contact || !address) return { reason: "no_address", address: null };
     // D-1: the contact's current address, except that a send whose outcome is unknown may only
     // be repeated to the recipient it went to; if that changed, the provider is asked instead.
