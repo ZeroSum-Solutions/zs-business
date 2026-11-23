@@ -19,13 +19,14 @@ Build state (checked against the code on 2026-11-22, ZSB-45; this note changes n
 - Built in part: G-18. The Cerebras and DeepSeek adapters, `AGENT_KIND_LANES` and the lane
   guard at start run, but no hosted entry point uses the no-personal-data lane yet:
   `AGENT_MODEL_NO_PERSONAL_DATA` is parsed and then ignored. G-19: templates, revisions,
-  standing approvals and the reminder and review queue actions run. The wording-suggestion route exists, but no hosted entry point passes a
-  suggestion model, so it answers 404 on preview and production (`apps/api/README.md`).
+  standing approvals and the reminder and review queue actions run. The wording-suggestion
+  route exists, but no hosted entry point passes a suggestion model, so it answers 404 on
+  preview and production (`apps/api/README.md`).
 - Not built: G-21. `document_intake` cannot be turned on (`Conflict` `kind_not_available`).
 - Hosted: the workers project sets `FOLLOWUP_AGENT`, `AGENT_MODEL_PERSONAL_DATA=cerebras` and
-  `CEREBRAS_API_KEY` for both preview and production (production since 2026-11-11). The first
-  preview draft through Cerebras `gpt-oss-120b` was recorded for the demo tenant on 2026-11-22
-  (ZSB-45).
+  `CEREBRAS_API_KEY` for both preview and production. On 2026-11-22 a scheduled preview run for
+  the demo tenant drafted a reply through Cerebras `gpt-oss-120b` and recorded its model call
+  (outcome `ok`, 460 input and 177 output tokens, 294 micros) (ZSB-45).
 
 Scope: one agent. It finds website inquiries nobody has answered, asks a model port for a
 follow-up email, and leaves it in the Inbox as a draft with a pending send proposal. An owner
@@ -373,9 +374,9 @@ the `document-intake.md` DL-8 limit, default 20; a longer document is skipped `t
 
 ## Known limits (revision 1)
 
-- Closed by G-16 and G-17 (built): `POST /runs` once ran inside one HTTP request with a model
-  port that took no abort signal, so a deadline mid-run could leave the run `running`. Model
-  calls now abort at their deadline and a stalled run is closed by the sweep.
+- `POST /runs` runs inside one HTTP request and its deadline. If the deadline fires mid-run the
+  caller gets 503 and the run may stay `running` until a retry with the same key continues it
+  or the G-16 stall sweep closes it. Model calls abort at their deadline (G-17).
 - A member run checks `agents` in its own transaction just before the run, so a demotion that
   commits in that gap still lets one run start; its writes are limited to the agent actions.
 - Every run that has room left after the undecided inquiries records a skip again for an
@@ -388,8 +389,9 @@ the `document-intake.md` DL-8 limit, default 20; a longer document is skipped `t
   question.
 - No vision lane is approved. No kind reads images, and any task that needs vision waits for a
   business-billed lane (`docs/integrations.md`, open question 2).
-- Closed by `booking.md` B-43: templated kinds read only `confirmed` bookings, and a review
-  request only one marked `completed`, so a cancelled or no-show booking gets neither.
+- Templated kinds queue only for `confirmed` bookings, and a review request only for one marked
+  `completed` (`booking.md` B-43), rechecked at delivery. A reminder queued before a cancel or a
+  no-show is not rechecked and can still be sent.
 - G-20 reads a `granted` channel as `marketing_updates` consent. Once a second consent purpose
   exists, G-20 must check the purpose itself.
 - A standing template approval expires within 30 days (`approvals.md` A-5); templated sends
