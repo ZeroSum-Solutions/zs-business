@@ -1,6 +1,6 @@
 # Hub plans: paid subscriptions through Stripe Billing and Shopify App Pricing
 
-Status: draft contract, revision 8 (2026-11-20: PL-10 `resolved_at` and `recovered_at` order a late failure after a resolution; PL-13 the worker key-mode check always runs). Revision 7 (2026-11-20: PL-26, the plan page names an agent feature as included only while the runtime would act on it: switches, runner heartbeats, approval, quiet hours and budget)). Revision 6 (2026-11-12: PL-25, the free-tier marker and the daily site publish limit). Revision 5
+Status: draft contract, revision 9 (2026-11-22: PL-8 lets a read-only tenant still receive inbound email, `inbound.email.receive`, inbound-email.md IE-32). Revision 8 (2026-11-20: PL-10 `resolved_at` and `recovered_at` order a late failure after a resolution; PL-13 the worker key-mode check always runs). Revision 7 (2026-11-20: PL-26, the plan page names an agent feature as included only while the runtime would act on it: switches, runner heartbeats, approval, quiet hours and budget)). Revision 6 (2026-11-12: PL-25, the free-tier marker and the daily site publish limit). Revision 5
 (2026-11-11: PL-21..PL-24, a plan an operator grants to one tenant, which wins over
 the provider subscription). Revision 4 (2026-11-10: PL-8 also lets a customer cancel their own booking, `booking.self_cancel`,
 booking-self-service.md BS-12). Revision 3 (2026-11-07: PL-15..PL-20, Shopify merchants pay through
@@ -164,14 +164,14 @@ injected clock. A read-only tenant may run only: `plan.checkout.create`, `wallet
 `suppression.record`, the inbound and worker records (`sms.status.record`, `sms.reply.record`,
 `voice.call.record`, `voice.voicemail.record`, `transcription.job.complete`,
 `transcription.job.fail`, `catalog.intake.result`, `catalog.intake.fail`, `media.variant.stage`,
-`media.variant.fail`; `voice.textback.optin` is not on the list, because it starts an outbound
+`media.variant.fail`, `inbound.email.receive`; `voice.textback.optin` is not on the list, because it starts an outbound
 text), the stops (`agent.kill`, `agent.kind.kill`, `browser.kill`,
 `agent.run.finish`, `agent.run.stall`, `agent.kind.run.finish`, `agent.cost.warn`,
 `outreach.campaign.pause`, `outreach.prospect.stop`) and the
 removals (`member.remove`, `connection.disconnect`, `calendar.google.disconnect`,
 `automation.token.revoke`, `approval.reject`, `approval.revoke`, `inbox.reply.discard`,
 `outreach.mailbox.disconnect`) and the customer's own cancel (`booking.self_cancel`). The list
-is `READ_ONLY_ALLOWED_ACTIONS` in `packages/core/src/billing/plan-gate.ts:93-107`. Anything
+is `READ_ONLY_ALLOWED_ACTIONS` in `packages/core/src/billing/plan-gate.ts:93-109`. Anything
 else is refused with 409 `plan_read_only`. Reads always work, so an owner can see and export the
 data. **Limits** (PL-1) apply to a tenant whose record names a plan: before `member.invite`,
 `connection.connect` and `automation.token.create`, the dispatcher takes a per-tenant transaction

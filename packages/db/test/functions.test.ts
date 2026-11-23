@@ -92,6 +92,13 @@ const expectedPath: Record<string, string> = {
   // Enrichment (20261023600000_enrichment.sql, E-7): a changed email or phone clears the region mark.
   "crm_contacts_clear_region_attest()": "pg_catalog, pg_temp",
   "inbox_replies_guard()": "pg_catalog, pg_temp",
+  // Inbound email slice 1 (20261122100000_inbound_email.sql, IE-2, IE-3, IE-12, IE-35): the handle generator and the
+  // tenant-insert trigger, the References check, the content guard, and the definer that routes a handle.
+  "inbound_email_addresses_create()": "pg_catalog, pg_temp",
+  "inbound_email_new_handle()": "pg_catalog, pg_temp",
+  "inbound_email_route(text)": "pg_catalog, pg_temp",
+  "inbound_emails_guard()": "pg_catalog, pg_temp",
+  "inbound_emails_references_valid(text[])": "pg_catalog, pg_temp",
   // Outreach (20261109100000_outreach_sequencer.sql, OS-24): the runtime role may set a mailbox active or disconnected only.
   "outreach_mailboxes_runtime_status()": "pg_catalog, pg_temp",
   // Outreach review fixes (20261109110000_outreach_hardening.sql): the runtime role starts a campaign only against its approval.
@@ -157,9 +164,10 @@ it("skips only planted logins: any other login that can reach an owner is caught
     await client.query(`CREATE ROLE ${planted} LOGIN; GRANT authenticated, zs_dispatcher TO ${planted}`);
     expect(await assumable()).toEqual([]);
     await client.query("CREATE ROLE zs_probe_login LOGIN; GRANT authenticated, zs_dispatcher TO zs_probe_login");
-    // The four functions that run as zs_dispatcher.
+    // The five functions that run as zs_dispatcher.
     expect(await assumable()).toEqual([
       expect.stringMatching(/^business_profiles_sync_name\(/), expect.stringMatching(/^connections_take_attempt\(/),
+      expect.stringMatching(/^inbound_email_route\(/),
       expect.stringMatching(/^prune_automation_token_usage\(/),
       expect.stringMatching(/^record_action_and_event\(/),
     ]);

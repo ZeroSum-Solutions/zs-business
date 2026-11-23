@@ -1,6 +1,9 @@
 # Inbound email: customer replies reach the Inbox
 
-Status: draft contract, not built (2026-11-10), revision 2 (2026-11-11: the fix round after three
+Status: draft contract, slice 1 built (2026-11-22, ZSB-46), revision 3 (2026-11-22: IE-2 takes
+the handle's 80 random bits from `gen_random_uuid`, because the database has no pgcrypto; IE-4
+and IE-17 alerts for unrouted and over-admission mail start with slice 2's worker, and slice 1
+writes the log lines only). Revision 2 (2026-11-11: the fix round after three
 independent reviews; it fixes the settle write path, binding without proof, the authentication
 signal, erasure, outreach privacy and routing, and re-cuts the slices). Code follows this file
 once its first slice lands; a change to a numbered rule needs a new revision of this file first.
@@ -165,7 +168,7 @@ DKIM, SPF and DMARC records under `mail`. The repo owner publishes the records; 
 DNS.
 
 **IE-2. Tenant addresses.** `inbound_email_addresses` holds a tenant's addresses: `handle` (16
-characters of lower-case base32, 80 random bits from the database's `gen_random_bytes`), `kind`
+characters of lower-case base32, 80 random bits; revision 3: from the random bytes of `gen_random_uuid`, as the database has no pgcrypto), `kind`
 (`reply`; `forwarding` joins with slice 7), `status` (`active`, `retiring`, `disabled`). A handle
 is unique across all tenants. A tenant has at most one active `reply` address (partial unique
 index). The migration creates one for every tenant; a trigger on tenant insert creates one for
@@ -209,7 +212,8 @@ hub issued:
 disabled address, malformed local part, a hub address only in `received_for`) is acknowledged
 with 200 and leaves nothing: no row, no body fetch, no reply, no bounce. The log gets one line
 with Resend's `email_id` and the reason (`unrouted`), never an address, subject or body. A count
-per hour feeds the existing cron alerts. The hub never sends a bounce or notice for unrouted
+per hour feeds the existing cron alerts (revision 3: from slice 2, whose worker is the first
+scheduled job of this feature; slice 1 writes the log line only). The hub never sends a bounce or notice for unrouted
 mail, so a forged sender cannot use it to send backscatter.
 
 ### Sender
@@ -376,7 +380,8 @@ account's daily and monthly quota before the hub sees it, the same quota that se
 nothing in the hub can stop that count. So:
 - Admission: per tenant at most 2,000 received rows in 24 hours by the injected clock. Past that
   the webhook stores nothing for that tenant, answers 200, counts the message in the log
-  (`over_admission`, the tenant ID only) and raises a cron alert. This bounds rows, not Resend's
+  (`over_admission`, the tenant ID only) and raises a cron alert (revision 3: the alert from
+  slice 2, as for IE-4; slice 1 writes the log line). This bounds rows, not Resend's
   count.
 - Content: per tenant at most 500 messages, and per sender address at most 50, in 24 hours are
   fetched. Messages over a limit settle `ready` with `body_state = over_limit` and kind
@@ -802,7 +807,19 @@ notifications, mailbox OAuth (decision 1 B), recording our own `Message-ID` from
 
 ## Built, and left out
 
-Nothing is built. Left out of this contract on purpose:
+Built (slice 1, ZSB-46, dark): migration `20261122100000_inbound_email.sql` (the two tables, the
+guard, `inbound_email_route`, the backfill and the tenant-insert trigger, RLS and grants);
+`POST /webhooks/resend/inbound` in `apps/api/src/public/resend-inbound-webhook.ts` (on only with
+`RESEND_INBOUND_WEBHOOK_SECRET` and `INBOUND_EMAIL_DOMAIN`); routing in
+`packages/core/src/inbound-email/routing.ts`; `inbound.email.receive` with the admission cap in
+`packages/core/src/inbound-email/actions.ts` and its PL-8 entry; the receive session in
+`packages/core/src/edge/inbound-email-session.ts`; sender threads with metadata-only `email`
+entries for member sessions (`packages/core/src/reads/inbox.ts`, the dashboard Inbox). Tests:
+`packages/db/test/inbound-email.test.ts`, `packages/core/test/inbound-email.test.ts`,
+`apps/api/test/resend-inbound-webhook.test.ts`. No inbound domain or provider route is
+configured. The unrouted and over-admission cron alerts wait for slice 2 (revision 3).
+
+Left out of this contract on purpose:
 - Mailbox OAuth for Gmail or Microsoft: verification cost, privacy, and the owner's approval of
   a new connection (decision 1).
 - HTML rendering, clickable links and attachment previews: text only until a sanitising

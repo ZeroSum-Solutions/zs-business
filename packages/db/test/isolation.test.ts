@@ -16,6 +16,9 @@ const WORKER_ONLY = new Set([
   // The runtime role reads this table's columns one by one (never the sealed token, cursor or lease), so `select *` is
   // refused; packages/db/test/outreach.test.ts proves the isolation of its allowed columns.
   "outreach_mailboxes",
+  // The same for inbound email (inbound-email.md IE-31: never the lease columns); packages/db/test/inbound-email.test.ts
+  // proves the isolation of its allowed columns.
+  "inbound_emails",
 ]);
 let harness: TestDatabase;
 let fixture: TwoTenantFixture;

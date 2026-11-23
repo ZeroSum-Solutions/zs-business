@@ -237,3 +237,35 @@ describe("reply states", () => {
     expect(REPLY_STATUS.sent.tone).not.toBe(REPLY_STATUS.approved.tone);
   });
 });
+
+describe("a sender thread (inbound-email.md IE-21, slice 1)", () => {
+  const sender: ThreadDetail = {
+    id: "e_00000000-0000-4000-8000-0000000000e1", kind: "sender", contactId: null, intakeItemId: null,
+    name: "pat.guest@example.org", email: "pat.guest@example.org", preview: "Question about my booking",
+    lastActivityAt: "2026-10-19T08:00:00.000Z", needsReply: false, needsReview: true, drafts: 0, phone: null, olderEntries: false,
+    entries: [
+      { type: "email", id: "00000000-0000-4000-8000-0000000000a1", at: "2026-10-19T07:00:00.000Z", fromAddress: "pat.guest@example.org", fromName: null, subject: "Question about my booking", contentPending: true },
+      { type: "email", id: "00000000-0000-4000-8000-0000000000a2", at: "2026-10-19T08:00:00.000Z", fromAddress: "pat.guest@example.org", fromName: "Pat Guest", subject: null, contentPending: false },
+    ],
+  };
+
+  it("shows each email's metadata, says the text is not shown yet, and offers no composer", async () => {
+    const app = await demoApp();
+    await seeded(app);
+    app.queryClient.setQueryData(app.keys.thread(sender.id), sender);
+    const html = app.render(h(InboxView, { selectedId: sender.id }));
+    expect(html).toContain('data-thread-kind="sender"');
+    expect(html).toContain(">Email sender<");
+    expect(html.match(/data-entry="email"/g)).toHaveLength(2);
+    expect(html).toContain("Question about my booking");
+    expect(html).toContain("No subject");
+    expect(html.match(/The message text is not shown yet\./g)).toHaveLength(1);
+    expect(html).toContain("Pat Guest, ");
+    expect(html).toContain('data-testid="sender-notice"');
+    expect(html).not.toContain("Save draft");
+  });
+
+  it("leaves focus handling to replies only", () => {
+    expect(focusAfterStep("discard", "x", sender.entries)).toBe("messages");
+  });
+});

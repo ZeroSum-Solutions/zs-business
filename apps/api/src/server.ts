@@ -100,6 +100,25 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }, optio
         },
       },
     }),
+    ...(env.resendInboundWebhook === null ? {} : {
+      resendInboundWebhook: {
+        ...env.resendInboundWebhook,
+        // IE-4, IE-17: IDs and reasons only, never an address, subject or body. Cron alerts on these lines are a follow-up.
+        report: ({ id, emailId, outcome }) => {
+          if (!outcome.handled) {
+            console.warn("Resend inbound email not received", {
+              id, emailId, reason: outcome.reason,
+              ...("receivedForUnrouted" in outcome && outcome.receivedForUnrouted > 0 ? { receivedForUnrouted: outcome.receivedForUnrouted } : {}),
+            });
+          }
+          else {
+            const over = outcome.tenants.filter((tenant) => tenant.outcome === "over_admission").map((tenant) => tenant.tenantId);
+            if (over.length > 0) console.warn("Resend inbound email over admission", { id, emailId, reason: "over_admission", tenantIds: over });
+            if (outcome.receivedForUnrouted > 0) console.warn("Resend inbound email received_for unrouted", { id, emailId, receivedForUnrouted: outcome.receivedForUnrouted });
+          }
+        },
+      },
+    }),
     ...(env.stripe === null ? {} : {
       stripe: createStripeClient({ config: env.stripe.client }),
       ...(env.plans === null ? {} : { stripePlans: createStripePlansClient({ stripe: env.stripe.client, plans: env.plans }) }),

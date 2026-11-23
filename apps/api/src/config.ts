@@ -90,6 +90,12 @@ const envSchema = z.object({
   // POST /webhooks/resend off. The previous secret keeps verifying during a rotation.
   RESEND_WEBHOOK_SECRET: resendWebhookSecretSchema.optional(),
   RESEND_WEBHOOK_PREVIOUS_SECRET: resendWebhookSecretSchema.optional(),
+  // inbound-email.md IE-1, IE-8, IE-34: the hub's inbound subdomain and the signing secret of its own
+  // Resend endpoint. Unset secret turns POST /webhooks/resend/inbound off (404); the secret needs the domain.
+  INBOUND_EMAIL_DOMAIN: z.string().trim().toLowerCase().max(253)
+    .regex(/^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/, "Expected a domain name").optional(),
+  RESEND_INBOUND_WEBHOOK_SECRET: resendWebhookSecretSchema.optional(),
+  RESEND_INBOUND_WEBHOOK_PREVIOUS_SECRET: resendWebhookSecretSchema.optional(),
   // twilio.md T-6, T-9: the account's auth token verifies X-Twilio-Signature. Unset turns the
   // /webhooks/twilio routes off. The previous token keeps verifying during a rotation.
   TWILIO_AUTH_TOKEN: twilioAuthTokenSchema.optional(),
@@ -179,6 +185,8 @@ export interface ServerEnv {
   /** hub-launch L9: SIGN_IN_LIMITER_SECRET (+ the optional PREVIOUS one during a rotation); null (route off) when unset. */
   readonly signInLimiterSecrets: { readonly current: string; readonly previous?: string } | null;
   readonly resendWebhook: ResendWebhookEnv | null;
+  /** inbound-email.md IE-8: the inbound webhook; null (route off, 404) without RESEND_INBOUND_WEBHOOK_SECRET. */
+  readonly resendInboundWebhook: ResendInboundWebhookEnv | null;
   /** stripe.md S-9: wallet top-ups and the Stripe webhook; null (both off) when no STRIPE_ variable is set. */
   readonly stripe: StripeEnv | null;
   /** plans.md PL-13: Hub plans; null (off) when no STRIPE_PLAN_ variable is set. Needs `stripe`. */
@@ -215,6 +223,10 @@ export interface TwilioWebhookEnv {
   readonly accountSid: string;
   readonly webhookBaseUrl: string;
   readonly keywordReplies: KeywordReplies;
+}
+export interface ResendInboundWebhookEnv {
+  readonly secrets: { readonly current: string; readonly previous?: string };
+  readonly domain: string;
 }
 export interface ResendWebhookEnv {
   readonly secrets: { readonly current: string; readonly previous?: string };
@@ -267,6 +279,7 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     unsubscribe: parseUnsubscribe(parsed.data),
     signInLimiterSecrets: parseSignInSecrets(parsed.data),
     resendWebhook: parseResendWebhook(parsed.data),
+    resendInboundWebhook: parseResendInboundWebhook(parsed.data),
     stripe: parseStripeEnv(env),
     plans: parsePlansWithStripe(env),
     shopifyAppHandle: parseShopifyAppHandle(env),
@@ -495,6 +508,23 @@ function parseResendWebhook(data: z.infer<typeof envSchema>): ResendWebhookEnv |
     secrets: {
       current: data.RESEND_WEBHOOK_SECRET,
       ...(data.RESEND_WEBHOOK_PREVIOUS_SECRET === undefined ? {} : { previous: data.RESEND_WEBHOOK_PREVIOUS_SECRET }),
+    },
+  };
+}
+
+function parseResendInboundWebhook(data: z.infer<typeof envSchema>): ResendInboundWebhookEnv | null {
+  if (data.RESEND_INBOUND_WEBHOOK_SECRET === undefined) {
+    if (data.RESEND_INBOUND_WEBHOOK_PREVIOUS_SECRET !== undefined)
+      throw new Error("Invalid environment: RESEND_INBOUND_WEBHOOK_PREVIOUS_SECRET needs RESEND_INBOUND_WEBHOOK_SECRET");
+    return null;
+  }
+  if (data.INBOUND_EMAIL_DOMAIN === undefined)
+    throw new Error("Invalid environment: RESEND_INBOUND_WEBHOOK_SECRET needs INBOUND_EMAIL_DOMAIN");
+  return {
+    domain: data.INBOUND_EMAIL_DOMAIN,
+    secrets: {
+      current: data.RESEND_INBOUND_WEBHOOK_SECRET,
+      ...(data.RESEND_INBOUND_WEBHOOK_PREVIOUS_SECRET === undefined ? {} : { previous: data.RESEND_INBOUND_WEBHOOK_PREVIOUS_SECRET }),
     },
   };
 }

@@ -119,6 +119,9 @@ export async function seedTenantTables(tx: Transaction, tenantId: string, tables
       if (name === "outreach_prospects") Object.assign(row, { email: `fixture-${randomUUID()}@example.com` });
       if (name === "outreach_sends") Object.assign(row, { status: "not_sent", recipient_address: "fixture@example.com" });
       if (name === "outreach_inbound_events") Object.assign(row, { kind: "reply" });
+      // Inbound email (inbound-email.md IE-2, IE-9): a received Resend row names the tenant's address (the foreign
+      // key below fills it in) and a sender. Addresses come with the tenant, from the tenant-insert trigger.
+      if (name === "inbound_emails") Object.assign(row, { provider: "resend", address_id: "fk", from_address: "fixture@example.com" });
       // Document intake (document-intake.md DL-1): a job needs a real hash, and its rows need a page count.
       // A row is written only into a job in review, which holds a page count, a parser and a digest.
       if (name === "document_intake_jobs") {

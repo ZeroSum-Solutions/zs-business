@@ -25,12 +25,15 @@ export const replyBodySchema = z.string().max(MAX_REPLY_LENGTH * 2).refine(isPos
   .transform((value) => value.trim())
   .pipe(z.string().min(1, "Write a reply first").max(MAX_REPLY_LENGTH));
 
-/** I-2: `c_<contactId>` for a customer, `v_<intakeItemId>` for a visitor not yet linked. */
+/**
+ * I-2: `c_<contactId>` for a customer, `v_<intakeItemId>` for a visitor not yet linked, `e_<senderKey>` for an
+ * email sender not yet linked (revision 5; inbound-email.md IE-21, IE-24).
+ */
 export const threadIdSchema = z.string()
-  .regex(/^[cv]_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/, "Not a thread ID")
+  .regex(/^[cve]_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/, "Not a thread ID")
   .transform((value) => value.toLowerCase());
 export type ThreadId = z.infer<typeof threadIdSchema>;
-export const threadKindSchema = z.enum(["customer", "visitor"]);
+export const threadKindSchema = z.enum(["customer", "visitor", "sender"]);
 export type ThreadKind = z.infer<typeof threadKindSchema>;
 
 export const draftReplyInputSchema = z.strictObject({
@@ -109,10 +112,10 @@ export const threadSummarySchema = z.strictObject({
   kind: threadKindSchema,
   contactId: idSchema.nullable(),
   intakeItemId: idSchema.nullable(),
-  /** The customer's name, else their email or phone; for a visitor, the name they typed. */
+  /** The customer's name, else their email or phone; for a visitor, the name they typed; for a sender, the address. */
   name: z.string(),
   email: z.string().nullable(),
-  /** The latest notes or reply text, at most 140 characters; null when there is none. */
+  /** The latest notes or reply text (for a sender, the latest subject), at most 140 characters; null when there is none. */
   preview: z.string().nullable(),
   lastActivityAt: crmInstantSchema,
   needsReply: z.boolean(),
@@ -143,7 +146,21 @@ export const requestEntrySchema = z.strictObject({
 export type RequestEntry = z.infer<typeof requestEntrySchema>;
 export const replyEntrySchema = z.strictObject({ type: z.literal("reply"), at: crmInstantSchema, reply: replyRecordSchema });
 export type ReplyEntry = z.infer<typeof replyEntrySchema>;
-export const threadEntrySchema = z.discriminatedUnion("type", [requestEntrySchema, replyEntrySchema]);
+/**
+ * I-3 (revision 5, slice 1): an inbound email, metadata only. A `received` row shows sender, subject and time,
+ * with `contentPending`; text, kind, authentication and match join in later slices (inbound-email.md IE-24).
+ */
+export const emailEntrySchema = z.strictObject({
+  type: z.literal("email"),
+  id: idSchema,
+  at: crmInstantSchema,
+  fromAddress: z.string(),
+  fromName: z.string().nullable(),
+  subject: z.string().nullable(),
+  contentPending: z.boolean(),
+});
+export type EmailEntry = z.infer<typeof emailEntrySchema>;
+export const threadEntrySchema = z.discriminatedUnion("type", [requestEntrySchema, replyEntrySchema, emailEntrySchema]);
 export type ThreadEntry = z.infer<typeof threadEntrySchema>;
 /** I-3: at most this many latest entries; `olderEntries` says whether more exist. */
 export const THREAD_ENTRY_LIMIT = 200;

@@ -40,6 +40,14 @@ export {
   type EmailFeedbackSession,
 } from "./email-feedback-session.js";
 export {
+  createInboundEmailSession,
+  inboundEmailActorId,
+  type InboundEmailOutcome,
+  type InboundEmailSession,
+  type InboundEmailSessionOptions,
+  type InboundTenantOutcome,
+} from "./inbound-email-session.js";
+export {
   createOAuthCallbackSession,
   googleConnectIdempotencyKey,
   type OAuthCallbackInput,

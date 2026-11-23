@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowLeft, ArrowRight, CalendarBlank, Check, ChatCircleDots, Clock, Globe, Info, PaperPlaneTilt, Robot } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowRight, CalendarBlank, Check, ChatCircleDots, Clock, Envelope, Globe, Info, PaperPlaneTilt, Robot } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
@@ -12,6 +12,7 @@ import { Tray, TrayHeader, TrayTitle } from "@/components/ui/card";
 import { useToast } from "@/components/ui/toast";
 import {
   isApiError,
+  type EmailEntry,
   type NewReply,
   type ReplyRecord,
   type ReplyStatus,
@@ -77,6 +78,7 @@ function ThreadBadges({ thread }: { thread: ThreadSummary }) {
     <>
       {/* An edge, so the grey chip still reads on the grey header. */}
       {thread.kind === "visitor" ? <Solid><Badge className="shadow-[inset_0_0_0_1px_var(--border)]"><Globe aria-hidden />Website visitor</Badge></Solid> : null}
+      {thread.kind === "sender" ? <Solid><Badge className="shadow-[inset_0_0_0_1px_var(--border)]"><Envelope aria-hidden />Email sender</Badge></Solid> : null}
       {thread.needsReply ? <Solid><Badge tone="info">Needs reply</Badge></Solid> : null}
       {thread.needsReview ? <Solid><Badge tone="warn">Needs review</Badge></Solid> : null}
       {thread.drafts > 0 ? <Solid><Badge tone="accent">{thread.drafts === 1 ? "1 draft" : `${thread.drafts} drafts`}</Badge></Solid> : null}
@@ -186,6 +188,25 @@ function RequestBubble({ entry, zone, resources, now }: { entry: RequestEntry; z
   );
 }
 
+/**
+ * A received email, metadata only (inbound-email.md IE-21, slice 1): the subject and sender. The
+ * text is fetched and checked later, so until then the bubble says it is not shown yet.
+ */
+function EmailBubble({ entry, zone }: { entry: EmailEntry; zone: string }) {
+  return (
+    <li className="flex flex-col items-start" data-entry="email" data-content-pending={entry.contentPending}>
+      <div className="max-w-full rounded-[20px] rounded-tl-md bg-tray px-4 py-3 text-body text-fg sm:max-w-[85%]">
+        <p className="mb-1 flex flex-wrap items-center gap-1.5 text-xs font-bold text-fg-2">
+          <Envelope size={14} aria-hidden />Email
+        </p>
+        <p className="font-bold break-words"><span className="sr-only">Subject: </span>{entry.subject ?? <span className="font-normal text-muted">No subject</span>}</p>
+        {entry.contentPending ? <p className="mt-1 text-muted">The message text is not shown yet.</p> : null}
+      </div>
+      <p className="mt-1.5 text-xs font-semibold break-words text-meta">{entry.fromName ?? entry.fromAddress}, <When instant={entry.at} zone={zone} /></p>
+    </li>
+  );
+}
+
 export function ReplyBubble({ reply, zone, agentId = null, viewerId = null, children }: { reply: ReplyRecord; zone: string; agentId?: string | null; viewerId?: string | null; children?: ReactNode }) {
   const status = reply.status === "discarded" ? null : REPLY_STATUS[reply.status];
   const byAgent = agentId !== null && reply.draftedBy.userId === agentId;
@@ -247,7 +268,7 @@ export function stepNotice(error: unknown, thread: Pick<ThreadDetail, "entries">
  * approved reply, or after a discard the next waiting draft, else the messages. Null while the
  * thread still shows the draft, so focus waits for the reload.
  */
-export function focusAfterStep(kind: Step["kind"], replyId: string, entries: readonly ({ type: "reply"; reply: { id: string; status: ReplyStatus } } | { type: "request" })[]): { replyId: string } | "messages" | null {
+export function focusAfterStep(kind: Step["kind"], replyId: string, entries: readonly ({ type: "reply"; reply: { id: string; status: ReplyStatus } } | { type: "request" } | { type: "email" })[]): { replyId: string } | "messages" | null {
   const replies = entries.flatMap((entry) => entry.type === "reply" ? [entry.reply] : []);
   const reply = replies.find((item) => item.id === replyId);
   if (reply?.status === "draft") return null;
@@ -320,6 +341,8 @@ function ThreadEntries({ thread, zone }: { thread: ThreadDetail; zone: string })
       <ol ref={messages} tabIndex={-1} aria-label="Messages" className="flex-1 space-y-5 px-1 py-1 outline-none lg:px-2">
         {thread.entries.map((entry) => entry.type === "request" ? (
           <RequestBubble key={`r-${entry.id}`} entry={entry} zone={zone} resources={resources.data} now={now} />
+        ) : entry.type === "email" ? (
+          <EmailBubble key={`e-${entry.id}`} entry={entry} zone={zone} />
         ) : (
           <ReplyBubble key={`m-${entry.reply.id}`} reply={entry.reply} zone={zone} agentId={agentId} viewerId={viewerId}>
             {entry.reply.status === "draft" ? (
@@ -505,6 +528,16 @@ function VisitorNotice({ thread }: { thread: ThreadDetail }) {
   );
 }
 
+/** A sender thread holds received mail only; replying to it comes in a later slice (inbound-email.md). */
+function SenderNotice() {
+  return (
+    <div className="card flex items-start gap-3 p-4 text-sm text-fg-2 lg:px-5" data-testid="sender-notice">
+      <span aria-hidden className="flex size-10 shrink-0 items-center justify-center rounded-md bg-accent-tint text-accent-ink"><Info size={20} /></span>
+      <p>This sender is not linked to a customer. Email from them shows here; replying to it is not available yet.</p>
+    </div>
+  );
+}
+
 function ThreadPane({ id }: { id: string }) {
   const thread = useThread(id);
   const zone = useDisplayZone();
@@ -545,7 +578,7 @@ function ThreadPane({ id }: { id: string }) {
         ) : null}
       </header>
       <section aria-label="Conversation" className="card p-4 lg:p-5"><ThreadEntries thread={data} zone={zone} /></section>
-      {data.kind === "customer" ? <Composer key={data.id} thread={data} /> : <VisitorNotice thread={data} />}
+      {data.kind === "customer" ? <Composer key={data.id} thread={data} /> : data.kind === "sender" ? <SenderNotice /> : <VisitorNotice thread={data} />}
     </article>
   );
 }

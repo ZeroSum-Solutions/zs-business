@@ -72,6 +72,28 @@ Counts (recounted from the rows on 2026-11-20): 36 conforms, 22 fixed, 0 partial
 | IT-10 | fixed | apps/dashboard/src/components/customers/new-deal-dialog.tsx:21-23,106-151; apps/dashboard/src/lib/setup.ts:44 | apps/dashboard/test/setup-screen.test.ts:290 | Gap: the "never a guessed USD" currency rule was untested and inline in the dialog. Extracted as `dealValueFor` (new-deal-dialog.tsx) and tested. Round 2: currency is known only when the profile holds an active code (`businessCurrency`), in both the new-deal and deal-details dialogs; a missing or withdrawn code makes the owner pick one. |
 | IT-11 | conforms | packages/core/src/setup/handlers.ts:182,189; packages/core/src/edge/session.ts:1113 | packages/core/test/setup.test.ts:337,357; apps/api/test/setup.test.ts:250 |  |
 
+## Inbound email, slice 1: receive, dark (ZSB-46, 2026-11-22)
+
+One row per `inbound-email.md` rule that slice 1 builds, at revision 3. Rules of later slices are
+not listed. Short paths: `db` is `packages/db/test/inbound-email.test.ts`, `core` is
+`packages/core/test/inbound-email.test.ts`, `api` is `apps/api/test/resend-inbound-webhook.test.ts`,
+and the migration is `supabase/migrations/20261122100000_inbound_email.sql`. Counts: 9 conforms,
+2 partial (11 rules).
+
+| ID | Status | Code | Test | Note |
+|---|---|---|---|---|
+| IE-2 | conforms | migration (`inbound_email_new_handle`, `inbound_email_addresses`, the backfill and the tenant-insert trigger) | db "addresses (IE-2)" | Handles take 80 random bits from `gen_random_uuid` (revision 3), since the database has no pgcrypto. Forwarding addresses are slice 7. |
+| IE-3 | conforms | packages/core/src/inbound-email/routing.ts (`routeRecipients`, `collapseByTenant`); migration `inbound_email_route`; packages/core/src/edge/inbound-email-session.ts | core "routing (IE-3, pure)", "a handle in to, in cc and in bcc each routes", "a forged To naming tenant B routes to both tenants"; db "routing a handle (IE-3, test 1)"; api "routes a handle in to, in cc and in bcc", "a forged To naming two tenants' handles" | Test 10. The first 50 of to, cc and bcc; exact domain; `received_for` never routes. |
+| IE-4 | partial | inbound-email-session.ts (`unrouted`); apps/api/src/server.ts (report: IDs and counts only) | core "unknown, disabled, malformed and received_for-only mail is unrouted"; api "answers 200 for unrouted mail, writes nothing and reports no address or subject" | Test 3. Gap: the hourly count into cron alerts starts with slice 2's worker (revision 3); slice 1 writes the log line only. Follow-up ZSB-54. |
+| IE-8 | conforms | apps/api/src/public/resend-inbound-webhook.ts; apps/api/src/config.ts (`RESEND_INBOUND_WEBHOOK_*`, `INBOUND_EMAIL_DOMAIN`); app.ts (mounted only when configured) | api "signature and body checks (test 4, IE-8)", "answers 503 when the database is down", "is absent (404) when no inbound secret is configured"; apps/api/test/config.test.ts "keeps the inbound email webhook off" | Test 4: missing, stale, forged and previous-secret signatures, 413, 400 for non-JSON and an unreadable `email.received`. |
+| IE-9 | conforms | packages/core/src/inbound-email/actions.ts (`inbound.email.receive`, key `email-inbound:<email_id>`, the row and `inbound.email.received` in one transaction); packages/contracts/src/inbound-email.ts | core "receive (IE-9)": test 5 (twice, concurrent, other svix-id), test 6 (failure after the insert), "only the inbound principal runs the receive"; api "retries (test 5, IE-8)" | No body in the payload or row. |
+| IE-17 | partial | actions.ts (advisory lock per tenant, 2,000 rows in 24 hours by the injected clock, `Conflict` `over_admission`); inbound-email-session.ts; server.ts (log line with tenant IDs) | core "past 2,000 rows in 24 hours nothing is stored for that tenant, until the window moves (IE-17)" | First point only (slice 1). Gap: the cron alert waits for slice 2 (revision 3), as for IE-4 (ZSB-54). Content and account limits are slice 2. |
+| IE-21 | conforms | packages/core/src/reads/inbox.ts (sender threads keyed by `inboundSenderKey`) | core "a member sees one sender thread with needsReview" | No contact and no consent from an unknown sender; slice 1 has no matching. |
+| IE-24 | conforms | reads/inbox.ts (`includeEmail`, `VISIBLE_EMAIL`, `senderThread`); edge/session.ts (member reads only); packages/contracts/src/inbox.ts (`e_`, `sender`, `email` entry); apps/dashboard/src/components/inbox/inbox-view.tsx | core "sender threads (IE-24, test 14)"; apps/dashboard/test/inbox-view.test.ts "a sender thread" | Test 14, slice 1 part: metadata only, content pending, `needsReview`; dropped, rejected and duplicate rows hidden; MCP and token reads see none. `inbox-home.md` revision 5. |
+| IE-31 | conforms | migration (RLS forced, policies, column grants to the runtime role and `zs_dispatcher`) | db "emails under the runtime role (IE-31, test 1)"; packages/db/test/isolation.test.ts; core "tenant B's member reads none of A's sender threads" | Test 1 for these two tables, under the runtime role. |
+| IE-32 | conforms | packages/core/src/billing/plan-gate.ts (`READ_ONLY_ALLOWED_ACTIONS`) | core "a read-only tenant still receives (test 15)"; packages/core/test/billing/plans.test.ts | `plans.md` revision 9. Settle joins in slice 2. |
+| IE-35 | conforms | migration (`inbound_emails_guard`) | db "the content guard (IE-35)" | Slice 1 part: the guard. The erasure runner and the erase script are slice 2. |
+
 ## Deferred, with reasons
 
 - C-17: production opening and measurement are Shopify and hosted steps (Partner Dashboard, app listing); the rule stays open as monitoring only. The listing was submitted for review on 2026-11-08; the review result is Shopify's.

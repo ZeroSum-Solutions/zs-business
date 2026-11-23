@@ -177,6 +177,7 @@ import { dealDetailsHandlers, setDealDetails } from "../deals/details.js";
 import { discardReply, draftReply, inboxHandlers, openSendApproval, requireEmail, RESUME_REPLY_ACTION, SEND_REPLY_ACTION } from "../inbox/index.js";
 import { smsStatusHandlers } from "../delivery/sms-status.js";
 import { voiceHandlers } from "../voice/actions.js";
+import { inboundEmailHandlers } from "../inbound-email/actions.js";
 import { suppressionHandlers } from "../delivery/suppression.js";
 import { automationHandlers } from "../automation/handlers.js";
 import { intakeHandlers, linkIntakeItem, rejectIntakeItem, signBookingKey } from "../intake/index.js";
@@ -305,7 +306,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 
 const dispatch = createDispatcher({
   ...bookingHandlers, ...bookingCancelHandlers, ...bookingOutcomeHandlers, ...bookingContactHandlers, ...bookingSelfServiceHandlers, ...crmHandlers, ...stageHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
-  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...voiceHandlers, ...topUpHandlers, ...planHandlers, ...calendarHandlers, ...connectionHandlers, ...automationHandlers, ...siteHandlers,
+  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...voiceHandlers, ...inboundEmailHandlers, ...topUpHandlers, ...planHandlers, ...calendarHandlers, ...connectionHandlers, ...automationHandlers, ...siteHandlers,
   ...agentHandlers, ...templateHandlers, ...templatedKindHandlers, ...browserHandlers, ...businessHandlers, ...enrichmentHandlers, ...outreachHandlers, ...transcriptionHandlers, ...imageHandlers, ...documentIntakeHandlers,
   ...setupHandlers,
 });
@@ -877,11 +878,12 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
     },
     listThreads: (query: unknown) => {
       const parsed = parseInput(listThreadsQuerySchema, query, "query");
-      return read("inbox.drafts", (tx) => listThreads(tx, tenantId, parsed));
+      // IE-24: a member session sees sender threads and email entries; MCP and tokens do not (IE-33).
+      return read("inbox.drafts", (tx) => listThreads(tx, tenantId, parsed, { includeEmail: true }));
     },
     getThread: (threadId: unknown) => {
       const id = parseInput(threadIdSchema, threadId, "thread ID");
-      return read("inbox.drafts", (tx) => getThread(tx, tenantId, id));
+      return read("inbox.drafts", (tx) => getThread(tx, tenantId, id, { includeEmail: true }));
     },
     /** H-3: the clock is read once, here, so both weeks come from the same instant. */
     homeResults: (query: unknown) => {
