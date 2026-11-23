@@ -371,10 +371,9 @@ the `document-intake.md` DL-8 limit, default 20; a longer document is skipped `t
 
 ## Known limits (revision 1)
 
-- `POST /runs` runs inside one HTTP request and its deadline. If the deadline fires mid-run the
-  caller gets 503 and the run may stay `running`; a retry with the same key continues it. The
-  model port takes no abort signal yet. M5 should size `maxCandidatesPerRun` for its model or
-  run the agent from the scheduler only. (G-16 and G-17 close this once built.)
+- Closed by G-16 and G-17 (built): `POST /runs` once ran inside one HTTP request with a model
+  port that took no abort signal, so a deadline mid-run could leave the run `running`. Model
+  calls now abort at their deadline and a stalled run is closed by the sweep.
 - A member run checks `agents` in its own transaction just before the run, so a demotion that
   commits in that gap still lets one run start; its writes are limited to the agent actions.
 - Every run that has room left after the undecided inquiries records a skip again for an
@@ -387,9 +386,8 @@ the `document-intake.md` DL-8 limit, default 20; a longer document is skipped `t
   question.
 - No vision lane is approved. No kind reads images, and any task that needs vision waits for a
   business-billed lane (`docs/integrations.md`, open question 2).
-- Bookings have no cancelled, completed or no-show status yet (`booking.md` B-24). Until one
-  lands, a booking that did not happen still gets its reminder and a review request; the owner
-  stops a kind with its kill switch.
+- Closed by `booking.md` B-43: templated kinds read only `confirmed` bookings, and a review
+  request only one marked `completed`, so a cancelled or no-show booking gets neither.
 - G-20 reads a `granted` channel as `marketing_updates` consent. Once a second consent purpose
   exists, G-20 must check the purpose itself.
 - A standing template approval expires within 30 days (`approvals.md` A-5); templated sends
