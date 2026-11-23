@@ -3,12 +3,13 @@ import { createDemoMedia, type DemoMediaControls } from "./demo/media";
 import { createDemoSites, type DemoSiteControls } from "./demo/sites";
 import { createDemoDocumentIntake } from "./demo/document-intake";
 import { createDemoTranscripts } from "./demo/transcripts";
+import { createDemoActions } from "./demo/actions";
 import { createHttpClient } from "./http-client";
 import type { ZsApi } from "./types";
 
 export * from "./errors";
 export type * from "./types";
-export { bookingCustomerName, byContactName, CONTACT_IDS_PER_CALL, CONTACT_PAGE_SIZE, matchesSearch, normalizePhone, RUN_PAGE_SIZE, THREAD_PAGE_SIZE } from "./types";
+export { ACTION_PAGE_SIZE, bookingCustomerName, byContactName, CONTACT_IDS_PER_CALL, CONTACT_PAGE_SIZE, matchesSearch, normalizePhone, RUN_PAGE_SIZE, THREAD_PAGE_SIZE } from "./types";
 
 /** Where the browser sends API calls in live mode: the same-origin proxy in app/api. */
 export const API_PROXY_PATH = "/api";
@@ -36,7 +37,7 @@ export function createApi(config: ApiRuntimeConfig = readEnvConfig()): ApiRuntim
     const sites = createDemoSites({ latencyMs: 180 });
     const media = createDemoMedia({ latencyMs: 180 });
     return {
-      api: { ...demo, ...sites.api, ...media.api, ...createDemoTranscripts({ latencyMs: 180 }), ...createDemoDocumentIntake({ latencyMs: 180 }) },
+      api: { ...demo, ...sites.api, ...media.api, ...createDemoTranscripts({ latencyMs: 180 }), ...createDemoActions({ latencyMs: 180 }), ...createDemoDocumentIntake({ latencyMs: 180 }) },
       mode: "demo",
       demo: { ...demo, ...sites.controls, ...media.controls },
     };

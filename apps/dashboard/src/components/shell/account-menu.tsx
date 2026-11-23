@@ -1,6 +1,6 @@
 "use client";
 
-import { CaretDown, CreditCard, GearSix, LinkSimple, ListChecks, SignOut } from "@phosphor-icons/react";
+import { CaretDown, ClockCounterClockwise, CreditCard, GearSix, LinkSimple, ListChecks, SignOut } from "@phosphor-icons/react";
 import Link from "next/link";
 import { DropdownMenu } from "radix-ui";
 import { type Identity, MANAGE_BUSINESS, useCan, useIdentity, useSession } from "@/lib/session";
@@ -23,15 +23,18 @@ const ITEMS = [
   { href: "/account/connections", label: "Connections", icon: LinkSimple },
   { href: "/account/plan", label: "Plan", icon: CreditCard },
 ];
+/** Whoever may read results reads the action log (B05): the same permission the API checks. */
+const LOG_ITEM = { href: "/account/activity", label: "Activity", icon: ClockCounterClockwise };
 /** Owners keep a link to first-run setup (industry-templates.md IT-7). */
-const SETUP_ITEM = { href: "/setup", label: "Setup", icon: ListChecks };
+const OWNER_ITEMS = [{ href: "/setup", label: "Setup", icon: ListChecks }];
 
 /** `header`: the desktop header (name and role from xl up). `topbar`: the phone bar, avatar only. */
 export function AccountMenu({ variant }: { variant: "header" | "topbar" }) {
   const { signOut } = useSession();
   const identity = useIdentity();
   const owner = useCan(MANAGE_BUSINESS);
-  const items = owner ? [...ITEMS, SETUP_ITEM] : ITEMS;
+  const readsLog = useCan("reports");
+  const items = [...ITEMS, ...(readsLog ? [LOG_ITEM] : []), ...(owner ? OWNER_ITEMS : [])];
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger

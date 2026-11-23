@@ -89,6 +89,9 @@ import {
   removeMemberOutputSchema,
   TenantDenied,
   listApprovalsQuerySchema,
+  listActionsQuerySchema,
+  type ActionLogEntry,
+  type ActionLogPage,
   listBookingsQuerySchema,
   listIntakeItemsQuerySchema,
   listContactsQuerySchema,
@@ -161,6 +164,7 @@ import {
 import type { ScopedDatabase, Transaction, TransactionOptions } from "@zs/db";
 import type { KeyObject } from "node:crypto";
 import { createDispatcher, type DispatchConfig, type DispatchContext } from "../actions/dispatch.js";
+import { getActionReceipt, listActionLog } from "../actions/log.js";
 import { BROWSER_MEMBER_PERMISSIONS, browserHandlers } from "../browser/handlers.js";
 import { AGENT_MEMBER_PERMISSIONS, agentHandlers, agentKindStatus, followUpStatus, getRun, listRuns } from "../agents/index.js";
 import { templateHandlers } from "../templates/handlers.js";
@@ -1388,6 +1392,17 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       return parseInput(approvalOutputSchema,
         await run({ actionType: "approval.revoke", ...rest, payload: defined({ approvalId: id, ...request }) }), "result");
     },
+    /** B05: the tenant's redacted action log, newest first. Owners only ("reports"). */
+    listActions: (query: unknown): Promise<ActionLogPage> =>
+      // Owner first: staff get 403 whatever they send, never 400.
+      read("reports", (tx) => listActionLog(tx, tenantId, parseInput(listActionsQuerySchema, query, "query"), deps.clock.now())),
+    /** B05: one action's receipt. Staff get 403 before any 404; another tenant's action is 404. */
+    getAction: (actionId: unknown): Promise<ActionLogEntry> => read("reports", async (tx) => {
+      const id = uuidSchema.safeParse(actionId);
+      const receipt = id.success ? await getActionReceipt(tx, tenantId, id.data, deps.clock.now()) : null;
+      if (!receipt) throw new NotFound("No such action");
+      return receipt;
+    }),
     /** A-11: owners see every approval, other members the ones they requested. */
     listApprovals: (query: unknown): Promise<ApprovalPage> => {
       const parsed = parseInput(listApprovalsQuerySchema, query, "query");
