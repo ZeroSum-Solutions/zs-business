@@ -195,8 +195,10 @@ function startsModelAgent(actionType: string, payload: unknown): boolean {
   const fields = typeof payload === "object" && payload !== null ? payload as Record<string, unknown> : {};
   if (actionType === "agent.run.start" || actionType === "agent.followup.draft") return true; // the follow-up agent's run and its drafts (G-6)
   if (actionType === "agent.settings.update") return fields.enabled === true;
+  if (actionType === "agent.resume") return true; // the follow-up agent's resume restarts its runs (G-3)
   if (actionType === "agent.kind.settings.update")
     return fields.enabled === true && typeof fields.agentKind === "string" && MODEL_AGENT_KINDS.has(fields.agentKind);
+  if (actionType === "agent.kind.resume") return typeof fields.agentKind === "string" && MODEL_AGENT_KINDS.has(fields.agentKind);
   return false;
 }
 
@@ -213,8 +215,10 @@ const EMAIL_NOTICE_ACTIONS: ReadonlySet<string> = new Set([CONFIRMATION_SEND_ACT
  * wait on a lock cannot leave a gate deciding at an instant that has passed (a grant ending meanwhile). The plan lock
  * first, then the email lock: one order everywhere.
  */
-export async function lockForGates(tx: Transaction, tenantId: string, actionType: string): Promise<void> {
+export async function lockForGates(tx: Transaction, tenantId: string, actionType: string, payload?: unknown): Promise<void> {
   if (COUNTED[actionType] !== undefined || actionType === SITE_PUBLISH_ACTION) await lockTenantPlan(tx, tenantId);
+  // A model-agent start reads `modelAgents` under the shared lock, so a plan change waits for it and it sees one that committed first.
+  else if (startsModelAgent(actionType, payload)) await lockTenantPlanShared(tx, tenantId);
   if (EMAIL_SENDING_ACTIONS.has(actionType)) await lockTenantEmails(tx, tenantId);
 }
 
@@ -232,7 +236,7 @@ export async function planGate(tx: Transaction, tenantId: string, actionType: st
   // Lock before reading, so a plan change that commits meanwhile is the one enforced. A publish takes the
   // same lock: its count spans the tenant's sites, which the per-site lock does not serialize (PL-25). An action
   // that may queue an email takes the email lock, for the count `emailAllowanceGate` makes after the handler (PL-27).
-  await lockForGates(tx, tenantId, actionType);
+  await lockForGates(tx, tenantId, actionType, payload);
   const row = await readPlanRow(tx, tenantId);
   if (!row) return;
   const standing = planStanding(row, now);
@@ -267,7 +271,9 @@ export async function emailAllowanceGate(
   if (!event || event.type !== MESSAGE_SEND_REQUESTED) return;
   const channel = typeof event.payload === "object" && event.payload !== null ? (event.payload as Record<string, unknown>).channel : undefined;
   if (channel !== "email" || EMAIL_NOTICE_ACTIONS.has(actionType)) return;
-  // Taken before the handler for the listed actions; an unlisted one takes it here (a held lock is taken again at no cost).
+  // Every production action that queues a refusable email is in EMAIL_SENDING_ACTIONS and took this lock before the
+  // handler (`lockForGates`). An unlisted one (a test's own send action) takes it here; a new production sender must be
+  // listed, because a lock taken after the handler's own locks could wait on a writer that waits on them.
   await lockTenantEmails(tx, tenantId);
   const limits = planLimits(await readPlanRow(tx, tenantId), now);
   if (!limits) return;

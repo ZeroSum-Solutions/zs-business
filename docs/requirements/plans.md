@@ -184,7 +184,7 @@ text), the stops (`agent.kill`, `agent.kind.kill`, `browser.kill`,
 removals (`member.remove`, `connection.disconnect`, `calendar.google.disconnect`,
 `automation.token.revoke`, `approval.reject`, `approval.revoke`, `inbox.reply.discard`,
 `outreach.mailbox.disconnect`) and the customer's own cancel (`booking.self_cancel`). The list
-is `READ_ONLY_ALLOWED_ACTIONS` in `packages/core/src/billing/plan-gate.ts:93-107`. Anything
+is `READ_ONLY_ALLOWED_ACTIONS` in `packages/core/src/billing/plan-gate.ts`. Anything
 else is refused with 409 `plan_read_only`. Reads always work, so an owner can see and export the
 data. **Limits** (PL-1) apply to a tenant whose record names a plan, or a free tenant (PL-27): before `member.invite`,
 `connection.connect`, `automation.token.create` and `tenant.template.apply`, the dispatcher takes a per-tenant transaction
@@ -642,11 +642,12 @@ the free one is the hosting decision's. They are tunable by a later revision. Th
 ## Known limits (revision 6)
 
 - Only publishes are limited. The number of sites, tokens and files per tenant follows PL-1 and the
-  release limits; the free tier's one-site and one-token rules are step 5.
+  release limits; the free tier's one-site and one-token rules are step 5. (Superseded by PL-27, revision 9: a
+  `free_tier` tenant now also has the PL-27 allowances.)
 - The window is rolling 24 hours of recorded releases. A publish refused for any other reason (a stale
   edit, a bad spec) records nothing and does not count.
-- A tenant that is both `free_tier` and subscribed gets the paid plan's limit; clearing `free_tier` on
-  upgrade is the operator's job and changes nothing in the meantime.
+- A tenant that is both `free_tier` and subscribed gets the paid plan's limit. (Revision 9, PL-27: `free_tier` is
+  never cleared on upgrade; it is what returns the tenant to the free allowances when the paid plan lapses.)
 
 ## Plan copy follows the switches (revision 7)
 
@@ -762,7 +763,7 @@ comped. No code set `free_tier` before this revision (PL-25 "No script yet"), so
 | Allowance (`FREE_PLAN_LIMITS`) | Free | Where it is enforced |
 |---|---|---|
 | Team seats | 1 | `member.invite` (PL-8 count) |
-| Bookable resources | 1 | `tenant.template.apply` (PL-8 count of `booking_resources`) |
+| Bookable resources | 1 | `tenant.template.apply` (PL-8 count of `booking_resources`; a concurrent apply that loses is answered from the setup row, as IT-4 says: a replay of the same template or 409 `template_already_applied`, never `plan_limit`) |
 | Managed connections | 1 | `connection.connect` (PL-8 count; the native Shopify link is not counted) |
 | MCP and automation tokens | 1 | `automation.token.create` (PL-8 count) |
 | Model-assisted agents | no | below |
@@ -781,8 +782,10 @@ for a mailbox. The rules below apply to **every tenant with limits** (free, prov
 by the PL-1 row of the plan in force; a comped tenant has no limits and passes them all.
 - **Model-assisted agents.** When the plan does not hold `modelAgents` (Solo and free), the plan gate refuses
   `agent.run.start`, `agent.followup.draft`, `agent.settings.update` with `enabled: true` and
-  `agent.kind.settings.update` with `enabled: true` for a model-assisted kind (today `inquiry_followup`), with 409 `plan_limit`, `resource: "modelAgents"`, `limit: 0`,
-  `used: 0`. Switching one off, the kill switches and the templated kinds (reminders, review requests) are not
+  `agent.kind.settings.update` with `enabled: true` for a model-assisted kind (today `inquiry_followup`), and the
+  resumes that restart one (`agent.resume`, `agent.kind.resume` for a model-assisted kind), with 409 `plan_limit`, `resource: "modelAgents"`, `limit: 0`,
+  `used: 0`. These actions take the plan lock in shared mode before the gate reads the plan, so a plan change that is
+  under way finishes first and its plan is the one that decides. Switching one off, the kill switches and the templated kinds (reminders, review requests) are not
   refused. The follow-up scheduler (`dueFollowUpTenants`) skips a tenant whose plan does not hold `modelAgents`, so a
   tenant that switched follow-ups on before revision 9, or before a downgrade, records no refused runs.
 - **Agent daily model cap.** Each agent kind's daily model budget (agents.md G-15, `max_cost_micros_per_day`) is

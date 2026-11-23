@@ -201,7 +201,7 @@ export function createDispatcher<Config = DispatchConfig>(
         // latest instant seen, so an expiry an earlier read reached stays reached.
         // PL-27: an action a gate decides under a lock waits for it before the clock is read, so the gates and the
         // handler see the instant after the wait (a lock already held is taken again at no cost).
-        await lockForGates(tx, binding.tenantId, binding.actionType);
+        await lockForGates(tx, binding.tenantId, binding.actionType, binding.payload);
         let latest = -Infinity;
         const readClock = () => {
           const instant = ctx.clock.now().getTime();

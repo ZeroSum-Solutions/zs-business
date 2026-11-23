@@ -172,6 +172,10 @@ describe("a self-signed-up tenant holds the free allowances (PL-27)", () => {
     await expect(gate(tenantId, "agent.kind.settings.update", enableKind("inquiry_followup"))).rejects.toMatchObject(limitOf("modelAgents", 0));
     await expect(gate(tenantId, "agent.settings.update", { enabled: true })).rejects.toMatchObject(limitOf("modelAgents", 0));
     await expect(gate(tenantId, "agent.run.start", { runId: randomUUID() })).rejects.toMatchObject(limitOf("modelAgents", 0));
+    // A resume restarts the agent's runs, so it is refused too; a templated kind's resume is not.
+    await expect(gate(tenantId, "agent.resume", {})).rejects.toMatchObject(limitOf("modelAgents", 0));
+    await expect(gate(tenantId, "agent.kind.resume", { agentKind: "inquiry_followup" })).rejects.toMatchObject(limitOf("modelAgents", 0));
+    await expect(gate(tenantId, "agent.kind.resume", { agentKind: "appointment_reminder" })).resolves.toBeUndefined();
     // Model budget: 5 cents a day per kind; a call that would pass it is not made.
     const cap = planModelCapMicros(FREE_PLAN_LIMITS);
     expect(await reserve(tenantId, cap - 1)).toMatchObject({ status: "reserved" });
@@ -309,6 +313,30 @@ describe("the edges of the allowances (PL-27)", () => {
     release();
     await change;
     expect(await reservation).toMatchObject({ status: "cost_cap", capMicros: free });
+  });
+
+  it("switching on a model agent waits for a plan change under way and is refused by the plan it leaves", async () => {
+    const tenantId = await signUp();
+    await subscribe(tenantId, { plan: "studio", status: "active" });
+    let locked!: () => void;
+    let release!: () => void;
+    const lockTaken = new Promise<void>((resolve) => { locked = resolve; });
+    const done = new Promise<void>((resolve) => { release = resolve; });
+    const change = b.h.service(async (tx) => {
+      await lockTenantPlan(tx, tenantId);
+      await tx.query("UPDATE tenant_plans SET read_only_after=$2 WHERE tenant_id=$1", [tenantId, new Date(b.h.clock.now().getTime() - 1)]);
+      locked();
+      await done;
+    });
+    await lockTaken;
+    let settled = false;
+    const enable = gate(tenantId, "agent.kind.settings.update", enableKind("inquiry_followup")).finally(() => { settled = true; });
+    enable.catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(settled).toBe(false);
+    release();
+    await change;
+    await expect(enable).rejects.toMatchObject(limitOf("modelAgents", 0));
   });
 
   it("a free tenant whose first payment is still incomplete keeps the free allowances", async () => {

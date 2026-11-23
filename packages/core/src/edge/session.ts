@@ -1117,8 +1117,11 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
         } as ActionCommand);
         return parseInput(applyTemplateResponseSchema, { ...output, replayed }, "result");
       } catch (error) {
+        // PL-27: a free tenant's one resource is the winner's, so a loser that waited on the plan lock is refused
+        // `plan_limit`; the setup row then answers it as for any other loser.
         const lost = error instanceof BindingMismatch || error instanceof IdempotencyConflict ||
-          (error instanceof Conflict && error.details.constraint === "tenant_setups_pkey");
+          (error instanceof Conflict && (error.details.constraint === "tenant_setups_pkey" ||
+            (error.details.reason === "plan_limit" && error.details.resource === "bookableResources")));
         if (!lost) throw error;
         const settled = await appliedAnswer(request.templateId, request.timeZone);
         if (settled) return settled;
