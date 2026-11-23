@@ -2,7 +2,7 @@
 // access, redaction of bodies, addresses and secrets, actor kinds, approvals and keyset paging.
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { NotFound, TenantDenied, actionLogPageSchema, type MemberRole } from "@zs/contracts";
+import { AGENT_KINDS, NotFound, TenantDenied, actionLogPageSchema, type MemberRole } from "@zs/contracts";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import {
   agentActorId,
@@ -23,6 +23,7 @@ import {
   type Session,
 } from "../src/index.js";
 import { derivedId } from "../src/edge/ids.js";
+import { serviceActors } from "../src/actions/log.js";
 
 const START = Date.parse("2026-11-20T09:00:00.000Z");
 const clock = { now: () => new Date(START) };
@@ -32,6 +33,8 @@ const EMAIL = "mira.rowe@haldenrowe.example";
 const PHONE = "+15555550142";
 const BODY = "Hi Mira, your sapphire ring is ready for pickup on Saturday.";
 const SECRET = "zs-test-token-9f3c2a7e-not-a-secret";
+
+const STORED_ASSET = "7a1c3e5f-2b4d-4c6e-8a0b-9d1f3e5a7c90";
 
 let database: TestDatabase;
 let fixture: TwoTenantFixture;
@@ -71,12 +74,12 @@ async function insertAction(tenant: string, row: {
   return id;
 }
 
-async function insertApproval(tenant: string, decidedBy: string): Promise<string> {
+async function insertApproval(tenant: string, decidedBy: string, expiresAt = at(86_400)): Promise<string> {
   const id = randomUUID();
   await fixture.service((tx) => tx.query(
     `INSERT INTO approvals (tenant_id,id,action_type,target_type,target_id,payload,summary,requested_by,requested_at,expires_at,status,decided_by,decided_at)
      VALUES ($1,$2,'reply.send','reply',$3,$4,$5,$6,$7,$8,'approved',$6,$7)`,
-    [tenant, id, randomUUID(), JSON.stringify({ to: EMAIL, body: BODY }), `Send to ${EMAIL}`, decidedBy, at(0), at(86_400)],
+    [tenant, id, randomUUID(), JSON.stringify({ to: EMAIL, body: BODY }), `Send to ${EMAIL}`, decidedBy, at(-60), expiresAt],
   ));
   return id;
 }
@@ -86,6 +89,9 @@ let approvalId: string;
 let tokenId: string;
 let contactId: string;
 let standingActionId: string;
+let skippedQueueId: string;
+let expiredActionId: string;
+let expiredApprovalId: string;
 
 beforeAll(async () => {
   database = await createTestDatabase();
@@ -122,11 +128,31 @@ beforeAll(async () => {
     "INSERT INTO automation_tokens (tenant_id,id,name,created_by,created_at) VALUES ($1,$2,'Zap',$3,$4)", [tenantA, tokenId, ownerA, at(0)],
   ));
   await insertAction(tenantA, { actorId: automationActorId(tenantA, tokenId), actionType: "approval.request", createdAt: at(40) });
-  // A-15: a templated send runs under the standing approval named in its payload; its own
-  // approval_reference is derived and has no approvals row.
+  // A-15: a templated send records the standing approval it ran under on its decision; its own
+  // approval_reference is derived and has no approvals row. A skipped send names the approval in its
+  // payload but ran under none.
   standingActionId = await insertAction(tenantA, {
     actorId: agentActorId(tenantA, "appointment_reminder"), actionType: "agent.reminder.queue", approvalId: randomUUID(),
-    payload: { standingApprovalId: approvalId, values: { name: "Mira" } }, result: { status: "queued" }, createdAt: at(50),
+    payload: { standingApprovalId: approvalId, values: { name: "Mira" } }, result: { outcome: "queued", approvalId }, createdAt: at(50),
+  });
+  skippedQueueId = await insertAction(tenantA, {
+    actorId: agentActorId(tenantA, "review_request"), actionType: "agent.review.queue", approvalId: randomUUID(),
+    payload: { standingApprovalId: approvalId }, result: { outcome: "skipped", reason: "daily_cap", approvalId: null }, createdAt: at(51),
+  });
+  // An approval past its expiry reads "expired", not "approved" (A-3).
+  expiredApprovalId = await insertApproval(tenantA, ownerA, at(-1));
+  expiredActionId = await insertAction(tenantA, {
+    actorId: ownerA, actionType: "site.release.publish", targetType: "site", approvalId: expiredApprovalId, createdAt: at(52),
+  });
+  // Handlers that name how they ended in `outcome`, and writes that changed nothing.
+  await insertAction(tenantA, { actorId: ownerA, actionType: "booking.outcome.set", targetType: "booking", result: { outcome: "no_show", changed: true }, createdAt: at(53) });
+  await insertAction(tenantA, { actorId: voiceActorId(tenantA), actionType: "voice.textback.optin", result: { outcome: "denied", messageId: null }, createdAt: at(54) });
+  await insertAction(tenantA, { actorId: ownerA, actionType: "source.observe", result: { applied: false }, createdAt: at(55) });
+  await insertAction(tenantA, { actorId: ownerA, actionType: "booking.cancel", targetType: "booking", result: { customerNotice: "already_cancelled" }, createdAt: at(56) });
+  // An upload of bytes already stored returns the stored asset; the requested ID was never written.
+  await insertAction(tenantA, {
+    actorId: ownerA, actionType: "media.asset.upload", targetType: "media_asset", targetId: randomUUID(),
+    result: { id: STORED_ASSET, sha256: "ab" }, createdAt: at(57),
   });
   // A status word off the allowlist is not shown, even one that looks like a code.
   await insertAction(tenantA, {
@@ -189,6 +215,12 @@ describe("redaction", () => {
     expect(byType["intake.submit"]!.outcome).toBe("done");
     expect(byType["sms.status"]!.outcome).toBe("done");
     expect(byType["booking.confirmation_send"]!.outcome).toBe("skipped");
+    expect(byType["agent.review.queue"]!.outcome).toBe("skipped");
+    expect(byType["agent.reminder.queue"]!.outcome).toBe("queued");
+    expect(byType["booking.outcome.set"]!.outcome).toBe("no_show");
+    expect(byType["voice.textback.optin"]!.outcome).toBe("denied");
+    expect(byType["source.observe"]!.outcome).toBe("no_change");
+    expect(byType["booking.cancel"]!.outcome).toBe("no_change");
   });
 
   it("shows an approval only where an approvals row stands behind the action", async () => {
@@ -198,7 +230,10 @@ describe("redaction", () => {
     expect(contacts).toHaveLength(2);
     for (const item of contacts) expect(item.approval).toBeNull();
     expect(page.items.filter((item) => item.approval !== null).map((item) => item.id).sort())
-      .toEqual([sendActionId, standingActionId].sort());
+      .toEqual([sendActionId, standingActionId, expiredActionId].sort());
+    // The skipped send named a standing approval in its payload, but ran under none.
+    expect(page.items.find((item) => item.id === skippedQueueId)!.approval).toBeNull();
+    expect((await sessionFor(ownerA).getAction(expiredActionId)).approval).toEqual({ id: expiredApprovalId, status: "expired" });
     expect(await sessionFor(ownerA).getAction(standingActionId)).toMatchObject({
       approval: { id: approvalId, status: "approved" }, outcome: "queued", actor: { kind: "agent", agent: "appointment_reminder" },
     });
@@ -208,6 +243,8 @@ describe("redaction", () => {
     const page = await sessionFor(ownerA).listActions({ limit: 100 });
     const contacts = page.items.filter((item) => item.actionType === "crm.contact.create-or-find");
     expect(contacts.map((item) => item.target)).toEqual([{ type: "contact", id: contactId }, { type: "contact", id: contactId }]);
+    const upload = page.items.find((item) => item.actionType === "media.asset.upload")!;
+    expect(upload.target).toEqual({ type: "media_asset", id: STORED_ASSET });
   });
 
   it("points each row to its source record and its approval", async () => {
@@ -225,7 +262,7 @@ describe("actors", () => {
     const page = await sessionFor(ownerA).listActions({ limit: 100 });
     const byType = Object.fromEntries(page.items.map((item) => [item.actionType, item.actor]));
     // The contact the owner saved through the action path.
-    expect(page.items.find((item) => item.actor.kind === "person" && item.actor.memberId !== null)).toMatchObject({
+    expect(page.items.find((item) => item.actionType === "crm.contact.create-or-find")).toMatchObject({
       actionType: expect.stringContaining("contact"), actor: { kind: "person", memberId: ownerAMember, role: "owner" },
       target: { type: "contact" },
     });
@@ -237,15 +274,18 @@ describe("actors", () => {
     expect(page.items.some((item) => item.actor.kind === "person" && item.actor.memberId === null)).toBe(true);
   });
 
-  it("knows every service actor the code derives", () => {
-    // The log derives these IDs from names; a renamed helper must not turn a worker into a "person".
-    const expected = [
-      publicIntakeActorId, unsubscribeActorId, inboundSmsActorId, smsStatusActorId, emailFeedbackActorId, voiceActorId,
-      enrichmentActorId, transcriptionActorId, intakeWorkerActorId, imageActorId, (t: string) => derivedId(t, "outreach", "actor"),
-    ].map((helper) => helper(tenantA));
-    const names = ["public-intake", "public-unsubscribe", "inbound-sms", "sms-status", "email-feedback", "twilio-voice",
-      "enrichment", "transcription-worker", "document-intake-worker", "image-worker", "outreach"];
-    expect(names.map((name) => derivedId(tenantA, name, "actor"))).toEqual(expected);
+  it("knows every service actor the code derives", async () => {
+    // Checked against the map the log uses: a renamed helper must not turn a worker into a "person".
+    const map = await fixture.service((tx) => serviceActors(tx, tenantA));
+    const systems: Array<[(tenant: string) => string, string]> = [
+      [publicIntakeActorId, "public_intake"], [unsubscribeActorId, "unsubscribe"], [inboundSmsActorId, "inbound_sms"],
+      [smsStatusActorId, "sms_status"], [emailFeedbackActorId, "email_feedback"], [voiceActorId, "voice"],
+      [enrichmentActorId, "enrichment"], [transcriptionActorId, "transcription"], [intakeWorkerActorId, "document_intake"],
+      [imageActorId, "images"], [outreachOperatorActorId, "outreach"], [(t) => derivedId(t, "outreach", "actor"), "outreach"],
+      [(t) => automationActorId(t, tokenId), "automation"],
+    ];
+    for (const [helper, name] of systems) expect(map.get(helper(tenantA))).toEqual({ kind: "system", name });
+    for (const agent of AGENT_KINDS) expect(map.get(agentActorId(tenantA, agent))).toEqual({ kind: "agent", agent });
   });
 });
 
@@ -266,6 +306,22 @@ describe("paging", () => {
     // ids[0], then the B action from setup; nothing after it.
     expect(third.items.map((item) => item.id)).toEqual([ids[0], expect.any(String)]);
     expect(third.nextCursor).toBeNull();
+  });
+
+  it("keeps rows with the same timestamp apart across a page boundary", async () => {
+    const tenant = tenantB;
+    const same = at(300);
+    const ids: string[] = [];
+    for (let i = 0; i < 4; i += 1) ids.push(await insertAction(tenant, { actorId: ownerB, actionType: "deal.tie", createdAt: same }));
+    const session = sessionFor(ownerB, tenant);
+    const seen: string[] = [];
+    let cursor: string | null | undefined;
+    do {
+      const next = await session.listActions({ limit: 1, ...(cursor ? { cursor } : {}) });
+      seen.push(...next.items.filter((item) => item.actionType === "deal.tie").map((item) => item.id));
+      cursor = next.items.some((item) => item.actionType === "deal.tie") ? next.nextCursor : null;
+    } while (cursor);
+    expect(seen).toEqual([...ids].sort().reverse());
   });
 
   it("refuses another list's cursor and a bad limit", async () => {

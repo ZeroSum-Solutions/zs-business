@@ -23,18 +23,18 @@ const ITEMS = [
   { href: "/account/connections", label: "Connections", icon: LinkSimple },
   { href: "/account/plan", label: "Plan", icon: CreditCard },
 ];
-/** Owners keep a link to first-run setup (industry-templates.md IT-7) and read the action log (B05). */
-const OWNER_ITEMS = [
-  { href: "/account/activity", label: "Activity", icon: ClockCounterClockwise },
-  { href: "/setup", label: "Setup", icon: ListChecks },
-];
+/** Whoever may read results reads the action log (B05): the same permission the API checks. */
+const LOG_ITEM = { href: "/account/activity", label: "Activity", icon: ClockCounterClockwise };
+/** Owners keep a link to first-run setup (industry-templates.md IT-7). */
+const OWNER_ITEMS = [{ href: "/setup", label: "Setup", icon: ListChecks }];
 
 /** `header`: the desktop header (name and role from xl up). `topbar`: the phone bar, avatar only. */
 export function AccountMenu({ variant }: { variant: "header" | "topbar" }) {
   const { signOut } = useSession();
   const identity = useIdentity();
   const owner = useCan(MANAGE_BUSINESS);
-  const items = owner ? [...ITEMS, ...OWNER_ITEMS] : ITEMS;
+  const readsLog = useCan("reports");
+  const items = [...ITEMS, ...(readsLog ? [LOG_ITEM] : []), ...(owner ? OWNER_ITEMS : [])];
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger

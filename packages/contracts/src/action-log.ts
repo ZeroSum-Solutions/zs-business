@@ -4,7 +4,7 @@
 // no message text, no address, no token.
 import { z } from "zod";
 import { agentKindSchema } from "./agents.js";
-import { approvalStatusSchema } from "./approvals.js";
+import { approvalStandingSchema } from "./approvals.js";
 import { uuidSchema } from "./index.js";
 import { memberRoleSchema } from "./members.js";
 import { pageQuerySchema, pageSchema } from "./page.js";
@@ -41,8 +41,11 @@ export const actionLogEntrySchema = z.strictObject({
   actor: actionActorSchema,
   /** The source record the action touched: its type and ID only. */
   target: z.strictObject({ type: z.string().min(1).max(100), id: idSchema }),
-  /** The approval the action ran under, with that approval's current status. */
-  approval: z.strictObject({ id: idSchema, status: approvalStatusSchema.nullable() }).nullable(),
+  /**
+   * The approval the action ran under, with where that approval stands today (A-3): an approval
+   * past its expiry reads "expired", one revoked later reads "revoked". Null when none was needed.
+   */
+  approval: z.strictObject({ id: idSchema, status: approvalStandingSchema }).nullable(),
   outcome: actionOutcomeSchema,
   createdAt: z.iso.datetime({ precision: 3 }),
 });

@@ -41,19 +41,27 @@ export function actionLabel(actionType: string): string {
 /** "inbox_reply" → "Inbox reply". */
 export const recordLabel = (type: string) => actionLabel(type);
 
-const APPROVAL_LABEL: Record<NonNullable<NonNullable<ActionLogEntry["approval"]>["status"]>, { label: string; tone: "success" | "warn" | "neutral" | "danger" }> = {
+type Tone = "success" | "warn" | "neutral" | "danger";
+/** Where the approval stands today; an action that ran under it was approved when it ran. */
+const APPROVAL_LABEL: Record<NonNullable<ActionLogEntry["approval"]>["status"], { label: string; tone: Tone }> = {
   approved: { label: "Approved", tone: "success" },
   pending: { label: "Waiting for approval", tone: "warn" },
   rejected: { label: "Rejected", tone: "danger" },
   revoked: { label: "Approval revoked", tone: "warn" },
+  expired: { label: "Approval expired", tone: "neutral" },
 };
 
-export function approvalBadge(approval: NonNullable<ActionLogEntry["approval"]>): { label: string; tone: "success" | "warn" | "neutral" | "danger" } {
-  return approval.status ? APPROVAL_LABEL[approval.status] : { label: "Approval", tone: "neutral" };
+export function approvalBadge(approval: NonNullable<ActionLogEntry["approval"]>): { label: string; tone: Tone } {
+  return APPROVAL_LABEL[approval.status];
 }
 
-/** "done" → "Done", "queued" → "Queued". */
+/** "done" → "Done", "no_show" → "No show". */
 export const outcomeLabel = (outcome: string) => actionLabel(outcome);
 
 /** The first block of an ID, enough to match a record by eye. */
 export const shortId = (id: string) => id.slice(0, 8);
+
+/** The dashboard page of a record, where it has one. */
+export function recordHref(target: ActionLogEntry["target"]): string | null {
+  return target.type === "contact" ? `/customers/${encodeURIComponent(target.id)}` : null;
+}

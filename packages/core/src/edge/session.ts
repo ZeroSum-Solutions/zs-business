@@ -1391,11 +1391,11 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
     /** B05: the tenant's redacted action log, newest first. Owners only ("reports"). */
     listActions: (query: unknown): Promise<ActionLogPage> =>
       // Owner first: staff get 403 whatever they send, never 400.
-      read("reports", (tx) => listActionLog(tx, tenantId, parseInput(listActionsQuerySchema, query, "query"))),
+      read("reports", (tx) => listActionLog(tx, tenantId, parseInput(listActionsQuerySchema, query, "query"), deps.clock.now())),
     /** B05: one action's receipt. Staff get 403 before any 404; another tenant's action is 404. */
     getAction: (actionId: unknown): Promise<ActionLogEntry> => read("reports", async (tx) => {
       const id = uuidSchema.safeParse(actionId);
-      const receipt = id.success ? await getActionReceipt(tx, tenantId, id.data) : null;
+      const receipt = id.success ? await getActionReceipt(tx, tenantId, id.data, deps.clock.now()) : null;
       if (!receipt) throw new NotFound("No such action");
       return receipt;
     }),
