@@ -32,6 +32,16 @@ phone.
 The point is time. The owner and their staff spend it on the product, the customers and the work
 that matters, not on running tools.
 
+**The business companion.** The owner talks to one companion. It is the face of the Chief of
+Staff. Most work happens by talking: the companion asks, drafts, sets things up and reports back.
+When seeing something helps, it shows a card from a fixed catalog: a choice, a draft, a form that
+asks for a missing field, a connection to approve. When the conversation moves on, the card goes
+away. The owner can also swipe from the talk screen to the canvas and the tools (schedule,
+customers, inbox, site, the team of employee agents) and work by hand. Setup should feel like one
+conversation that ends with the business, its accounts and its site ready. The reference for this
+feel is the OS1 study (`docs/reverse/os1-her.md`, ZSB-82). Ours is for businesses, with many tenants
+and the trust rules in `direction.md`. Ideas V-32 to V-38.
+
 This matches the north star in `direction.md` section 1 and widens it in three places: a guided
 plan at the start (V-01 to V-07), content and commerce tools for sellers (V-10 to V-21), and a
 price that grows with the business (V-22 to V-25).
@@ -40,8 +50,8 @@ price that grows with the business (V-22 to V-25).
 
 1. **Sign up** on the phone (B09, ZSB-27). Today sign-in cannot create a user
    (`apps/dashboard/src/lib/server/sign-in.ts`, `shouldCreateUser: false`).
-2. **Talk.** One tap opens a text or voice intake: "Tell us about yourself, your idea, your
-   business." (V-01)
+2. **Talk.** The companion wakes and asks: "Tell me about yourself, your idea, your
+   business." Voice or text; form cards collect the exact facts it needs (V-01, V-32, V-33, D-6)
 3. **Route.** The intake picks the next questions. Two starting points: a new idea from zero
    (V-03), or an existing business with its problems and goals (V-04). (V-02)
 4. **Research while talking.** The owner gives a website URL. The product reads the public site,
@@ -74,7 +84,7 @@ Verdicts: **Keep** (build it in its stage), **Reshape** (build a safer or cheape
 
 | ID | Idea | Verdict | Today | Next |
 |---|---|---|---|---|
-| V-01 | Voice-first intake after sign-up | Reshape | No public sign-up (B09). Voice serves only uploaded audio and voicemail (`packages/core/src/transcription`). No owner microphone path | Text first with an editable transcript, then tap-to-talk on the same resumable interview (B17, B24, ZSB-75). Voice never approves a recipient, an amount or a term (`direction.md` rule 5) |
+| V-01 | Voice-first intake after sign-up | Reshape | No public sign-up (B09). Voice serves only uploaded audio and voicemail (`packages/core/src/transcription`). No owner microphone path | One resumable interview with an editable transcript; voice and text feed the same record (B17, B24, ZSB-75). Whether launch is voice-first or text-first is D-6. Voice never approves a recipient, an amount or a term (`direction.md` rule 5) |
 | V-02 | Routing that picks the next questions | Keep | Setup applies one of four templates (`packages/core/src/setup/handlers.ts`, `industry-templates.md`) | ZSB-70: a typed, resumable question graph with two entry points |
 | V-03 | New business: idea to plan from zero | Keep | Nothing in ZSB. ZAB-58 builds a guided start flow for 2027-01-14 | ZSB-70 and ZSB-71. Who builds the flow is D-3; records stay in ZSB |
 | V-04 | Existing business: problems and goals | Keep | Nothing | ZSB-70: its own first questions; confirm current tools and data before suggesting change |
@@ -126,6 +136,20 @@ Verdicts: **Keep** (build it in its stage), **Reshape** (build a safer or cheape
 | V-30 | Agents with their own computers; "Malspot" | Defer | "Malspot" is OpenMausBot. ZAB piloted it (`marketing-engine/02-stack/openmausbot/PILOT.md`); the approval route failed and the trial closed. Browser tasks parked (`browser-tasks.md`) | Out of the release path. A later pilot runs one isolated job with an expiry, a spend cap and a full receipt |
 | V-31 | A base that takes more tools later | Keep | Connections catalog, `/mcp` and the action path extend | Tools register in the capability catalog (ZSB-70) |
 
+### The business companion (added 2026-11-22, ZSB-82)
+
+From the OS1 study (`docs/reverse/os1-her.md`). Contract: ZSB-83 (`companion.md`).
+
+| ID | Idea | Verdict | Today | Next |
+|---|---|---|---|---|
+| V-32 | The companion is the home screen: a calm, voice-first presence, not a chat log | Keep | Dashboard home is a briefing page; no command entry (`direction.md` §4, gap 3) | ZSB-83. Talk is home. Voice-first or text-first at launch is D-6 |
+| V-33 | Generative UI: cards from a typed catalog, including form cards that ask for missing information | Keep | Nothing. V-05 already limits cards to a fixed typed set | ZSB-83: catalog with a schema per card (choice, draft preview, form, connect, plan step, read-back). The server validates each card. No free HTML |
+| V-34 | Every control can be said; a phrase match runs before any model | Keep | Nothing | ZSB-83. Navigation and simple commands resolve without a model call. A tap and a phrase take the same path |
+| V-35 | Swipe from talk to canvas and tools | Keep | Installable PWA with six areas at 390x844 | ZSB-83. Talk, canvas, schedule, customers, inbox, site, team |
+| V-36 | Employee agents the owner sees, assigns, pauses and stops from the phone | Keep | Agent runs, kill switches and cost exist (`packages/core/src/agents`) | ZSB-83 view over B11 and B12. Each agent shows its work, its next approval and a stop |
+| V-37 | The companion sets up the environment: accounts, connections, site, in the right order | Keep, inside the trust table | Setup templates, Composio OAuth, site publish | ZSB-70 orders the steps; ZSB-83 runs them by conversation. Each connection and each publish still takes one owner tap (`direction.md` trust table). No stored third-party passwords (V-27) |
+| V-38 | The companion's words match the records | Keep, a hard rule | The action path already commits before it reports | ZSB-83: the companion never says done, open, connected or booked until the record says so. OS1's first run broke this repeatedly |
+
 ## 5. Conflicts with the current plan
 
 1. **First cohort.** Recording: e-commerce and SaaS. `direction.md`: neutral base, parks Shopify
@@ -143,10 +167,16 @@ Verdicts: **Keep** (build it in its stage), **Reshape** (build a safer or cheape
 6. **Agent count.** "Hundreds of agents" means hundreds of task types under a few seats, not
    hundreds of standing agents. `agents.md` still rules out delegation; B12 revises it first.
 7. **Agent computers.** Parked; the OpenMausBot pilot already failed on approvals (V-30).
+8. **Voice first.** Devin wants talking to the companion to be the main way to work. V-01 said
+   text first, voice later, and rule 5 keeps approvals on a screen. Voice can do everything except
+   approve; the approval is a tap on the card the voice prepared. D-6.
+9. **"Just do it" with undo.** OS1 runs low-stakes actions at once with a 60-second undo. Our
+   trust table allows that only for reading, sorting, labelling and drafting. A send, a publish, a
+   connection or money never runs on undo alone. D-7.
 
 ## 6. Decisions for Devin
 
-Run as one grill session (ZSB-81). Record each answer here with its date.
+Run as one grill session (ZSB-81). D-6 to D-8 were added from the OS1 study (ZSB-82). Record each answer here with its date.
 
 - **D-1** The first cohort and its first valuable phone job. Recommended: solo service sellers
   who take bookings, e-commerce second.
@@ -156,6 +186,17 @@ Run as one grill session (ZSB-81). Record each answer here with its date.
   What the Jan 14 self-serve flow must do on day one.
 - **D-4** Native app or PWA. Decide after the device spike (ZSB-75).
 - **D-5** How far the conversion agent may act on a live site without a tap per change.
+- **D-6** Launch with the companion voice-first (talk is home, text as fallback) or text-first
+  with voice added after the device spike (ZSB-75). Voice-first raises the case for a native app
+  in D-4 and raises the cost per active account (ZSB-72).
+- **D-7** Which companion actions run at once with an undo, and which need a tap. Recommended:
+  only the "agents may do alone" column of the trust table runs with undo; everything else stays
+  one tap on the exact action.
+- **D-8** The companion's identity: one product-named companion for every tenant, or a companion
+  each owner names and gives a voice, as OS1 does. Any voice must be licensed or original.
+
+D-3 now carries more weight: the guided start is the companion's first run, so whoever builds it
+builds the front door.
 
 ## 7. Gaps neither plan covered
 
@@ -188,7 +229,9 @@ Run as one grill session (ZSB-81). Record each answer here with its date.
 | ZSB-78 | Research: phased pricing and revenue share | low |
 | ZSB-79 | Research: one MCP for every tool | medium |
 | ZSB-80 | Research: site analytics and approved A/B tests | low |
-| ZSB-81 | Grill: D-1 to D-5 | urgent |
+| ZSB-81 | Grill: D-1 to D-8 | urgent |
+| ZSB-82 | Reference study: OS1 voice companion and generative UI (`docs/reverse/os1-her.md`) | high |
+| ZSB-83 | Contract: `companion.md` (talk home, card catalog, phrase match, swipe, team view) | high |
 
 Order: ZSB-81 first (it unblocks ZSB-69, ZSB-71 and ZSB-77), then the Stage 0 base as
 `direction.md` orders it, with ZSB-69 and ZSB-71 alongside because the Jan 14 launch depends on
