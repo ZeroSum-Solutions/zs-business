@@ -19,6 +19,7 @@ import type { ScopedDatabase, Transaction } from "@zs/db";
 import { loadControls } from "../agents/controls.js";
 import { followUpRunId } from "../agents/runner.js";
 import { parseOrFail } from "../crm/rows.js";
+import { channelDestination } from "../delivery/policy.js";
 import { derivedId } from "../edge/ids.js";
 import {
   STOP_REASONS,
@@ -116,17 +117,21 @@ export async function runTemplatedKind(
         continue;
       }
       if (!plan!.revision || !plan!.approvalId) { await skip("template_not_approved"); continue; }
-      const values = await read(async (tx) => {
+      const computed = await read(async (tx) => {
         const booking = await loadBookingFact(tx, tenantId, candidate.bookingId, kind);
         if (!booking) return null;
-        return (await computeKindValues(tx, tenantId, kind, booking, plan!.settings, (await deps.bookingLink?.(tx, tenantId)) ?? null))?.values ?? null;
+        return computeKindValues(tx, tenantId, kind, booking, plan!.settings, (await deps.bookingLink?.(tx, tenantId)) ?? null);
       });
-      if (!values) continue;
+      if (!computed) continue;
+      const { values, contact } = computed;
+      // approvals.md A-16: the address this send binds; the queue handler checks it is still the one.
+      const destination = channelDestination(plan!.revision.channel, { normalized_email: contact.email, e164_phone: contact.phone });
       let decision;
       try {
         decision = parseOrFail(kindDecisionOutputSchema, await deps.dispatch(command(QUEUE_ACTIONS[kind], `${key}:queue`, "agent_decision", decisionId, {
           decisionId, runId, bookingId: candidate.bookingId, contactId: candidate.contactId,
           messageId: queueMessageId(tenantId, decisionId), templateRevisionId: plan!.revision.id, standingApprovalId: plan!.approvalId, values,
+          ...(destination ? { destination } : {}),
         }))).result;
       } catch (error) {
         // The approval was withdrawn or the revision replaced between the plan and the queue: record it (G-19).
@@ -142,7 +147,7 @@ export async function runTemplatedKind(
         // PL-27: the plan's email allowance is used up; the rest of the run would be refused the same way.
         if (reason === "plan_limit") break;
         // The booking changed under the plan, or was queued by another run: it is not ours to decide now.
-        if (reason === "not_a_candidate" || reason === "already_queued" || reason === "values_changed") continue;
+        if (reason === "not_a_candidate" || reason === "already_queued" || reason === "values_changed" || reason === "destination_changed") continue;
         const done = reason === "id_in_use" ? await decidedElsewhere().catch(() => null) : null;
         if (done) {
           if (done.stop) { stop = done.stop; break; }

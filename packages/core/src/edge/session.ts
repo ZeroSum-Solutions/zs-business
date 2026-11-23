@@ -103,6 +103,7 @@ import {
   observeSourceRequestSchema,
   rejectIntakeItemRequestSchema,
   replyOutputSchema,
+  approveReplyRequestSchema,
   replyStepRequestSchema,
   requestApprovalInputSchema,
   requestApprovalRequestSchema,
@@ -178,7 +179,10 @@ import { bookingCancelHandlers, bookingContactHandlers, bookingHandlers, booking
 import { readClock } from "../booking/slots.js";
 import { archiveStage, createDeal, createOrFindContact, createStage, crmHandlers, moveDealStage, renameStage, reorderStages, restoreStage, stageHandlers } from "../crm/index.js";
 import { dealDetailsHandlers, setDealDetails } from "../deals/details.js";
-import { discardReply, draftReply, inboxHandlers, openSendApproval, requireEmail, RESUME_REPLY_ACTION, SEND_REPLY_ACTION } from "../inbox/index.js";
+import {
+  currentEmail, destinationChanged, discardReply, draftReply, inboxHandlers, openSendApproval, RESUME_REPLY_ACTION,
+  SEND_REPLY_ACTION,
+} from "../inbox/index.js";
 import { smsStatusHandlers } from "../delivery/sms-status.js";
 import { voiceHandlers } from "../voice/actions.js";
 import { suppressionHandlers } from "../delivery/suppression.js";
@@ -824,16 +828,21 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
      * address is refused before anything is decided, so its proposal stays pending. A proposal
      * this owner approved under another call (whose run failed) is resumed under this call's key;
      * one another owner approved is theirs to finish. A retry with the same key replays.
+     * approvals.md A-16: a proposal bound to another address than the customer's current one is
+     * withdrawn and proposed again for the current address, and the call answers 409
+     * `destination_changed` instead of approving, so the owner approves the new address after seeing
+     * it. A reply whose delivery ended `destination_changed` is drafted again with the same words
+     * and proposed for the current address, with the same 409 naming the new draft.
      */
     async approveReply(replyId: unknown, body: unknown, key: unknown): Promise<ReplyOutput> {
       const id = parseInput(uuidSchema, replyId, "reply ID");
-      parseInput(replyStepRequestSchema, body);
+      const request = parseInput(approveReplyRequestSchema, body);
       const idempotencyKey = parseInput(idempotencyKeySchema, key, "Idempotency-Key");
       const now = new Date(readClock(deps.clock));
-      const { reply, open, bound } = await read("approve", async (tx) => {
+      // A-16: the one copy a failed reply is drafted again as, whichever owner or key asks for it.
+      const copyId = keyedEnvelope(stepKey(id, "redraft"), "inbox_reply").id;
+      const { reply, open, bound, current, rebound, previous, copy, copyOpen } = await read("approve", async (tx) => {
         const reply = await loadReply(tx, tenantId, id);
-        if (reply?.status === "draft") await requireEmail(tx, tenantId, reply.contactId);
-        const open = await openSendApproval(tx, tenantId, id, now);
         // The proposal to send this reply that this key already approved or resumed: a retry of
         // that call. Found whatever its status is now, so a send that committed replays after its
         // proposal expired or was revoked; the dispatcher refuses one that never ran (A-7).
@@ -843,25 +852,112 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
               AND a.action_type=$4 AND a.target_type='inbox_reply' AND a.target_id=$5`,
           [tenantId, idempotencyKey, RESUME_REPLY_ACTION, SEND_REPLY_ACTION, id],
         )).rows[0]?.id ?? null;
-        return { reply, open, bound };
+        const redraft = reply?.status === "failed" && reply.deliveryReason === "destination_changed";
+        const copy = redraft ? await loadReply(tx, tenantId, copyId) : null;
+        const copyOpen = copy ? await openSendApproval(tx, tenantId, copyId, now) : null;
+        const current = reply ? await currentEmail(tx, tenantId, reply.contactId) : null;
+        // A-16: the reply this key already withdrew or proposed again for a changed address, if any.
+        // The withdrawal counts too, so a call that failed between the two steps finishes on retry.
+        const rebound = (await tx.query<{ target_id: string }>(
+          `SELECT a.target_id FROM actions x JOIN approvals a ON a.tenant_id=x.tenant_id AND a.id::text = lower(x.payload->>'approvalId')
+            WHERE x.tenant_id=$1 AND ((x.idempotency_key=$2 AND x.action_type='approval.request')
+              OR (x.idempotency_key=$3 AND x.action_type='approval.revoke'))
+              AND a.action_type=$4 AND a.target_type='inbox_reply'`,
+          [tenantId, stepKey(idempotencyKey, "repropose"), stepKey(idempotencyKey, "rebind"), SEND_REPLY_ACTION],
+        )).rows[0]?.target_id ?? null;
+        const open = await openSendApproval(tx, tenantId, id, now);
+        // With no open proposal, the address the newest earlier one bound (expired or withdrawn).
+        const previous = open ? null : (await tx.query<{ destination: string | null }>(
+          `SELECT payload->>'destination' AS destination FROM approvals
+            WHERE tenant_id=$1 AND action_type=$2 AND target_type='inbox_reply' AND target_id=$3
+            ORDER BY requested_at DESC, id DESC LIMIT 1`,
+          [tenantId, SEND_REPLY_ACTION, id],
+        )).rows[0] ?? null;
+        return { reply, open, bound, current, rebound, previous, copy, copyOpen };
       });
       if (!reply) throw new TenantDenied();
+      // A retry replays whatever the customer's address is now; a new decision needs one.
+      const needsEmail = () => {
+        if (current === null) throw new Conflict("The customer has no email address to reply to", { reason: "no_email" });
+      };
       const retry = bound !== null;
+      // A-16: withdraw a proposal bound to an address that is no longer the customer's, propose the
+      // send for the current one, and answer 409 with it, so the owner approves only what they saw.
+      const rebind = async (staleId: string) => {
+        const { id: _stale, ...step } = keyedEnvelope(stepKey(idempotencyKey, "rebind"), "approval", staleId);
+        await run({ actionType: "approval.revoke", ...step, payload: { approvalId: staleId, note: "destination_changed" } });
+        const fresh = await proposeSend(reply, stepKey(idempotencyKey, "repropose"));
+        return destinationChanged(fresh.send?.destination ?? null, { approvalId: fresh.id });
+      };
+      if (rebound !== null) {
+        // A-16: a retry of a call that proposed the send again for a changed address (also after
+        // this call's own approval found the address changed at the run). The key belongs to that
+        // reply; the proposal replays under the same step key, and the answer is the same 409.
+        if (rebound !== id) throw new IdempotencyConflict("This Idempotency-Key was used for another reply");
+        const fresh = await proposeSend(reply, stepKey(idempotencyKey, "repropose"));
+        throw destinationChanged(fresh.send?.destination ?? null, { approvalId: fresh.id });
+      }
+      if (!retry && reply.status === "failed" && reply.deliveryReason === "destination_changed") {
+        // A-16: the same words again, as a new draft proposed for the address the customer has now.
+        // Keyed by the failed reply, not this call, so another click names the same one copy. A copy
+        // already drafted (by any owner) is named again, not drafted again under another actor.
+        if (copy) {
+          const proposal = copyOpen
+            ? { id: copyOpen.id, destination: copyOpen.destination }
+            : await proposeSend(copy, stepKey(idempotencyKey, "redraft-propose")).then((p) => ({ id: p.id, destination: p.send?.destination ?? null }));
+          throw destinationChanged(proposal.destination, { replyId: copy.id, approvalId: proposal.id });
+        }
+        needsEmail();
+        const { id: _copy, ...draftStep } = keyedEnvelope(stepKey(id, "redraft"), "inbox_reply");
+        const drafted = await draftReply({
+          actionType: "inbox.reply.draft", ...draftStep,
+          payload: { replyId: copyId, contactId: reply.contactId, subject: reply.subject, body: reply.body },
+        }, writeContext);
+        const fresh = await proposeSend(drafted.result, stepKey(id, "redraft-propose"));
+        throw destinationChanged(fresh.send?.destination ?? null, { replyId: drafted.result.id, approvalId: fresh.id });
+      }
       // Once the reply has left draft, only a retry of the call that sent it replays.
       if (reply.status !== "draft" && !retry) throw notDraft(reply.status);
+      if (!retry) needsEmail();
+      // Only the deciding owner runs an approved action (A-7), whatever address it is bound to.
+      if (!retry && open?.status === "approved" && open.decidedBy !== actorId)
+        throw new Conflict("Another owner approved this reply", { reason: "approved_by_other", approvedBy: open.decidedBy });
+      // A-16: the open proposal binds another address (or none, made before A-16).
+      if (!retry && open && open.destination !== current) throw await rebind(open.id);
+      if (!retry && !open && previous && previous.destination !== current) {
+        // A-16: the last proposal (expired or withdrawn, or withdrawn above by a call that failed
+        // before proposing again) was for another address. Propose the send for the current one and
+        // let the owner see it before approving.
+        const fresh = await proposeSend(reply, stepKey(idempotencyKey, "repropose"));
+        throw destinationChanged(fresh.send?.destination ?? null, { approvalId: fresh.id });
+      }
+      // A-16: the address the owner saw, when the call names one, must be the one the send binds.
+      if (!retry && request.destination !== undefined && request.destination !== current) throw destinationChanged(current);
       let approvalId = bound ?? open?.id;
       if (!retry && open?.status === "approved") {
-        // Only the deciding owner runs an approved action (A-7).
-        if (open.decidedBy !== actorId)
-          throw new Conflict("Another owner approved this reply", { reason: "approved_by_other", approvedBy: open.decidedBy });
         const { id: _id, ...rest } = envelope(idempotencyKey, "inbox_reply", id);
         await run({ actionType: RESUME_REPLY_ACTION, ...rest, payload: { replyId: id, approvalId: open.id } });
       } else if (!retry) {
-        approvalId ??= (await proposeSend(reply, stepKey(idempotencyKey, "propose"))).id;
+        if (approvalId === undefined) {
+          // A-16: the proposal binds the address read in its own transaction. When that is not the
+          // one this call checked (it changed in between), leave it pending for the owner to see.
+          const created = await proposeSend(reply, stepKey(idempotencyKey, "propose"));
+          const seen = request.destination !== undefined ? request.destination : current;
+          if ((created.send?.destination ?? null) !== seen)
+            throw destinationChanged(created.send?.destination ?? null, { approvalId: created.id });
+          approvalId = created.id;
+        }
         const { id: _id, ...rest } = envelope(idempotencyKey, "approval", approvalId);
         await run({ actionType: "approval.approve", ...rest, payload: { approvalId } });
       }
-      return parseInput(replyOutputSchema, await runApproved(approvalId!), "result");
+      try {
+        return parseInput(replyOutputSchema, await runApproved(approvalId!), "result");
+      } catch (error) {
+        // A-16: the address changed after this call read it and before the send ran. The approval
+        // just given is for the old address: withdraw it and propose the current one, as above.
+        if (retry || !(error instanceof Conflict) || error.details.reason !== "destination_changed") throw error;
+        throw await rebind(approvalId!);
+      }
     },
     /** I-7: discard the draft, then withdraw its open proposal where this member may (A-8). */
     async discardReply(replyId: unknown, body: unknown, key: unknown): Promise<ReplyOutput> {

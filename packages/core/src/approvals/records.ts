@@ -6,6 +6,7 @@ import {
   type ActionBinding,
   type ApprovalPage,
   type ApprovalRecord,
+  type ApprovalSend,
   type ApprovalStanding,
   type ApprovalStatus,
   type JsonValue,
@@ -14,8 +15,12 @@ import {
 import type { Transaction } from "@zs/db";
 import { queueActionKind } from "@zs/contracts";
 import { sendDigest } from "../templates/render.js";
+import { deliveryContentDigest } from "../delivery/policy.js";
 import { decodeCursor, encodeCursor, microsToTimestamp, timestampToMicros } from "../reads/cursor.js";
 import { page } from "../reads/page.js";
+
+/** inbox-home.md I-6; spelled here so this module needs no import of the inbox handlers. */
+const SEND_REPLY_ACTION = "inbox.reply.send";
 
 export interface ApprovalRow {
   id: string;
@@ -36,16 +41,26 @@ export interface ApprovalRow {
   revoked_at: Date | null;
   revoke_note: string | null;
   executed_action_id: string | null;
+  send_contact_id: string | null;
+  send_channel: "email" | "sms" | null;
+  send_subject: string | null;
+  send_body: string | null;
 }
 
-/** The action that ran under an approval, through the actions_tenant_approval index. */
+/**
+ * The action that ran under an approval, through the actions_tenant_approval index, and for a
+ * proposal to send a reply, the reply's fixed words (A-16; inbox-home.md I-4).
+ */
 const APPROVAL_SELECT = `
   SELECT a.id, a.tenant_id, a.action_type, a.target_type, a.target_id, a.payload, a.summary, a.status,
          a.requested_by, a.requested_at, a.expires_at, a.decided_by, a.decided_at, a.decision_note,
-         a.revoked_by, a.revoked_at, a.revoke_note, x.id AS executed_action_id
+         a.revoked_by, a.revoked_at, a.revoke_note, r.contact_id AS send_contact_id, r.channel::text AS send_channel,
+         r.subject AS send_subject, r.body AS send_body, x.id AS executed_action_id
     FROM approvals a
     LEFT JOIN actions x ON x.tenant_id = a.tenant_id AND x.approval_reference IS NOT NULL
-     AND ((x.approval_reference->>'id')::uuid) = a.id`;
+     AND ((x.approval_reference->>'id')::uuid) = a.id
+    LEFT JOIN inbox_replies r ON a.action_type = '${SEND_REPLY_ACTION}' AND a.target_type = 'inbox_reply'
+     AND r.tenant_id = a.tenant_id AND r.id = a.target_id`;
 
 /** A-3: pending and approved approvals expire at `expires_at`; nothing writes that. */
 export function standing(row: Pick<ApprovalRow, "status" | "expires_at">, now: Date): ApprovalStanding {
@@ -75,6 +90,21 @@ export function approvalRecord(row: ApprovalRow, now: Date): ApprovalRecord {
     revokedAt: iso(row.revoked_at),
     revokeNote: row.revoke_note,
     executedActionId: row.executed_action_id,
+    send: sendView(row),
+  };
+}
+
+/** A-16: the bound address from the stored payload, never the contact's address now. */
+function sendView(row: ApprovalRow): ApprovalSend | null {
+  if (row.send_contact_id === null || row.send_channel === null || row.send_body === null) return null;
+  const payload = row.payload;
+  const bound = payload !== null && typeof payload === "object" && !Array.isArray(payload) ? payload.destination : undefined;
+  return {
+    contactId: row.send_contact_id,
+    channel: row.send_channel,
+    destination: typeof bound === "string" ? bound : null,
+    subject: row.send_subject,
+    body: row.send_body,
   };
 }
 
@@ -127,7 +157,11 @@ export async function resolveStoredApproval(
 
 /** A-10: what a delivery re-checks before it sends. Direct approvals have no record. */
 export type ApprovalCheck =
-  | { readonly kind: "stored"; readonly standing: ApprovalStanding; readonly approval: ApprovalRecord; readonly binding: ActionBinding | null }
+  | {
+      readonly kind: "stored"; readonly standing: ApprovalStanding; readonly approval: ApprovalRecord; readonly binding: ActionBinding | null;
+      /** A-16: false when the delivery is not the reply send this approval covers (its words or address differ). */
+      readonly contentMatches: boolean;
+    }
   | { readonly kind: "direct" }
   /**
    * A-15: a templated send runs under the standing approval of one template revision. It stands only
@@ -137,17 +171,33 @@ export type ApprovalCheck =
    */
   | { readonly kind: "standing"; readonly standing: ApprovalStanding; readonly current: boolean; readonly contentMatches: boolean };
 
-export async function checkApproval(tx: Transaction, tenantId: string, approvalId: string, now: Date): Promise<ApprovalCheck> {
+export async function checkApproval(
+  tx: Transaction, tenantId: string, approvalId: string, now: Date, content?: DeliveredContent,
+): Promise<ApprovalCheck> {
   const row = await loadApproval(tx, tenantId, approvalId);
   if (!row) return { kind: "direct" };
   const current = standing(row, now);
-  return { kind: "stored", standing: current, approval: approvalRecord(row, now), binding: current === "approved" ? approvedBinding(row) : null };
+  // A-16: a reply's send event must carry the words and the address the approver saw.
+  const send = row.action_type === SEND_REPLY_ACTION ? sendView(row) : null;
+  const replyId = row.payload !== null && typeof row.payload === "object" && !Array.isArray(row.payload) ? row.payload.replyId : undefined;
+  const contentMatches = !content || !send || typeof replyId !== "string" || content.contentDigest === deliveryContentDigest({
+    messageId: replyId, contactId: send.contactId, channel: send.channel, purpose: "transactional",
+    subject: send.subject, body: send.body, destination: send.destination,
+  });
+  return {
+    kind: "stored", standing: current, approval: approvalRecord(row, now), binding: current === "approved" ? approvedBinding(row) : null,
+    contentMatches,
+  };
 }
 
 /** The delivery a templated send is checked against (A-15, D-6). */
 export interface DeliveredContent { readonly messageId: string; readonly contentDigest: string }
 
-interface QueuePayload { standingApprovalId?: string; templateRevisionId?: string; contactId?: string; messageId?: string; values?: Record<string, string> }
+interface QueuePayload {
+  standingApprovalId?: string; templateRevisionId?: string; contactId?: string; messageId?: string; values?: Record<string, string>;
+  /** A-16: the address the send bound; absent on a send from before A-16. */
+  destination?: string;
+}
 
 /** A-15: the standing approval a templated queue action ran under, read from the action's own payload. */
 async function standingCheck(
@@ -167,7 +217,7 @@ async function standingCheck(
   )).rows[0];
   if (!approval || !revision) return gone;
   const current = revision.revision === revision.current_revision && revision.standing_approval_id === approval.id;
-  const contentMatches = !content || content.contentDigest === sendDigest(revision, payload.values, payload.messageId, payload.contactId);
+  const contentMatches = !content || content.contentDigest === sendDigest(revision, payload.values, payload.messageId, payload.contactId, payload.destination ?? null);
   return { kind: "standing", standing: standing(approval, now), current, contentMatches };
 }
 
@@ -185,7 +235,7 @@ export async function approvalForAction(
   if (!action) return null;
   if (queueActionKind(action.action_type)) return standingCheck(tx, tenantId, action.payload, now, content);
   if (action.approval_id === null) return { kind: "direct" };
-  return checkApproval(tx, tenantId, action.approval_id, now);
+  return checkApproval(tx, tenantId, action.approval_id, now, content);
 }
 
 /** A-11: newest first. `requestedBy` limits the list to one requester's approvals. */

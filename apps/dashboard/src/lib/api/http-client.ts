@@ -87,6 +87,7 @@ import {
   type ApproveTemplateRequest,
   type CreateBookingRequest,
   type CreateTemplateRevisionRequest,
+  type ApproveReplyRequest,
   type DraftReplyRequest,
   type GenerateVariantRequest,
   type VariantDecisionRequest,
@@ -558,8 +559,9 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
       return (await write("/v1/inbox/replies", body, replyOutputSchema, options)).result;
     },
 
-    async approveReply(replyId, options) {
-      return (await write(`/v1/inbox/replies/${encodeURIComponent(replyId)}/approve`, {}, replyOutputSchema, options)).result;
+    async approveReply(replyId, options, destination) {
+      const body: ApproveReplyRequest = destination ? { destination } : {};
+      return (await write(`/v1/inbox/replies/${encodeURIComponent(replyId)}/approve`, body, replyOutputSchema, options)).result;
     },
 
     async discardReply(replyId, options) {

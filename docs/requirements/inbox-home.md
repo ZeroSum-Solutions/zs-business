@@ -7,7 +7,8 @@ to M3b's `approve`. Revision 3 (hub review): I-4 keeps each step's record throug
 I-6 binds a resumed send to the caller's key and leaves another owner's approval to them, and
 I-9 limits runtime inserts to drafts. Revision 4 (2026-10-22 audit, B5-06): H-1 checks
 currencies against ISO 4217, not the shape alone, and says what happens to deals stored under the
-earlier check.
+earlier check. The I-6 notes of 2026-11-22 (ZSB-41) follow `approvals.md` A-16 and `delivery.md`
+revision 6: the proposal and the send event bind the customer's address.
 
 Scope: the owner's Inbox (one thread per customer, built from what people send through the
 website forms and the bookings they make, plus the business's replies) and Home (leads,
@@ -97,12 +98,19 @@ The send, in one dispatcher transaction with the reply row locked, requires a `d
 `not_draft`) and a real email address (409 `no_email`), then makes the reply `approved` with
 `approved_by` (the deciding owner) and `approved_at`, and writes one outbox event
 `message.send_requested` in the delivery worker's shape:
-`{ messageId: replyId, contactId, channel: "email", purpose: "transactional", subject, body }`,
-carrying the exact approved words, since the payload is what gets sent and priced. The
+`{ messageId: replyId, contactId, channel: "email", purpose: "transactional", subject, body,
+destination }`, carrying the exact approved words, since the payload is what gets sent and priced,
+and the address the proposal bound (A-16: the proposal payload is `{ replyId, destination }`; a
+send whose bound address is not the customer's current email is 409 `destination_changed`, and
+`approveReply` proposes it again for the current address with the same 409). The
 action row carries the stored approval as its approval reference, so `approvalForAction`
 (A-10) finds it.
 Nothing in M3c sends. The delivery worker (M3d) reads the event, takes the address from the
-contact at delivery time, re-checks the approval (A-10), consent and suppression, and settles the reply
+contact at delivery time (and stops the send `destination_changed` when it is no longer the
+bound one; the reply read then shows `deliveryReason`, and an owner sees "Not sent: the customer's
+address changed after approval" with a "Draft again for the new address" button that calls
+`approveReply` on it and reloads the thread with the new draft to approve; the approve button
+sends the address the thread showed, so a stale screen gets 409 `destination_changed`), re-checks the approval (A-10), consent and suppression, and settles the reply
 once through its settle hook, `settleReplyDelivery(tx, tenantId, messageId, outcome, at)`
 (`approved` to `sent` or `failed`; a no-op for any other message or a settled reply). Whatever
 runs the worker passes it as `onSettled`, with `approvalsFromRecords(approvalForAction, clock)`

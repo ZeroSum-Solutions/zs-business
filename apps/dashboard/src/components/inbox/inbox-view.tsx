@@ -206,6 +206,8 @@ export function ReplyBubble({ reply, zone, agentId = null, viewerId = null, chil
         Drafted by {actorName(reply.draftedBy, agentId, viewerId)}, <When instant={reply.createdAt} zone={zone} />
         {reply.approvedAt ? <><br />Approved by {actorName(reply.approvedBy, agentId, viewerId)}, <When instant={reply.approvedAt} zone={zone} /></> : null}
         {reply.settledAt ? <><br />{reply.status === "failed" ? "Delivery failed" : "Delivered"} <When instant={reply.settledAt} zone={zone} /></> : null}
+        {/* approvals.md A-16: nothing went out because the customer's address changed after approval. */}
+        {reply.deliveryReason === "destination_changed" ? <><br />Not sent: the customer&apos;s address changed after approval.</> : null}
       </p>
       {children}
     </li>
@@ -238,7 +240,7 @@ export function stepNotice(error: unknown, thread: Pick<ThreadDetail, "entries">
       return { tone: "info", message: `${by}. ${STEP_OUTCOME[reply.reply.status] ?? STEP_OUTCOME.approved}` };
     }
   }
-  if (error.reason === "not_draft" || error.reason === "approved_by_other") return { tone: "danger", message: `${message} The thread was reloaded.` };
+  if (error.reason === "not_draft" || error.reason === "approved_by_other" || error.reason === "destination_changed") return { tone: "danger", message: `${message} The thread was reloaded.` };
   return { tone: "danger", message };
 }
 
@@ -279,7 +281,7 @@ function ThreadEntries({ thread, zone }: { thread: ThreadDetail; zone: string })
   const step = useMutation({
     mutationFn: (input: Step) => {
       const options = { idempotencyKey: intents.keyFor(input) };
-      return input.kind === "approve" ? api.approveReply(input.replyId, options) : api.discardReply(input.replyId, options);
+      return input.kind === "approve" ? api.approveReply(input.replyId, options, thread.email) : api.discardReply(input.replyId, options);
     },
     onSettled: async (_reply, error, input) => {
       intents.settle(input, error);
@@ -331,6 +333,12 @@ function ThreadEntries({ thread, zone }: { thread: ThreadDetail; zone: string })
                 busy={step.isPending && step.variables?.replyId === entry.reply.id}
                 onStep={(kind) => step.mutate({ kind, replyId: entry.reply.id })}
               />
+            ) : canApprove && entry.reply.status === "failed" && entry.reply.deliveryReason === "destination_changed" ? (
+              <RedraftAction
+                noEmailRecord={noEmailRecord}
+                busy={step.isPending && step.variables?.replyId === entry.reply.id}
+                onRedraft={() => step.mutate({ kind: "approve", replyId: entry.reply.id })}
+              />
             ) : null}
           </ReplyBubble>
         ))}
@@ -379,6 +387,30 @@ export function DraftActions({ reply, canApprove, canDiscard, noEmailRecord = nu
           </Button>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+/**
+ * approvals.md A-16: a reply that was not sent because the customer's address changed after
+ * approval. The owner drafts the same words again for the new address; the server answers that
+ * it was proposed (409 `destination_changed`), the thread reloads, and the new draft waits for
+ * an approval like any other.
+ */
+export function RedraftAction({ busy, onRedraft, noEmailRecord = null }: {
+  busy: boolean;
+  onRedraft: () => void;
+  /** The customer record to open when the customer has no email address now. */
+  noEmailRecord?: string | null;
+}) {
+  return (
+    <div className="mt-2 flex max-w-[85%] flex-col items-end gap-2">
+      <Button variant="secondary" disabled={busy || noEmailRecord !== null} aria-busy={busy} onClick={onRedraft}>
+        <PaperPlaneTilt aria-hidden />Draft again for the new address
+      </Button>
+      {noEmailRecord !== null ? (
+        <Link href={noEmailRecord} className="-mb-2 inline-flex min-h-11 items-center font-bold text-accent-ink underline-offset-4 hover:underline">Add an email in the customer record</Link>
+      ) : null}
     </div>
   );
 }

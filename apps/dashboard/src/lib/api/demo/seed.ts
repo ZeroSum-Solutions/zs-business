@@ -401,6 +401,7 @@ export function buildSeed(now: Date): DemoSeed {
       approvedAt,
       discardedAt: null,
       settledAt: status === "sent" ? at(drafted, 25) : null,
+      deliveryReason: null,
     };
   });
 
@@ -436,7 +437,7 @@ function buildFollowUp(intakeItems: IntakeItemRecord[], replies: ReplyRecord[], 
       id: replyId(REPLIES.length + 1), tenantId: DEMO_TENANT_ID, contactId: marguerite.contactId!, channel: "email",
       subject: DEMO_FOLLOW_UP_SUBJECT, body: "Hi Marguerite, thank you for asking about a thinner halo. We would be glad to show you a few options at your visit.",
       status: "discarded", draftedBy: DEMO_AGENT, createdAt: startedAt, approvedBy: null, approvedAt: null,
-      discardedAt: at(["last", 0.58]), settledAt: null,
+      discardedAt: at(["last", 0.58]), settledAt: null, deliveryReason: null,
     };
     replies.push(reply);
     addRun(1, startedAt, null, null, [{
