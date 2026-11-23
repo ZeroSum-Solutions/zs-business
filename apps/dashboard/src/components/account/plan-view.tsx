@@ -53,14 +53,26 @@ export function grantSummary(plan: BillingPlan, zone: string): { name: string; e
   return { name, endLine: grant.grantedUntil ? `Included until ${day(grant.grantedUntil, zone)}.` : null };
 }
 
-/** PL-8: the banner a failed payment or an ended plan shows; null when billing is fine. */
-export function billingNotice(plan: BillingPlan, zone: string): { tone: "warn" | "danger"; text: string } | null {
+/** PL-27: a self-signed-up business whose plan's grace has passed: the free allowances apply, whatever the status says. */
+export function onFreeFallback(plan: BillingPlan, now: number = Date.now()): boolean {
+  return plan.freeTier === true && !plan.grant && plan.readOnlyAfter !== null && new Date(plan.readOnlyAfter).getTime() <= now;
+}
+
+/** PL-8, PL-27: the banner a failed payment or an ended plan shows; null when billing is fine. */
+export function billingNotice(plan: BillingPlan, zone: string, now: number = Date.now()): { tone: "warn" | "danger"; text: string } | null {
+  // PL-27: a self-signed-up business never turns read-only; an ended plan moves it to the free allowances.
+  const after = plan.freeTier ? "the business moves to the free allowances" : "the business turns read-only";
   if (plan.readOnly)
     return { tone: "danger", text: "Your business is read-only: you can see everything, but nothing new is sent or saved. Fix billing or choose a plan to turn it back on." };
+  if (plan.paymentFailedAt && plan.readOnlyAfter && onFreeFallback(plan, now))
+    return { tone: "warn", text: "Your last payment failed, so the business now has the free allowances. Update your card to return to your plan." };
   if (plan.paymentFailedAt && plan.readOnlyAfter)
-    return { tone: "warn", text: `Your last payment failed. Update your card by ${day(plan.readOnlyAfter, zone)}, or the business turns read-only.` };
+    return { tone: "warn", text: `Your last payment failed. Update your card by ${day(plan.readOnlyAfter, zone)}, or ${after}.` };
   if (plan.readOnlyAfter && !HOLDS_PLAN.has(plan.status))
-    return { tone: "warn", text: `Your plan ends ${day(plan.readOnlyAfter, zone)}. After that the business is read-only until you choose a plan.` };
+    return plan.freeTier && new Date(plan.readOnlyAfter).getTime() <= now ? null
+      : { tone: "warn", text: plan.freeTier
+        ? `Your plan ends ${day(plan.readOnlyAfter, zone)}. After that ${after} until you choose a plan.`
+        : `Your plan ends ${day(plan.readOnlyAfter, zone)}. After that the business is read-only until you choose a plan.` };
   return null;
 }
 
@@ -68,7 +80,7 @@ function limitLines(limits: NonNullable<BillingPlan["limits"]>): string[] {
   return [
     `${limits.seats} team ${limits.seats === 1 ? "seat" : "seats"}`,
     `${limits.managedConnections} managed ${limits.managedConnections === 1 ? "connection" : "connections"}`,
-    limits.automationTokens > 0 ? `${limits.automationTokens} automation tokens` : "No automation tokens",
+    limits.automationTokens > 0 ? `${limits.automationTokens} automation ${limits.automationTokens === 1 ? "token" : "tokens"}` : "No automation tokens",
     `${formatNumber(limits.emailsPerMonth)} emails a month`,
   ];
 }
@@ -266,6 +278,7 @@ export function PlanView() {
                         <span className="text-sm text-muted">{data.interval === "year" ? " a year" : " a month"}</span>
                       </p>
                       {planDateLine(data, zone) ? <p className="text-sm text-muted">{planDateLine(data, zone)}</p> : null}
+                      {onFreeFallback(data) ? <p className="text-sm text-muted">The free allowances apply until your card is updated.</p> : null}
                     </div>
                   </CardHeader>
                   <PlanLines limits={data.limits ?? current.limits} features={shown(data.limits ? data.features : current.features)} />
@@ -295,6 +308,23 @@ export function PlanView() {
               </div>
             ) : (
               <section aria-labelledby="choose-title" className="space-y-3">
+                {/* PL-27: a self-signed-up business with no paid plan works within the free allowances. */}
+                {data.freeTier && data.limits && !data.readOnly ? (
+                  <div className="tray">
+                    <Card aria-labelledby="free-title">
+                      <CardHeader>
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <CardTitle id="free-title">Free allowances</CardTitle>
+                            <Badge tone="success">Free</Badge>
+                          </div>
+                          <p className="mt-2 text-sm text-muted">What your business can use without a plan. Choose a plan for more.</p>
+                        </div>
+                      </CardHeader>
+                      <PlanLines limits={data.limits} features={shown(data.features)} />
+                    </Card>
+                  </div>
+                ) : null}
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <h2 id="choose-title" className="text-lg font-bold">Choose a plan</h2>
                   <Segmented label="Billing period" value={interval} onChange={setInterval}

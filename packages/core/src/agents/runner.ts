@@ -160,7 +160,7 @@ export async function runFollowUps(
       const reservation = await read((tx) => reserveModelCall(tx, tenantId, {
         callKeyBase, runId, kind: KIND,
         subjectId: candidate.intakeItemId, lane: deps.model.lane, model: deps.model.model,
-      }, worst, now()));
+      }, worst, now));
       if (reservation.status === "run_closed") break; // G-16: closed under us; a late step writes nothing
       if (reservation.status === "cost_cap") {
         // The crossing call's warning may have failed; it is once per local date, so asking again is safe.

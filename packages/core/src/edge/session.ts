@@ -1213,8 +1213,11 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
         } as ActionCommand);
         return parseInput(applyTemplateResponseSchema, { ...output, replayed }, "result");
       } catch (error) {
+        // PL-27: a free tenant's one resource is the winner's, so a loser that waited on the plan lock is refused
+        // `plan_limit`; the setup row then answers it as for any other loser.
         const lost = error instanceof BindingMismatch || error instanceof IdempotencyConflict ||
-          (error instanceof Conflict && error.details.constraint === "tenant_setups_pkey");
+          (error instanceof Conflict && (error.details.constraint === "tenant_setups_pkey" ||
+            (error.details.reason === "plan_limit" && error.details.resource === "bookableResources")));
         if (!lost) throw error;
         const settled = await appliedAnswer(request.templateId, request.timeZone);
         if (settled) return settled;
@@ -1293,7 +1296,7 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
     },
 
     /** plans.md PL-7: the plan, its limits and what can be bought. */
-    getBillingPlan: (options: { readonly features?: boolean } = {}): Promise<BillingPlan> => {
+    getBillingPlan: (options: { readonly features?: boolean; readonly freeTier?: boolean } = {}): Promise<BillingPlan> => {
       const plans = deps.billing?.plans;
       // PL-26: the plan row, the runners' heartbeats, the agent switches and the template approval are read as one
       // snapshot, so a change that lands between two statements cannot show a feature against a state that never was.
@@ -1301,6 +1304,7 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
         now: new Date(readClock(deps.clock)), trialDays: plans?.config.trialDays ?? 0, checkoutEnabled: plans !== undefined,
         shopifyAppHandle: deps.shopifyBilling?.appHandle ?? null,
         features: options.features === true,
+        freeTier: options.freeTier === true,
         deploy: { voiceWebhook: deps.voiceWebhook === true },
       }));
     },

@@ -4,6 +4,7 @@
 // provider reported. Money is USD millionths ("micros"); no price is ever read from the environment.
 import { ValidationFailed, type AgentKind, type AgentLane } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
+import { lockTenantPlanShared, planModelCap } from "../billing/plan-gate.js";
 import { derivedId } from "../edge/ids.js";
 import { FAKE_MODEL_ID, type ModelUsage, type TextModelRequest } from "./model.js";
 
@@ -64,6 +65,16 @@ export async function costSpent(tx: Transaction, tenantId: string, kind: AgentKi
   )).rows[0]!.micros);
 }
 
+/**
+ * G-15, PL-27: the kind's daily cap as it applies now: its own setting, and never above the plan's daily model cap
+ * (`agentDailyCapCents`); 0 for a model-assisted kind on a plan without `modelAgents`. A comped tenant has only the
+ * kind's own cap.
+ */
+export async function effectiveCostCap(tx: Transaction, tenantId: string, kind: AgentKind, kindCapMicros: number, now: Date): Promise<number> {
+  const plan = await planModelCap(tx, tenantId, kind, now);
+  return plan === null ? kindCapMicros : Math.min(kindCapMicros, plan);
+}
+
 export interface ModelCallRef {
   /** The step's key; the attempt number is appended, so a retry after a lost decision is a new, separately priced call. */
   readonly callKeyBase: string;
@@ -99,15 +110,22 @@ async function runIsOpen(tx: Transaction, tenantId: string, runId: string | null
  * caller has it: nothing is written, and the caller must not call the model a second time.
  */
 export async function reserveModelCall(
-  tx: Transaction, tenantId: string, call: ModelCallRef, worst: WorstCase, now: Date,
+  tx: Transaction, tenantId: string, call: ModelCallRef, worst: WorstCase, clock: Date | (() => Date),
 ): Promise<Reservation> {
+  // PL-27: the plan lock (shared) before the settings lock, so a plan change cannot commit between the cap read and
+  // the insert. A caller that writes the settings row first takes it before that write (one lock order).
+  await lockTenantPlanShared(tx, tenantId);
   const settings = (await tx.query<{ max_cost_micros_per_day: number }>(
     "SELECT max_cost_micros_per_day FROM agent_settings WHERE tenant_id=$1 AND agent_kind=$2 FOR UPDATE", [tenantId, call.kind],
   )).rows[0];
   // The run's row second, as the draft decision does (settings, then run): one lock order, no deadlock.
   if (!(await runIsOpen(tx, tenantId, call.runId))) return { status: "run_closed" };
+  // PL-27: the instant is read after the locks, so a wait on a plan change cannot decide at a time that has passed
+  // (a grant that ended meanwhile). A caller with a clock passes it; a fixed instant is used as it is.
+  const now = typeof clock === "function" ? clock() : clock;
   // A kind that reaches a model call has a row (the gate stops a kind that is off); no row reads as the default cap.
-  const capMicros = settings?.max_cost_micros_per_day ?? 1_000_000;
+  // PL-27: never above the plan's daily model cap.
+  const capMicros = await effectiveCostCap(tx, tenantId, call.kind, settings?.max_cost_micros_per_day ?? 1_000_000, now);
   // A call for this step still out (or cut off by a crash) blocks another: never pay twice at once.
   const prior = (await tx.query<{ outcome: string }>(
     `SELECT outcome FROM agent_model_calls WHERE tenant_id=$1 AND agent_kind=$2

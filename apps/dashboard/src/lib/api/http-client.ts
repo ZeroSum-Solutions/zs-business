@@ -320,7 +320,7 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
 
   return {
     getBillingPlan(options = {}) {
-      return request({ method: "GET", path: "/v1/billing/plan?features=1", schema: billingPlanSchema, signal: options.signal });
+      return request({ method: "GET", path: "/v1/billing/plan?features=1&free=1", schema: billingPlanSchema, signal: options.signal });
     },
 
     getWallet(options = {}) {

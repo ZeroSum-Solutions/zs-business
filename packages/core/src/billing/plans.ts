@@ -35,7 +35,7 @@ import type { ActionHandler } from "../actions/dispatch.js";
 import { currentTenant } from "../booking/create.js";
 import { parseOrFail } from "../crm/rows.js";
 import { activeGrant, isReadOnly, lockTenantPlan, planLimits } from "./plan-gate.js";
-import { planFeatureFacts, planFeatureSwitches, type PlanFeatureDeploy } from "./plan-features.js";
+import { planFeatureFacts, planFeatureSwitches, type PlanFeatureDeploy, type PlanFeatureFacts } from "./plan-features.js";
 import type { StripePlansClient } from "./plan-stripe.js";
 
 /** PL-5: like top-ups, a session lives an hour and a first request may be retried for 25 minutes. */
@@ -86,9 +86,10 @@ interface TenantPlanRow {
   shopify_shop_domain: string | null;
   granted_plan: HubPlan | null;
   granted_until: Date | null;
+  free_tier: boolean;
 }
 const PLAN_COLUMNS = `billing_provider, plan, plan_interval, founding, status, extra_connections, stripe_customer_id, trial_end, current_period_end,
-  cancel_at_period_end, trial_used, founding_invite, payment_failed_at, read_only_after, shopify_shop_domain, granted_plan, granted_until`;
+  cancel_at_period_end, trial_used, founding_invite, payment_failed_at, read_only_after, shopify_shop_domain, granted_plan, granted_until, free_tier`;
 const tenantPlan = async (tx: Transaction, tenantId: string): Promise<TenantPlanRow | null> =>
   (await tx.query<TenantPlanRow>(`SELECT ${PLAN_COLUMNS} FROM tenant_plans WHERE tenant_id=$1`, [tenantId])).rows[0] ?? null;
 
@@ -231,11 +232,11 @@ export async function portalCustomer(tx: Transaction, tenantId: string): Promise
 }
 
 const iso = (value: Date | null) => (value ? value.toISOString() : null);
-const offer = (entry: PlanCatalogEntry, founding: boolean, switches: Readonly<Record<PlanFeatureKind, PlanFeatureSwitch>> | null) => ({
+const offer = (entry: PlanCatalogEntry, founding: boolean, facts: Readonly<Record<PlanFeatureKind, PlanFeatureFacts>> | null) => ({
   plan: entry.plan, name: entry.name, prices: { ...entry.prices },
   foundingPrices: founding && entry.foundingPrices ? { ...entry.foundingPrices } : null,
   limits: { ...entry.limits },
-  ...(switches ? { features: planFeatures(entry.limits, switches) } : {}),
+  ...(facts ? { features: planFeatures(entry.limits, planFeatureSwitches(facts, false, entry.limits)) } : {}),
 });
 
 /** PL-15, PL-19, connections.md C-29:Shopify's plan selection page for a store; null without a store or an app handle. `store` is the myshopify.com name or the full domain. */
@@ -260,6 +261,8 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
    * no other caller gets a key it does not know.
    */
   readonly features?: boolean;
+  /** PL-27: add `freeTier`, with `features` only; its own opt-in (`&free=1`) for the same reason as `features`. */
+  readonly freeTier?: boolean;
   /** PL-26: what only the API process knows about its own deploy; read only with `features`. */
   readonly deploy?: PlanFeatureDeploy;
 }): Promise<BillingPlan> {
@@ -279,7 +282,6 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
   // lists for this business, so they do not take the current plan's read-only state.
   const facts = input.features ? await planFeatureFacts(tx, tenantId, input.now, input.deploy ?? { voiceWebhook: false }) : null;
   const currentSwitches = facts ? planFeatureSwitches(facts, readOnly) : null;
-  const offerSwitches = facts ? planFeatureSwitches(facts, false) : null;
   return billingPlanSchema.parse({
     billingProvider: row?.billing_provider ?? "stripe",
     status: row?.status ?? "none",
@@ -298,8 +300,8 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
     readOnlyAfter: iso(row?.read_only_after ?? null),
     readOnly,
     limits,
-    ...(currentSwitches ? { features: planFeatures(limits, currentSwitches) } : {}),
-    catalog: (Object.values(PLAN_CATALOG) as PlanCatalogEntry[]).map((entry) => offer(entry, invited, offerSwitches)),
+    ...(currentSwitches ? { features: planFeatures(limits, currentSwitches), ...(input.freeTier ? { freeTier: row?.free_tier ?? false } : {}) } : {}),
+    catalog: (Object.values(PLAN_CATALOG) as PlanCatalogEntry[]).map((entry) => offer(entry, invited, facts)),
     extraConnectionPrice: EXTRA_CONNECTION_PRICE,
     currency: "usd",
     checkoutEnabled: input.checkoutEnabled && stripe,

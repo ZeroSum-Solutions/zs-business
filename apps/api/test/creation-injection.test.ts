@@ -325,7 +325,8 @@ describe("a refused or failed retry leaks no Auth user and keeps the first name 
     expect(stored.tenants).toHaveLength(1);
     expect(stored.members).toEqual([{ email: OWNER_EMAIL, role: "owner" }]);
     expect(stored.connections).toHaveLength(0);
-    expect(stored.plans).toHaveLength(0);
+    // plans.md PL-27: the hub is marked free when it is made (a plan record with the default provider); the bind sets Shopify.
+    expect(stored.plans).toEqual([{ billing_provider: "stripe", shopify_shop_id: null }]);
     const firstName = stored.tenants[0]!.name;
     expect(firstName).toBe(normalizeAccountLabel(fake.shopName));
 

@@ -469,8 +469,13 @@ describe("the daily publish limit (PL-25)", () => {
       const uploaded = await readJson(await putRaw(h.app, await nowToken(h.b), one.id, sha(picture), picture));
       expect(uploaded.status).toBe(201);
       expect(await inWindow(h.b)).toBe(20);
-      // PL-8 comes first: a free tenant at its number whose plan is read-only is told about billing, not the limit.
+      // PL-27: a free tenant whose plan lapsed falls back to the free allowances, never read-only: still the limit.
       await sql("UPDATE tenant_plans SET read_only_after=$2 WHERE tenant_id=$1", [h.b.tenantId, new Date(clockMs - 1000)]);
+      const lapsedFree = await publishAs(h.b, one.id, plain("Lapsed free"));
+      expect(lapsedFree.status).toBe(409);
+      expect(errorOf(lapsedFree).details).toMatchObject({ reason: "plan_limit", resource: "sitePublishesPerDay" });
+      // PL-8 comes first: a tenant that is not free, whose paid plan lapsed, is told about billing, not the limit.
+      await sql("UPDATE tenant_plans SET free_tier=false, plan='solo', plan_interval='month', status='canceled' WHERE tenant_id=$1", [h.b.tenantId]);
       const readOnly = await publishAs(h.b, one.id, plain("Read only"));
       expect(readOnly.status).toBe(409);
       expect(errorOf(readOnly).details).toEqual({ reason: "plan_read_only" });
