@@ -19,6 +19,9 @@ import { INBOUND_WEBHOOK_MAX_BYTES, providerEmailIdSchema } from "@zs/contracts"
 import type { AppEnv } from "../app.js";
 import { readBodyBytes } from "../mcp/routes.js";
 
+/** A raw lock wait, serialization failure, deadlock or statement timeout (one not mapped by the dispatcher) is a busy database. */
+const TRANSIENT_SQLSTATES: ReadonlySet<string> = new Set(["55P03", "40001", "40P01", "57014"]);
+
 export const RESEND_INBOUND_WEBHOOK_PATH = "/webhooks/resend/inbound";
 
 export interface ResendInboundWebhookConfig {
@@ -83,9 +86,11 @@ export function resendInboundWebhookRoutes(
       } catch (error) {
         // IE-8: the database unreachable or busy answers 503 and Resend retries; a stored receive replays.
         // Anything else is a fault, not a busy database: it reaches the app's error handler (500), Resend still retries.
-        const mapped = retryableAsUnavailable(error);
-        config.report?.({ id: verified.id, emailId, outcome: { handled: false, reason: mapped instanceof DatabaseUnavailable ? "unavailable" : "failed" } });
-        if (!(mapped instanceof DatabaseUnavailable)) throw error;
+        const busy = retryableAsUnavailable(error) instanceof DatabaseUnavailable
+          || TRANSIENT_SQLSTATES.has(String((error as { code?: unknown } | null)?.code));
+        config.report?.({ id: verified.id, emailId, outcome: { handled: false, reason: busy ? "unavailable" : "failed" } });
+        // Wrapped, so the error handler answers one fixed 500 (never a 409 or 400 that reads as our verdict on the mail).
+        if (!busy) throw new Error("Inbound email receive failed", { cause: error });
         return c.json(apiErrorBody("Unavailable", "Inbound email could not be stored; retry later"), 503);
       }
       config.report?.({ id: verified.id, emailId, outcome });

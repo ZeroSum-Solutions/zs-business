@@ -210,6 +210,8 @@ describe("parseServerEnv", () => {
       { RESEND_INBOUND_WEBHOOK_SECRET: RESEND_WEBHOOK_SECRET, RESEND_WEBHOOK_SECRET },
       { RESEND_INBOUND_WEBHOOK_SECRET, RESEND_WEBHOOK_SECRET, RESEND_WEBHOOK_PREVIOUS_SECRET: RESEND_INBOUND_WEBHOOK_SECRET },
       { RESEND_INBOUND_WEBHOOK_SECRET, RESEND_INBOUND_WEBHOOK_PREVIOUS_SECRET: RESEND_WEBHOOK_SECRET, RESEND_WEBHOOK_SECRET },
+      // The same signing bytes without base64 padding are the same key.
+      { RESEND_INBOUND_WEBHOOK_SECRET: RESEND_WEBHOOK_SECRET.replace(/=+$/, ""), RESEND_WEBHOOK_SECRET },
     ]) expect(() => parseServerEnv({ ...inbound, ...env })).toThrow(/must differ from the RESEND_WEBHOOK secrets/);
     expect(parseServerEnv({ ...inbound, RESEND_INBOUND_WEBHOOK_SECRET, RESEND_WEBHOOK_SECRET }).resendInboundWebhook).not.toBeNull();
   });

@@ -153,6 +153,12 @@ describe("routing (IE-3, pure)", () => {
     expect(inboundSubject("")).toBeNull();
     expect(inboundSubject("\u0000\u202e")).toBeNull();
   });
+  it("cleans the whole From before taking the mailbox, and reads no sender from a value that is not text", () => {
+    expect(senderAddress("Pat <pat@example.com>\u202e")).toBe("pat@example.com");
+    expect(senderAddress("Pat <pat@exa\u2028mple.com>")).toBe("pat@example.com");
+    expect(senderAddress(null)).toBeNull();
+    expect(senderAddress(42)).toBeNull();
+  });
 });
 
 describe("receive (IE-9)", () => {
@@ -472,7 +478,7 @@ describe("sender threads (IE-24, test 14)", () => {
     const message = event({ to: [`${handleA}@${DOMAIN}`], from: "only-a@example.org" });
     await session().receive(message);
     const senderKeyA = inboundSenderKey(fixture.a.tenantId, "only-a@example.org");
-    await expect(b.getThread(`e_${senderKeyA}`)).rejects.toBeInstanceOf(NotFound);
-    expect((await b.listThreads({ limit: 100 })).items.some((thread) => thread.id === `e_${senderKeyA}`)).toBe(false);
+    await expect(b.getThread(`e_${senderKeyA}`, MEMBER)).rejects.toBeInstanceOf(NotFound);
+    expect((await b.listThreads({ limit: 100 }, MEMBER)).items.some((thread) => thread.id === `e_${senderKeyA}`)).toBe(false);
   });
 });

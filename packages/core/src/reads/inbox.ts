@@ -227,8 +227,10 @@ export async function listThreads(
     `SELECT * FROM (${threads("$4", "$5", options.includeEmail === true)}) t ${position} ORDER BY last_activity_at DESC, id LIMIT $2 OFFSET $3`,
     [tenantId, query.limit + 1, query.offset, null, null, ...(cursor ?? [])],
   )).rows;
-  return page(await summaries(tx, tenantId, rows), query,
-    (index) => encodeCursor("inbox.recent", [rows[index]!.sort_value, rows[index]!.id]));
+  // "More" and the cursor come from the scanned rows, not the summaries: a sender whose last email went
+  // between the two queries leaves a short page, never a lost next page.
+  const scanned = page(rows, query, (index) => encodeCursor("inbox.recent", [rows[index]!.sort_value, rows[index]!.id]));
+  return { ...scanned, items: await summaries(tx, tenantId, scanned.items) };
 }
 
 interface RequestRow {

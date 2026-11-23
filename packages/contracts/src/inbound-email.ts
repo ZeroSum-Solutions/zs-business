@@ -47,8 +47,8 @@ export const inboundEmailReceiveInputSchema = z.strictObject({
   fromAddress: z.string().min(1).max(INBOUND_FROM_LIMIT).refine(isPostgresText, "Invalid Postgres text")
     .regex(/^[^\x00-\x1f\x7f-\x9f]+$/, "A sender address has no control characters"),
   /** One line, cut per IE-12; null when the message had none. */
-  subject: z.string().max(INBOUND_SUBJECT_LIMIT).refine(isPostgresText, "Invalid Postgres text")
-    .regex(/^[^\r\n]*$/, "A subject is one line").nullable(),
+  subject: z.string().min(1).max(INBOUND_SUBJECT_LIMIT).refine(isPostgresText, "Invalid Postgres text")
+    .regex(/^[^\x00-\x1f\x7f-\x9f]+$/, "A subject is one line with no control characters").nullable(),
 });
 export type InboundEmailReceiveInput = z.infer<typeof inboundEmailReceiveInputSchema>;
 export const inboundEmailReceiveCommandSchema = z.lazy(() => actionCommandSchema.extend({

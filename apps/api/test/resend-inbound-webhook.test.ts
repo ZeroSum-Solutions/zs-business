@@ -2,7 +2,7 @@
 // webhook (IE-8), routing on to, cc and bcc (IE-3) and the report that never names an address (IE-4).
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { INBOUND_EMAIL_RECEIVED_EVENT } from "@zs/contracts";
+import { Conflict, INBOUND_EMAIL_RECEIVED_EVENT } from "@zs/contracts";
 import { DatabaseUnavailable, signResendWebhook } from "@zs/core";
 import type { ScopedDatabase } from "@zs/db";
 import {
@@ -309,6 +309,27 @@ describe("a fault that is not the database", () => {
     const response = await deliver(received({ to: [`${await handleOf(h.a)}@${INBOUND_EMAIL_DOMAIN}`] }), { id }, broken);
     expect(response.status).toBe(500);
     expect(reports.at(-1)).toMatchObject({ id, outcome: { handled: false, reason: "failed" } });
+  });
+
+  it("answers a raw lock wait 503 and any refusal the action path raises one fixed 500", async () => {
+    const to = [`${await handleOf(h.a)}@${INBOUND_EMAIL_DOMAIN}`];
+    const webhook = { resendInboundWebhook: { secrets: { current: RESEND_INBOUND_WEBHOOK_SECRET }, domain: INBOUND_EMAIL_DOMAIN, report } };
+    const locked = appOnDatabase({
+      ...h.database.db,
+      withoutTenant: () => Promise.reject(Object.assign(new Error("lock timeout"), { code: "55P03" })),
+    } satisfies ScopedDatabase, webhook);
+    const id = newId();
+    expect((await deliver(received({ to }), { id }, locked)).status).toBe(503);
+    expect(reports.at(-1)).toMatchObject({ id, outcome: { handled: false, reason: "unavailable" } });
+    const refused = appOnDatabase({
+      ...h.database.db,
+      tenant: () => Promise.reject(new Conflict("refused")),
+    } satisfies ScopedDatabase, webhook);
+    const other = newId();
+    const response = await deliver(received({ to }), { id: other }, refused);
+    expect(response.status).toBe(500);
+    expect(response.body).toMatchObject({ error: { code: "Internal" } });
+    expect(reports.at(-1)).toMatchObject({ id: other, outcome: { handled: false, reason: "failed" } });
   });
 });
 

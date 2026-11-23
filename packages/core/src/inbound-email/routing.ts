@@ -27,8 +27,8 @@ export const inboundEmailEventSchema = z.object({
   type: z.literal(INBOUND_EMAIL_EVENT_TYPE),
   data: z.object({
     email_id: providerEmailIdSchema,
-    // Required but otherwise free: the session reads it after routing (IE-4, IE-8).
-    from: z.string(),
+    // Any value: the session reads it only after routing, so unrouted mail is 200 whatever it says (IE-4, IE-8).
+    from: z.unknown(),
     // Resend always sends `to` (it may be empty); an event without it is unreadable, not unrouted (IE-8).
     to: z.array(z.string()).max(1000),
     cc: recipientsSchema,
@@ -125,8 +125,10 @@ const CONTROL = /[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g;
  * IE-9, IE-19: the sender address, normalised as contacts are when it parses; otherwise trimmed,
  * lower-cased, without control characters, cut to 320. Null when nothing is left.
  */
-export function senderAddress(from: string): string | null {
-  const address = addressOf(from).replace(CONTROL, "");
+export function senderAddress(from: unknown): string | null {
+  if (typeof from !== "string") return null;
+  // Cleaned before the mailbox is taken out, so a control after `Name <address>` cannot change the address.
+  const address = addressOf(from.replace(CONTROL, "").replace(/[\u2028\u2029]/g, ""));
   const parsed = contactEmailInputSchema.safeParse(address);
   if (parsed.success) return parsed.data;
   const fallback = cut(address.trim().toLowerCase(), INBOUND_FROM_LIMIT);

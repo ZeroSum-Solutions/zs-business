@@ -63,16 +63,17 @@ CREATE TABLE public.inbound_emails (
   mailbox_id uuid,
   provider text NOT NULL CONSTRAINT inbound_emails_provider CHECK (provider IN ('resend', 'gmail')),
   provider_email_id text NOT NULL CONSTRAINT inbound_emails_provider_email_id CHECK (
-    char_length(provider_email_id) BETWEEN 1 AND 200 AND provider_email_id !~ '[[:cntrl:]]'),
+    char_length(provider_email_id) BETWEEN 1 AND 200 AND provider_email_id !~ '[\u0001-\u001f\u007f-\u009f]'),
   -- IE-6: the reply reference after `+` in the recipient, as received (it picks no tenant).
   reply_ref text CONSTRAINT inbound_emails_reply_ref CHECK (reply_ref ~ '^[a-z2-7]{16}$'),
   status text NOT NULL DEFAULT 'received' CONSTRAINT inbound_emails_status CHECK (status IN ('received', 'ready', 'dropped')),
   drop_reason text CONSTRAINT inbound_emails_drop_reason CHECK (drop_reason IN ('bounce', 'loop')),
   kind text NOT NULL DEFAULT 'unclassified' CONSTRAINT inbound_emails_kind CHECK (kind IN ('message', 'automated', 'spam', 'unclassified')),
+  -- Control characters are named as ranges (C0, DEL, C1): [[:cntrl:]] depends on the database locale.
   from_address text NOT NULL CONSTRAINT inbound_emails_from_address CHECK (
-    char_length(from_address) BETWEEN 1 AND 320 AND from_address !~ '[[:cntrl:]]'),
-  from_name text CONSTRAINT inbound_emails_from_name CHECK (char_length(from_name) BETWEEN 1 AND 200 AND from_name !~ '[[:cntrl:]]'),
-  subject text CONSTRAINT inbound_emails_subject CHECK (char_length(subject) BETWEEN 1 AND 200 AND subject !~ '[[:cntrl:]]'),
+    char_length(from_address) BETWEEN 1 AND 320 AND from_address !~ '[\u0001-\u001f\u007f-\u009f]'),
+  from_name text CONSTRAINT inbound_emails_from_name CHECK (char_length(from_name) BETWEEN 1 AND 200 AND from_name !~ '[\u0001-\u001f\u007f-\u009f]'),
+  subject text CONSTRAINT inbound_emails_subject CHECK (char_length(subject) BETWEEN 1 AND 200 AND subject !~ '[\u0001-\u001f\u007f-\u009f]'),
   received_at timestamptz NOT NULL,
   rfc_message_id text CONSTRAINT inbound_emails_rfc_message_id CHECK (
     char_length(rfc_message_id) BETWEEN 1 AND 255 AND rfc_message_id !~ '[\r\n]'),
@@ -315,11 +316,11 @@ CREATE TRIGGER inbound_email_addresses_create
 
 -- Owners as every function: invoker functions with zs_function_owner (20261018090000), the definer with
 -- zs_dispatcher (20261017160000). CREATE only for the transfer.
-REVOKE ALL ON FUNCTION public.inbound_email_new_handle() FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.inbound_emails_references_valid(text[]) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.inbound_emails_guard() FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.inbound_email_addresses_create() FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.inbound_email_route(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.inbound_email_new_handle() FROM PUBLIC, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.inbound_emails_references_valid(text[]) FROM PUBLIC, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.inbound_emails_guard() FROM PUBLIC, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.inbound_email_addresses_create() FROM PUBLIC, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.inbound_email_route(text) FROM PUBLIC, authenticated, service_role;
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anon') THEN
     REVOKE ALL ON FUNCTION public.inbound_email_new_handle() FROM anon;
