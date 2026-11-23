@@ -24,6 +24,11 @@ import {
   bookingPageSchema,
   bookingPageSummarySchema,
   businessProfileReadSchema,
+  MARKED_FACTS,
+  WEEKDAYS,
+  type BusinessHours,
+  type BusinessProfile,
+  type FactMarks,
   contactEnrichmentSchema,
   enrichmentProposalListSchema,
   enrichmentRequestRecordSchema,
@@ -182,11 +187,31 @@ const NOTHING_CANCELLED = { cancelled: false, revokeFailed: false };
 /** POST /v1/enrichment/requests answers the action and the request as it is now. */
 const enrichmentOutputSchema = z.object({ actionId: uuidSchema, result: enrichmentRequestRecordSchema });
 /** BP-10: an API that predates the description and services fields omits them; they read as empty. */
-function withContent<T extends { description?: string | null | undefined; services?: string[] | undefined }>(
-  profile: T,
-): Omit<T, "description" | "services"> & { description: string | null; services: string[] } {
-  const { description, services, ...rest } = profile;
-  return { ...rest, description: description ?? null, services: services ?? [] };
+/**
+ * The profile as the dashboard holds it (BP-10, BP-21): what an older API leaves out reads as not set,
+ * and a fact in a shape this client does not know is not set rather than guessed.
+ */
+function withContent(profile: z.output<typeof businessProfileReadSchema>): BusinessProfile {
+  const { description, services, hours, tone, policies, factMarks, ...rest } = profile;
+  let week: BusinessHours | null = null;
+  if (hours && WEEKDAYS.every((day) => day in hours)) {
+    week = Object.fromEntries(WEEKDAYS.map((day) => [day, hours[day] ?? null])) as BusinessHours;
+    if (WEEKDAYS.every((day) => week![day] === null)) week = null;
+  }
+  const marks: FactMarks = {};
+  for (const fact of MARKED_FACTS) {
+    const mark = factMarks?.[fact];
+    if (mark) marks[fact] = { setBy: mark.setBy, setAt: mark.setAt, revision: mark.revision ?? 0 };
+  }
+  return {
+    ...rest,
+    description: description ?? null,
+    services: services ?? [],
+    hours: week,
+    tone: tone ?? null,
+    policies: (policies ?? []).map((policy) => ({ title: policy.title, text: policy.text, setBy: policy.setBy, setAt: policy.setAt, revision: policy.revision ?? 0 })),
+    factMarks: marks,
+  };
 }
 const businessOutputSchema = z.object({ actionId: uuidSchema, result: businessProfileReadSchema });
 /** POST /v1/agents/:agentKind/runs answers the run with each booking's decision (G-14). */

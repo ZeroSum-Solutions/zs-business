@@ -112,3 +112,34 @@ test("a save made after another owner's is refused and the form takes their valu
   await expect(card.getByLabel("Legal name")).toHaveValue("Other Owner Ltd");
   await expect(card.getByLabel("Business name")).toHaveValue(DEMO_NAME);
 });
+
+test("an owner sets opening hours, a tone of voice and a policy on a phone, each with who set it (BP-16..BP-20)", async ({ page }) => {
+  await openSettings(page);
+  const card = businessCard(page);
+  await expect(card.getByTestId("provenance-hours")).toHaveText(/Not set\. Agents say this is not known/);
+  await expect(card.getByTestId("provenance-tone")).toHaveText(/Not set/);
+  await expect(card.getByTestId("provenance-policies")).toHaveText(/Not set/);
+
+  await card.getByRole("switch", { name: "Open on Monday" }).click();
+  await expect(card.getByLabel("Monday opens")).toHaveValue("09:00");
+  await card.getByLabel("Monday closes").fill("17:30");
+  await card.getByLabel("Tone of voice").fill("Warm and plain.");
+  await card.getByRole("button", { name: "Add a policy" }).click();
+  await card.getByLabel("Title").fill("Cancellation");
+  await card.getByLabel("Policy", { exact: true }).fill("Give us 24 hours' notice.");
+
+  // Nothing on the form is wider than the phone.
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
+
+  await card.getByRole("button", { name: "Save changes" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Saved in this demo only" })).toBeVisible();
+  for (const fact of ["hours", "tone", "policies"]) await expect(card.getByTestId(`provenance-${fact}`)).toHaveText(/^Set by an owner on /);
+
+  const log = await writes(page);
+  expect(log.at(-1)!.payload).toMatchObject({ changes: {
+    hours: { mon: { open: "09:00", close: "17:30" }, tue: null, sun: null },
+    tone: "Warm and plain.",
+    policies: [{ title: "Cancellation", text: "Give us 24 hours' notice." }],
+  } });
+});

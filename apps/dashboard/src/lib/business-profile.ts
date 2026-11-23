@@ -1,6 +1,23 @@
 // The Settings form for the business profile (business-profile.md BP-2, BP-3, BP-6): what a person
 // types becomes the `changes` a save sends. Pure, so the rules are tested without a screen.
-import { BUSINESS_SERVICES_MAX, BUSINESS_SERVICE_NAME_MAX, COUNTRY_CODES, type BusinessProfile, type BusinessProfileChanges, type PostalAddress } from "@zs/contracts";
+import {
+  BUSINESS_POLICIES_MAX,
+  BUSINESS_POLICY_TEXT_MAX,
+  BUSINESS_POLICY_TITLE_MAX,
+  BUSINESS_SERVICES_MAX,
+  BUSINESS_SERVICE_NAME_MAX,
+  BUSINESS_TONE_MAX,
+  COUNTRY_CODES,
+  WEEKDAYS,
+  type BusinessHours,
+  type BusinessPolicyInput,
+  type BusinessProfile,
+  type BusinessProfileChanges,
+  type FactMark,
+  type MarkedFact,
+  type PostalAddress,
+  type Weekday,
+} from "@zs/contracts";
 import { normalizePhone } from "./api/types";
 
 export interface BusinessForm {
@@ -21,8 +38,18 @@ export interface BusinessForm {
   description: string;
   /** BP-14: one service per line. "" is none. */
   services: string;
+  /** BP-16: each day open or closed, with its times as `<input type="time">` gives them. No open day is not set. */
+  hours: Record<Weekday, DayHours>;
+  /** BP-17: the tone of voice note. "" is not set. */
+  tone: string;
+  /** BP-18: the policies in order; a row with both parts empty is left out. */
+  policies: PolicyDraft[];
 }
+export interface DayHours { isOpen: boolean; open: string; close: string }
+export interface PolicyDraft { title: string; text: string }
 export type BusinessField = keyof BusinessForm;
+/** The fields a single text input or select edits. */
+export type BusinessTextField = Exclude<BusinessField, "hours" | "policies">;
 export type BusinessFormErrors = Partial<Record<BusinessField, string>>;
 export type BusinessRead = { ok: true; changes: BusinessProfileChanges } | { ok: false; errors: BusinessFormErrors };
 
@@ -43,7 +70,72 @@ export const BUSINESS_MESSAGES = {
   tooLong: "Keep this under 120 characters.",
   description: "A description can be up to 2000 characters.",
   services: `List up to ${BUSINESS_SERVICES_MAX} services, one per line, each up to ${BUSINESS_SERVICE_NAME_MAX} characters, none twice.`,
+  hours: "Give each open day an opening time and a later closing time.",
+  tone: `A tone of voice note can be up to ${BUSINESS_TONE_MAX} characters.`,
+  policies: `Give each policy a title (one line, up to ${BUSINESS_POLICY_TITLE_MAX} characters) and its text (up to ${BUSINESS_POLICY_TEXT_MAX}). Up to ${BUSINESS_POLICIES_MAX} policies, each title once.`,
 } as const;
+
+export const WEEKDAY_NAMES: Record<Weekday, string> = {
+  mon: "Monday", tue: "Tuesday", wed: "Wednesday", thu: "Thursday", fri: "Friday", sat: "Saturday", sun: "Sunday",
+};
+/** The times a day gets when it is turned on. */
+export const DEFAULT_DAY = { open: "09:00", close: "17:00" } as const;
+
+/** A time input cannot show 24:00, so a day that closes at midnight shows 00:00, and 00:00 as a closing time saves as 24:00. */
+const closeForInput = (close: string) => (close === "24:00" ? "00:00" : close);
+const closeFromInput = (close: string) => (close === "00:00" ? "24:00" : close);
+
+function hoursForm(hours: BusinessHours | null): Record<Weekday, DayHours> {
+  return Object.fromEntries(WEEKDAYS.map((day) => {
+    const times = hours?.[day] ?? null;
+    return [day, times ? { isOpen: true, open: times.open, close: closeForInput(times.close) } : { isOpen: false, open: "", close: "" }];
+  })) as Record<Weekday, DayHours>;
+}
+
+const CLOCK = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
+/** The hours a form describes: null when no day is open (not set), or the day that is wrong. */
+function hoursOf(form: Record<Weekday, DayHours>): { ok: true; hours: BusinessHours | null } | { ok: false } {
+  const hours = {} as Record<Weekday, { open: string; close: string } | null>;
+  for (const day of WEEKDAYS) {
+    const entry = form[day];
+    if (!entry.isOpen) { hours[day] = null; continue; }
+    const close = closeFromInput(entry.close);
+    if (!CLOCK.test(entry.open) || !(CLOCK.test(close) || close === "24:00") || entry.open >= close) return { ok: false };
+    hours[day] = { open: entry.open, close };
+  }
+  return { ok: true, hours: WEEKDAYS.some((day) => hours[day] !== null) ? hours : null };
+}
+
+const sameHours = (a: BusinessHours | null, b: BusinessHours | null) =>
+  a === null || b === null ? a === b : WEEKDAYS.every((day) => JSON.stringify(a[day]) === JSON.stringify(b[day]));
+
+/** The policies a form describes, trimmed, rows with both parts empty dropped; null when one is not valid. */
+function policiesOf(drafts: PolicyDraft[]): BusinessPolicyInput[] | null {
+  const policies = drafts.map((draft) => ({ title: draft.title.trim(), text: draft.text.trim() })).filter((policy) => policy.title !== "" || policy.text !== "");
+  const valid = policies.length <= BUSINESS_POLICIES_MAX
+    && policies.every((policy) => policy.title !== "" && policy.text !== ""
+      && [...policy.title].length <= BUSINESS_POLICY_TITLE_MAX && !/[\u0000-\u001f\u007f]/.test(policy.title)
+      && [...policy.text].length <= BUSINESS_POLICY_TEXT_MAX)
+    && new Set(policies.map((policy) => policy.title.toLowerCase())).size === policies.length;
+  return valid ? policies : null;
+}
+
+/**
+ * Who set a fact and when (BP-19), for the line under it: null when the fact is not set, which the
+ * screen shows as not known. A fact set before marks were kept, or by a setup step, has no mark.
+ */
+export function factProvenance(profile: BusinessProfile, fact: MarkedFact | "policies"): { known: false } | { known: true; mark: Pick<FactMark, "setBy" | "setAt"> | null } {
+  if (fact === "policies") {
+    if (profile.policies.length === 0) return { known: false };
+    // The newest policy's mark: the list as a whole was last changed then.
+    const newest = [...profile.policies].sort((a, b) => b.setAt.localeCompare(a.setAt))[0]!;
+    return { known: true, mark: { setBy: newest.setBy, setAt: newest.setAt } };
+  }
+  const value = fact === "displayName" ? profile.displayName : fact === "services" ? (profile.services.length > 0 ? profile.services : null) : profile[fact];
+  if (value === null || value === "") return { known: false };
+  const mark = profile.factMarks[fact];
+  return { known: true, mark: mark ? { setBy: mark.setBy, setAt: mark.setAt } : null };
+}
 
 export function toBusinessForm(profile: BusinessProfile): BusinessForm {
   const address = profile.postalAddress;
@@ -61,6 +153,9 @@ export function toBusinessForm(profile: BusinessProfile): BusinessForm {
     country: address?.country ?? "",
     description: profile.description ?? "",
     services: profile.services.join("\n"),
+    hours: hoursForm(profile.hours),
+    tone: profile.tone ?? "",
+    policies: profile.policies.map((policy) => ({ title: policy.title, text: policy.text })),
   };
 }
 
@@ -128,6 +223,18 @@ export function readBusinessForm(profile: BusinessProfile, form: BusinessForm): 
   if (!servicesValid(services)) errors.services = BUSINESS_MESSAGES.services;
   else if (services.join("\n") !== profile.services.join("\n")) changes.services = services;
 
+  const hours = hoursOf(form.hours);
+  if (!hours.ok) errors.hours = BUSINESS_MESSAGES.hours;
+  else if (!sameHours(hours.hours, profile.hours)) changes.hours = hours.hours;
+
+  const tone = form.tone.trim();
+  if ([...tone].length > BUSINESS_TONE_MAX) errors.tone = BUSINESS_MESSAGES.tone;
+  else if (tone !== (profile.tone ?? "")) changes.tone = tone === "" ? null : tone;
+
+  const policies = policiesOf(form.policies);
+  if (!policies) errors.policies = BUSINESS_MESSAGES.policies;
+  else if (JSON.stringify(policies) !== JSON.stringify(profile.policies.map((policy) => ({ title: policy.title, text: policy.text })))) changes.policies = policies;
+
   const { address, errors: addressErrors } = addressOf(form);
   Object.assign(errors, addressErrors);
   if (Object.keys(addressErrors).length === 0 && !sameAddress(address, profile.postalAddress)) changes.postalAddress = address;
@@ -148,6 +255,9 @@ export function serverFieldMessage(field: BusinessField): string {
     case "country": return BUSINESS_MESSAGES.country;
     case "description": return BUSINESS_MESSAGES.description;
     case "services": return BUSINESS_MESSAGES.services;
+    case "hours": return BUSINESS_MESSAGES.hours;
+    case "tone": return BUSINESS_MESSAGES.tone;
+    case "policies": return BUSINESS_MESSAGES.policies;
     default: return BUSINESS_MESSAGES.tooLong;
   }
 }
@@ -158,7 +268,8 @@ export function fieldFromIssuePath(path: string): BusinessField | null {
   if (root !== "changes" || !key) return null;
   if (key === "phoneE164") return "phone";
   if (key === "postalAddress") return (ADDRESS_FIELDS as readonly string[]).includes(inner ?? "") ? (inner as BusinessField) : "line1";
-  return key === "displayName" || key === "legalName" || key === "timeZone" || key === "currency" || key === "description" || key === "services" ? key : null;
+  return key === "displayName" || key === "legalName" || key === "timeZone" || key === "currency" || key === "description" || key === "services"
+    || key === "hours" || key === "tone" || key === "policies" ? key : null;
 }
 
 /** Whichever of two copies of the profile has the higher revision; a tie takes `incoming`. Revisions only grow, so the lower one is stale. */

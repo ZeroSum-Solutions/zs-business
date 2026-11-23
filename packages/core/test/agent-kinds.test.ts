@@ -158,7 +158,8 @@ describe("usage and cost caps (G-15, G-17)", () => {
     expect(aborted).toMatchObject({ outcome: "error", model: "fake-follow-up", lane: "personal_data" });
     const worst = Number(aborted!.cost_micros);
     expect(worst).toBeGreaterThan(400);
-    expect(await runTotals(first.id)).toMatchObject({ model: "fake-follow-up", input_tokens: 820, output_tokens: 600, cost_micros: String(worst) });
+    // 1243: the system text and the company facts (business-profile.md BP-20) priced at their worst case.
+    expect(await runTotals(first.id)).toMatchObject({ model: "fake-follow-up", input_tokens: 1243, output_tokens: 600, cost_micros: String(worst) });
 
     // The next call's usage fills the call row and the run totals. The inquiry the model_error
     // left undrafted is asked again: a new, separately priced call in the new run.

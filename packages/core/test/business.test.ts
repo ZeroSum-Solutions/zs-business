@@ -55,7 +55,8 @@ describe("reading the profile (BP-1, BP-5)", () => {
     expect(await sessionFor(staff).getBusiness()).toMatchObject(expected);
     // Nothing else about the tenant rides along.
     expect(Object.keys(await sessionFor(staff).getBusiness()).sort()).toEqual([
-      "currency", "description", "displayName", "legalName", "phoneE164", "postalAddress", "revision", "services", "timeZone", "updatedAt",
+      "currency", "description", "displayName", "factMarks", "hours", "legalName", "phoneE164", "policies", "postalAddress", "revision",
+      "services", "timeZone", "tone", "updatedAt",
     ]);
   });
 });
@@ -71,7 +72,9 @@ describe("updating the profile (BP-6, BP-7, BP-9)", () => {
     expect(saved.result).toEqual({
       displayName: "Tenant A", legalName: "Halden & Rowe Ltd", phoneE164: "+442079460000", timeZone: "Europe/London", currency: "EUR",
       postalAddress: { line1: "1 High St", city: "London", postalCode: "N1 9GU", country: "GB" },
-      description: null, services: [],
+      description: null, services: [], hours: null, tone: null, policies: [],
+      // BP-19: the time zone is a company fact, so the save marks it with the owner's membership.
+      factMarks: { timeZone: { setBy: expect.any(String), setAt: new Date(now).toISOString(), revision: 2 } },
       revision: 2, updatedAt: new Date(now).toISOString(),
     });
     expect(await sessionFor(staff).getBusiness()).toEqual(saved.result);

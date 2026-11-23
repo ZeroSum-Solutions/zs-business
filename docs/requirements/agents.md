@@ -151,7 +151,9 @@ locks. A model error or an answer that fails validation is `model_error` and
 `model_invalid`. Reasons that apply to the whole tenant (`global_killed`, `disabled`,
 `tenant_killed`, `quiet_hours`, `daily_cap`) end the run with that `stopReason`.
 
-**G-9. The model port.** `FollowUpModel.draft(prompt)` gets the business name, the customer's
+**G-9. The model port.** `FollowUpModel.draft(prompt)` gets the company facts (`business-profile.md`
+BP-21: name, description, services, time zone, hours, tone and policies, each a value or
+`not known`), the customer's
 name, the request time, the visitor's notes and the booking (start, end and zone) and
 returns `{subject, body}`; nothing else about the tenant or other customers. The answer is
 trimmed and must fit the reply limits (subject one line 1..200, body 1..5000). Tests and the
@@ -315,7 +317,7 @@ rendered from an approved template revision and never call a model at run time:
   `granted` grant, D-6), `template_not_approved`. Quiet hours and the daily cap end the run
   (G-5, G-8).
 - An owner may ask for a suggested wording (`POST /v1/agents/:agentKind/template-suggestion`,
-  permission `agents`). Its input is the business name, the kind and the variable list, never
+  permission `agents`). Its input is the company facts (`business-profile.md` BP-21), the kind and the variable list, never
   customer data, on the `no_personal_data` lane (G-18). Each suggestion is one model call
   under G-15: it writes an `agent_model_calls` row (the requested kind, no `run_id`, key
   `agent:<kind>:suggestion:<idempotencyKey>`) and counts against that kind's

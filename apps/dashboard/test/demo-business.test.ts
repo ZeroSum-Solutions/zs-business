@@ -18,8 +18,26 @@ describe("demo adapter: business profile", () => {
     const profile = businessProfileSchema.parse(await adapter().getBusiness());
     expect(profile).toEqual({
       displayName: DEMO_BUSINESS, legalName: null, phoneE164: null, timeZone: null, currency: "USD", postalAddress: null,
-      description: null, services: [], revision: 1, updatedAt: NOW.toISOString(),
+      description: null, services: [], hours: null, tone: null, policies: [], factMarks: {}, revision: 1, updatedAt: NOW.toISOString(),
     });
+  });
+
+  it("marks each company fact an owner sets, keeps an unchanged policy's mark, and drops a cleared fact's mark (BP-16..BP-19)", async () => {
+    const api = adapter();
+    const hours = { mon: { open: "09:00", close: "17:00" }, tue: null, wed: null, thu: null, fri: null, sat: null, sun: null };
+    const first = businessProfileSchema.parse(await api.updateBusiness({ expectedRevision: 1, changes: {
+      hours, tone: "Warm and plain.", policies: [{ title: "Cancellation", text: "24 hours' notice." }],
+    } }, key()));
+    const mark = { setBy: expect.any(String), setAt: NOW.toISOString(), revision: 2 };
+    expect(first.factMarks).toEqual({ hours: mark, tone: mark });
+    expect(first.policies).toEqual([{ title: "Cancellation", text: "24 hours' notice.", ...mark }]);
+
+    const second = businessProfileSchema.parse(await api.updateBusiness({ expectedRevision: 2, changes: {
+      tone: null, policies: [{ title: "Cancellation", text: "24 hours' notice." }, { title: "Deposits", text: "Half up front." }],
+    } }, key()));
+    expect(second.factMarks).toEqual({ hours: mark });
+    expect(second.policies[0]).toEqual(first.policies[0]);
+    expect(second.policies[1]).toMatchObject({ title: "Deposits", revision: 3 });
   });
 
   it("saves legal name, zone and currency at revision 2, and the read returns them", async () => {

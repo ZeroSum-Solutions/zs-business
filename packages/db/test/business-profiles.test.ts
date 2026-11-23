@@ -284,6 +284,32 @@ describe("tenancy as the runtime role (BP-12, BP-9)", () => {
     expect((await asA((tx) => tx.query("SELECT description FROM business_profiles WHERE tenant_id=$1", [fixture.b.tenantId]))).rowCount).toBe(0);
   });
 
+  it("updates its own hours, tone and policies within their shapes, and cannot touch another tenant's (BP-16..BP-18)", async () => {
+    const hours = { mon: { open: "09:00", close: "17:00" }, tue: null, wed: null, thu: null, fri: null, sat: null, sun: null };
+    const own = await asA((tx) => tx.query(
+      "UPDATE business_profiles SET hours=$1::jsonb, tone='Warm.' WHERE tenant_id=$2 RETURNING hours, tone",
+      [JSON.stringify(hours), fixture.a.tenantId]));
+    expect(own.rows).toEqual([{ hours, tone: "Warm." }]);
+    const refused = async (sql: string, value: unknown) => {
+      await expect(asA((tx) => tx.query(sql, [JSON.stringify(value), fixture.a.tenantId]))).rejects.toMatchObject({ code: "23514" });
+    };
+    const setHours = "UPDATE business_profiles SET hours=$1::jsonb WHERE tenant_id=$2";
+    await refused(setHours, { ...hours, mon: { open: "17:00", close: "09:00" } });
+    await refused(setHours, { ...hours, mon: null });
+    await refused(setHours, { ...hours, mon: { open: "9:00", close: "17:00" } });
+    await refused(setHours, { mon: hours.mon });
+    await refused(setHours, { ...hours, hol: null });
+    // A policy or a mark without an owner's member ID fails its shape before any owner check.
+    await refused("UPDATE business_profiles SET policies=$1::jsonb WHERE tenant_id=$2", [{ title: "Refunds", text: "Ten days." }]);
+    await refused("UPDATE business_profiles SET fact_marks=$1::jsonb WHERE tenant_id=$2", { colour: { setBy: randomUUID(), setAt: "x", revision: 2 } });
+    await expect(asA((tx) => tx.query("UPDATE business_profiles SET tone='  ' WHERE tenant_id=$1", [fixture.a.tenantId])))
+      .rejects.toMatchObject({ code: "23514" });
+    const before = await profileOf(fixture.b.tenantId);
+    const other = await asA((tx) => tx.query("UPDATE business_profiles SET tone='Hijacked' WHERE tenant_id=$1", [fixture.b.tenantId]));
+    expect(other.rowCount).toBe(0);
+    expect(await profileOf(fixture.b.tenantId)).toEqual(before);
+  });
+
   it("renames the tenant with the display name, in the same transaction, for its own tenant only", async () => {
     await asA((tx) => tx.query("UPDATE business_profiles SET display_name='Halden & Rowe Fine Jewelry' WHERE tenant_id=$1", [fixture.a.tenantId]));
     expect(await tenantName(fixture.a.tenantId)).toBe("Halden & Rowe Fine Jewelry");

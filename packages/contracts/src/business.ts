@@ -69,6 +69,79 @@ const serviceName = z.string().trim().min(1)
 export const businessServicesSchema = z.array(serviceName).max(BUSINESS_SERVICES_MAX, `Expected at most ${BUSINESS_SERVICES_MAX} services`)
   .refine((names) => new Set(names.map((name) => name.toLowerCase())).size === names.length, "Each service must be named once");
 
+/** BP-16: the days of the week, in the order screens and prompts list them. */
+export const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
+export type Weekday = (typeof WEEKDAYS)[number];
+const clockTime = z.string().regex(/^([01][0-9]|2[0-3]):[0-5][0-9]$/, "Expected a time such as 09:00");
+const closingTime = z.string().regex(/^(([01][0-9]|2[0-3]):[0-5][0-9]|24:00)$/, "Expected a time such as 17:30, or 24:00 for midnight");
+/** BP-16: one open day, from `open` to `close` the same day ("HH:MM", 24-hour). */
+export const openingTimesSchema = z.strictObject({ open: clockTime, close: closingTime })
+  .refine((day) => day.open < day.close, { message: "Expected the closing time after the opening time", path: ["close"] });
+export type OpeningTimes = z.infer<typeof openingTimesSchema>;
+/** BP-16: all seven days; a day is null when the business is closed. At least one day is open. */
+export const businessHoursSchema = z.strictObject({
+  mon: openingTimesSchema.nullable(),
+  tue: openingTimesSchema.nullable(),
+  wed: openingTimesSchema.nullable(),
+  thu: openingTimesSchema.nullable(),
+  fri: openingTimesSchema.nullable(),
+  sat: openingTimesSchema.nullable(),
+  sun: openingTimesSchema.nullable(),
+}).refine((hours) => WEEKDAYS.some((day) => hours[day] !== null), "Name at least one open day, or clear the hours");
+export type BusinessHours = z.infer<typeof businessHoursSchema>;
+
+/** BP-17: the tone of voice note, 1..500 characters after trimming (null clears it in `changes`). */
+export const BUSINESS_TONE_MAX = 500;
+export const businessToneSchema = z.string().trim().min(1).refine(codePointsAtMost(BUSINESS_TONE_MAX), `Expected at most ${BUSINESS_TONE_MAX} characters`).refine(postgresText, "Text is not valid in Postgres");
+
+/** BP-18: at most this many policies; a title and a text at most this many characters. */
+export const BUSINESS_POLICIES_MAX = 10;
+export const BUSINESS_POLICY_TITLE_MAX = 60;
+export const BUSINESS_POLICY_TEXT_MAX = 1000;
+/** BP-18: one policy as the owner writes it: a one-line title (Cancellation) and its text. */
+export const businessPolicyInputSchema = z.strictObject({
+  title: z.string().trim().min(1)
+    .refine(codePointsAtMost(BUSINESS_POLICY_TITLE_MAX), `Expected at most ${BUSINESS_POLICY_TITLE_MAX} characters`)
+    .refine(noControlCharacters, "Expected one line of text")
+    .refine(postgresText, "Text is not valid in Postgres"),
+  text: z.string().trim().min(1)
+    .refine(codePointsAtMost(BUSINESS_POLICY_TEXT_MAX), `Expected at most ${BUSINESS_POLICY_TEXT_MAX} characters`)
+    .refine(postgresText, "Text is not valid in Postgres"),
+});
+export type BusinessPolicyInput = z.infer<typeof businessPolicyInputSchema>;
+/** BP-18: the whole list a save sends; titles are unique ignoring case, and `[]` means none. */
+export const businessPoliciesInputSchema = z.array(businessPolicyInputSchema).max(BUSINESS_POLICIES_MAX, `Expected at most ${BUSINESS_POLICIES_MAX} policies`)
+  .refine((policies) => new Set(policies.map((policy) => policy.title.toLowerCase())).size === policies.length, "Each policy must have its own title");
+
+/** BP-19: who set a fact and when: an owner's member ID, the instant, and the profile revision of that save. */
+export const factMarkSchema = z.strictObject({
+  setBy: idSchema,
+  setAt: instantSchema,
+  revision: z.number().int().min(2).max(2_147_483_647),
+});
+export type FactMark = z.infer<typeof factMarkSchema>;
+/** BP-18: a stored policy carries its own mark. */
+export const businessPolicySchema = z.strictObject({
+  title: z.string(),
+  text: z.string(),
+  setBy: idSchema,
+  setAt: instantSchema,
+  revision: z.number().int().min(2).max(2_147_483_647),
+});
+export type BusinessPolicy = z.infer<typeof businessPolicySchema>;
+/** BP-19: the facts with a single value, each with its mark; a key is absent when no mark is recorded. */
+export const MARKED_FACTS = ["displayName", "description", "services", "timeZone", "hours", "tone"] as const;
+export type MarkedFact = (typeof MARKED_FACTS)[number];
+export const factMarksSchema = z.strictObject({
+  displayName: factMarkSchema.optional(),
+  description: factMarkSchema.optional(),
+  services: factMarkSchema.optional(),
+  timeZone: factMarkSchema.optional(),
+  hours: factMarkSchema.optional(),
+  tone: factMarkSchema.optional(),
+});
+export type FactMarks = z.infer<typeof factMarksSchema>;
+
 /** BP-5: the profile as `GET /v1/business` and a save show it. */
 export const businessProfileSchema = z.strictObject({
   displayName: businessDisplayNameSchema,
@@ -79,6 +152,10 @@ export const businessProfileSchema = z.strictObject({
   postalAddress: postalAddressSchema.nullable(),
   description: businessDescriptionSchema.nullable(),
   services: businessServicesSchema,
+  hours: businessHoursSchema.nullable(),
+  tone: businessToneSchema.nullable(),
+  policies: z.array(businessPolicySchema),
+  factMarks: factMarksSchema,
   revision: z.number().int().min(1).max(2_147_483_647),
   updatedAt: instantSchema,
 });
@@ -94,6 +171,9 @@ export const businessProfileChangesSchema = z.strictObject({
   postalAddress: postalAddressSchema.nullable(),
   description: businessDescriptionSchema.nullable(),
   services: businessServicesSchema,
+  hours: businessHoursSchema.nullable(),
+  tone: businessToneSchema.nullable(),
+  policies: businessPoliciesInputSchema,
 }).partial().refine((changes) => Object.keys(changes).length > 0, "Name at least one field to change");
 export type BusinessProfileChanges = z.infer<typeof businessProfileChangesSchema>;
 
@@ -126,6 +206,11 @@ export const businessProfileReadSchema = z.object({
   // BP-10: an older API sends neither; the reader then shows an empty description and no services.
   description: z.string().nullable().optional(),
   services: z.array(z.string()).optional(),
+  // BP-21: an older API sends none of the company facts; the reader then shows them as not set.
+  hours: z.record(z.string(), z.object({ open: z.string(), close: z.string() }).nullable()).nullable().optional(),
+  tone: z.string().nullable().optional(),
+  policies: z.array(z.object({ title: z.string(), text: z.string(), setBy: z.string(), setAt: z.string(), revision: z.number().optional() })).optional(),
+  factMarks: z.record(z.string(), z.object({ setBy: z.string(), setAt: z.string(), revision: z.number().optional() })).optional(),
   revision: z.number().int(),
   updatedAt: z.string(),
 });

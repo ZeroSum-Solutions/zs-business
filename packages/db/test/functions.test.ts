@@ -75,6 +75,12 @@ const expectedPath: Record<string, string> = {
   "business_profiles_sync_name()": "pg_catalog, pg_temp",
   "business_profiles_tenant_name()": "pg_catalog, pg_temp",
   "business_profiles_time_zone_known()": "pg_catalog, pg_temp",
+  // Company facts (20261122100000_company_facts.sql, BP-16..BP-19): the shape checks and the marks guard.
+  "business_fact_mark_valid(jsonb)": "pg_catalog, pg_temp",
+  "business_fact_marks_valid(jsonb)": "pg_catalog, pg_temp",
+  "business_hours_valid(jsonb)": "pg_catalog, pg_temp",
+  "business_policies_valid(jsonb)": "pg_catalog, pg_temp",
+  "business_profiles_fact_marks_guard()": "pg_catalog, pg_temp",
   // Document intake (20261024100000_document_intake.sql): the job state moves, the rows guard, the box check, and the
   // catalog revision step (DL-2, DL-4, DL-12).
   "catalog_attributes_valid(jsonb)": "pg_catalog, pg_temp",

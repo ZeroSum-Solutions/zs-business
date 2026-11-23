@@ -1,11 +1,12 @@
 /**
  * The demo adapter's business profile (business-profile.md BP-5..BP-7, BP-11). It keeps the rules
  * the API enforces: any member reads it, only an owner saves, a save names the revision it started
- * from, a stale one is `stale_revision`, and field errors name their path. The data is in memory
+ * from, a stale one is `stale_revision`, and field errors name their path. A changed company fact gets a
+ * mark of who set it and when (BP-19); the demo has no member IDs, so the mark names the user. The data is in memory
  * and starts again on every page load, so nothing a visitor types here is ever stored.
  */
 import type { z } from "zod";
-import { updateBusinessProfileRequestSchema, type BusinessProfile, type BusinessProfileChanges } from "@zs/contracts";
+import { MARKED_FACTS, updateBusinessProfileRequestSchema, type BusinessProfile, type BusinessProfileChanges, type FactMark } from "@zs/contracts";
 import { demoError } from "../errors";
 import type { BusinessApi, WriteOptions } from "../types";
 import { DEMO_BUSINESS } from "./seed";
@@ -37,12 +38,16 @@ export interface DemoBusinessInternals {
 export function createDemoBusiness(ctx: DemoBusinessContext): BusinessApi & DemoBusinessControls & DemoBusinessInternals {
   let profile: BusinessProfile = {
     displayName: DEMO_BUSINESS, legalName: null, phoneE164: null, timeZone: null, currency: "USD",
-    postalAddress: null, description: null, services: [], revision: 1, updatedAt: ctx.now().toISOString(),
+    postalAddress: null, description: null, services: [], hours: null, tone: null, policies: [], factMarks: {},
+    revision: 1, updatedAt: ctx.now().toISOString(),
   };
 
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
   /** A key set to null clears it; an absent key stays as it was. */
-  function apply(changes: BusinessProfileChanges): void {
+  function apply(changes: BusinessProfileChanges, setBy = ctx.actor().userId): void {
     const next: BusinessProfile = { ...profile, revision: profile.revision + 1, updatedAt: ctx.now().toISOString() };
+    const mark: FactMark = { setBy, setAt: next.updatedAt, revision: next.revision };
     if (changes.displayName !== undefined) next.displayName = changes.displayName;
     if (changes.legalName !== undefined) next.legalName = changes.legalName;
     if (changes.phoneE164 !== undefined) next.phoneE164 = changes.phoneE164;
@@ -51,6 +56,20 @@ export function createDemoBusiness(ctx: DemoBusinessContext): BusinessApi & Demo
     if (changes.postalAddress !== undefined) next.postalAddress = changes.postalAddress;
     if (changes.description !== undefined) next.description = changes.description;
     if (changes.services !== undefined) next.services = changes.services;
+    if (changes.hours !== undefined) next.hours = changes.hours;
+    if (changes.tone !== undefined) next.tone = changes.tone;
+    if (changes.policies !== undefined) {
+      next.policies = changes.policies.map((policy) =>
+        profile.policies.find((old) => old.title === policy.title && old.text === policy.text) ?? { ...policy, ...mark });
+    }
+    // A cleared fact loses its mark; a changed one gets this save's.
+    const marks = { ...profile.factMarks };
+    for (const fact of MARKED_FACTS) {
+      const value = next[fact];
+      if (value === null || (Array.isArray(value) && value.length === 0)) delete marks[fact];
+      else if (!same(value, profile[fact])) marks[fact] = mark;
+    }
+    next.factMarks = marks;
     profile = next;
   }
 

@@ -199,7 +199,7 @@ describe("plan", () => {
 
 const BUSINESS: BusinessProfile = {
   displayName: DEMO_BUSINESS, legalName: "Halden & Rowe Ltd", phoneE164: "+442079460000", timeZone: "Europe/London", currency: "EUR",
-  postalAddress: { line1: "12 Mill Lane", city: "Leeds", country: "GB" }, description: null, services: [], revision: 2, updatedAt: "2026-10-23T10:00:00.000Z",
+  postalAddress: { line1: "12 Mill Lane", city: "Leeds", country: "GB" }, description: null, services: [], hours: null, tone: null, policies: [], factMarks: {}, revision: 2, updatedAt: "2026-10-23T10:00:00.000Z",
 };
 const seedBusiness = (client: QueryClient) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).business, BUSINESS);
 const escaped = (text: string) => text.replaceAll("&", "&amp;");

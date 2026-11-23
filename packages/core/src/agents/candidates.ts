@@ -1,6 +1,7 @@
 // M6 candidates and per-inquiry checks (agents.md G-7, G-8, G-9). Original code. The run calls
 // these before the model, and the draft action calls checkCandidate again under its locks.
-import type { FollowUpPrompt, FollowUpSettings, FollowUpSkipReason } from "@zs/contracts";
+import { companyFactsForPrompt, type FollowUpPrompt, type FollowUpSettings, type FollowUpSkipReason } from "@zs/contracts";
+import { readCompanyFacts } from "../business/facts.js";
 import type { Transaction } from "@zs/db";
 import { consentBlock, usableEmail } from "../delivery/policy.js";
 import { contactDrafts } from "./controls.js";
@@ -87,16 +88,19 @@ export async function checkCandidate(
   return null;
 }
 
-/** G-9: what the model sees about one inquiry: the business, the customer and their request. */
+/**
+ * G-9: what the model sees about one inquiry: the business, the customer and their request. The
+ * business comes only from the company facts read (business-profile.md BP-20).
+ */
 export async function buildPrompt(tx: Transaction, tenantId: string, candidate: Candidate): Promise<FollowUpPrompt> {
+  const company = companyFactsForPrompt(await readCompanyFacts(tx, tenantId));
   const row = (await tx.query<{
-    business: string; customer: string; notes: string | null;
+    customer: string; notes: string | null;
     starts_at: Date | null; ends_at: Date | null; time_zone: string | null;
   }>(
-    `SELECT t.name AS business, coalesce(c.display_name, i.submitted_name) AS customer, i.notes,
+    `SELECT coalesce(c.display_name, i.submitted_name) AS customer, i.notes,
             b.starts_at, b.ends_at, r.time_zone
        FROM intake_items i
-       JOIN tenants t ON t.tenant_id=i.tenant_id
        JOIN crm_contacts c ON c.tenant_id=i.tenant_id AND c.id=i.contact_id
        LEFT JOIN bookings b ON b.tenant_id=i.tenant_id AND b.intake_item_id=i.id AND b.status='confirmed'
        LEFT JOIN booking_resources r ON r.tenant_id=b.tenant_id AND r.id=b.resource_id
@@ -104,7 +108,7 @@ export async function buildPrompt(tx: Transaction, tenantId: string, candidate: 
     [tenantId, candidate.intakeItemId],
   )).rows[0]!;
   return {
-    businessName: row.business,
+    company,
     customerName: row.customer,
     requestedAt: candidate.createdAt.toISOString(),
     notes: row.notes,
