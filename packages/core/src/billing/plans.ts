@@ -280,7 +280,7 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
   // lists for this business, so they do not take the current plan's read-only state.
   const facts = input.features ? await planFeatureFacts(tx, tenantId, input.now, input.deploy ?? { voiceWebhook: false }) : null;
   const currentSwitches = facts ? planFeatureSwitches(facts, readOnly) : null;
-  const offerSwitches = facts ? planFeatureSwitches(facts, false) : null;
+  const offerSwitches = facts ? planFeatureSwitches(facts, false, true) : null;
   return billingPlanSchema.parse({
     billingProvider: row?.billing_provider ?? "stripe",
     status: row?.status ?? "none",
@@ -299,7 +299,7 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
     readOnlyAfter: iso(row?.read_only_after ?? null),
     readOnly,
     limits,
-    ...(currentSwitches ? { features: planFeatures(limits, currentSwitches) } : {}),
+    ...(currentSwitches ? { features: planFeatures(limits, currentSwitches), freeTier: row?.free_tier ?? false } : {}),
     catalog: (Object.values(PLAN_CATALOG) as PlanCatalogEntry[]).map((entry) => offer(entry, invited, offerSwitches)),
     extraConnectionPrice: EXTRA_CONNECTION_PRICE,
     currency: "usd",

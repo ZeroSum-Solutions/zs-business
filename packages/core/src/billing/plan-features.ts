@@ -26,6 +26,11 @@ export interface PlanFeatureFacts {
   readonly blockedBy: PlanFeatureBlock | null;
   readonly approved: boolean;
   readonly equipped: boolean;
+  /**
+   * PL-27: the budget block comes from the current plan's daily model cap alone (the kind's own cap has room). The
+   * offers drop it: each other plan has its own cap.
+   */
+  readonly planCapOnly?: boolean;
 }
 
 /** What only the API process knows, passed in by the session: the routes this deploy mounts. */
@@ -61,7 +66,8 @@ export async function planFeatureFacts(
     const status = await agentKindStatus(tx, tenantId, kind, now);
     const blockedBy = planFeatureBlock(status.blockedBy);
     if (kind === "inquiry_followup") {
-      facts[kind] = { running: live(kind, null), blockedBy, approved: true, equipped: true };
+      const planCapOnly = status.blockedBy === "cost_cap" && status.costSpentMicros < status.settings.maxCostMicrosPerDay;
+      facts[kind] = { running: live(kind, null), blockedBy, approved: true, equipped: true, planCapOnly };
       continue;
     }
     // A run queues only from the current revision, under a standing approval that names its digest (G-19, A-15).
@@ -94,6 +100,11 @@ export async function planFeatureFacts(
 }
 
 /** PL-26: every feature's switch from its facts; `readOnly` (PL-8) puts the whole list off, the runtime refusing every run. */
-export function planFeatureSwitches(facts: Readonly<Record<PlanFeatureKind, PlanFeatureFacts>>, readOnly: boolean): Record<PlanFeatureKind, PlanFeatureSwitch> {
-  return Object.fromEntries(PLAN_FEATURE_KINDS.map((kind) => [kind, planFeatureSwitch({ readOnly, ...facts[kind] })])) as Record<PlanFeatureKind, PlanFeatureSwitch>;
+export function planFeatureSwitches(
+  facts: Readonly<Record<PlanFeatureKind, PlanFeatureFacts>>, readOnly: boolean, offer = false,
+): Record<PlanFeatureKind, PlanFeatureSwitch> {
+  return Object.fromEntries(PLAN_FEATURE_KINDS.map((kind) => {
+    const { planCapOnly, ...fact } = facts[kind];
+    return [kind, planFeatureSwitch({ readOnly, ...fact, ...(offer && planCapOnly ? { blockedBy: null } : {}) })];
+  })) as Record<PlanFeatureKind, PlanFeatureSwitch>;
 }

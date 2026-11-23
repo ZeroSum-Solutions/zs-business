@@ -179,7 +179,7 @@ export interface CostFigures {
 }
 export async function costFigures(tx: Transaction, tenantId: string, kind: AgentKind, controls: AgentControls, now: Date): Promise<CostFigures> {
   const spent = await costSpent(tx, tenantId, kind, now);
-  const cap = await effectiveCostCap(tx, tenantId, controls.maxCostMicrosPerDay, now);
+  const cap = await effectiveCostCap(tx, tenantId, kind, controls.maxCostMicrosPerDay, now);
   return { spent, cap, warning: atWarningLine(spent, cap) };
 }
 

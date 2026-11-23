@@ -5,11 +5,11 @@ import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   CANCEL_BOOKING_ACTION, FREE_PLAN_LIMITS, MESSAGE_SEND_REQUESTED, PLAN_CATALOG, planModelCapMicros,
-  type ActionCommand, type HubPlan, type PlanInterval,
+  type ActionCommand, type AgentKind, type HubPlan, type PlanInterval,
 } from "@zs/contracts";
 import {
   createAutomationAdmin, createBillingWorker, createDispatcher, createSession, createStripeSubscriptionReader,
-  dueFollowUpTenants, markSelfSignup, planGate, setPlanGrant, type ActionHandler, type Session,
+  dueFollowUpTenants, lockTenantPlan, markSelfSignup, planGate, setPlanGrant, type ActionHandler, type Session,
 } from "../../src/index.js";
 import { reserveModelCall } from "../../src/agents/cost.js";
 import { startFakeStripePlans, type FakeStripePlans } from "./fake-stripe-plans.js";
@@ -113,9 +113,26 @@ async function sendEmail(tenantId: string, actionType = "inbox.reply.send", chan
 const emailsUsed = async (tenantId: string) => (await b.h.rows<{ n: number }>(
   "SELECT count(*)::int AS n FROM outbox WHERE tenant_id=$1 AND event_type=$2 AND payload->>'channel'='email'", [tenantId, MESSAGE_SEND_REQUESTED]))[0]!.n;
 
-const reserve = (tenantId: string, costMicros: number) => b.h.database.db.tenant(tenantId, (tx) => reserveModelCall(tx, tenantId, {
-  callKeyBase: `test:${randomUUID()}`, runId: null, kind: "appointment_reminder", subjectId: randomUUID(), lane: "no_personal_data", model: "fake-model",
+const reserve = (tenantId: string, costMicros: number, kind: AgentKind = "appointment_reminder") => b.h.database.db.tenant(tenantId, (tx) => reserveModelCall(tx, tenantId, {
+  callKeyBase: `test:${randomUUID()}`, runId: null, kind, subjectId: randomUUID(), lane: "no_personal_data", model: "fake-model",
 }, { inputTokens: 1, outputTokens: 1, costMicros }, b.h.clock.now()));
+/** `count` emails the tenant already queued, written straight to `actions` and `outbox` (a paid plan's allowance is large). */
+const seedEmails = (tenantId: string, count: number) => b.h.service(async (tx) => {
+  const actorId = (await tx.query<{ id: string }>("SELECT id FROM tenant_members WHERE tenant_id=$1 AND role='owner' LIMIT 1", [tenantId])).rows[0]!.id;
+  await tx.query(
+    `WITH a AS (
+       INSERT INTO actions (tenant_id,id,actor_id,action_type,target,payload,idempotency_key,result,created_at)
+       SELECT $1::uuid, gen_random_uuid(), $2, 'inbox.reply.send', jsonb_build_object('tenantId',$1::text,'type','test_message','id',gen_random_uuid()),
+              '{}'::jsonb, 'seed-' || gen_random_uuid(), '{}'::jsonb, $3 FROM generate_series(1, $4) RETURNING id)
+     INSERT INTO outbox (tenant_id,id,action_id,event_type,payload,created_at)
+     SELECT $1::uuid, gen_random_uuid(), id, $5, '{"channel":"email"}'::jsonb, $3 FROM a`,
+    [tenantId, actorId, b.h.clock.now(), count, MESSAGE_SEND_REQUESTED]);
+});
+const setKindCap = (tenantId: string, kind: AgentKind, micros: number, enabled = false) => b.h.service((tx) => tx.query(
+  `INSERT INTO agent_settings (tenant_id, agent_kind, enabled, updated_at, max_cost_micros_per_day, quiet_start_minute, quiet_end_minute, time_zone)
+   VALUES ($1,$2,$3,$4,$5,0,0,'UTC')
+   ON CONFLICT (tenant_id, agent_kind) DO UPDATE SET max_cost_micros_per_day=EXCLUDED.max_cost_micros_per_day, enabled=EXCLUDED.enabled`,
+  [tenantId, kind, enabled, b.h.clock.now(), micros]));
 
 describe("a self-signed-up tenant holds the free allowances (PL-27)", () => {
   it("sign-up gives the free limits, never read-only, and the plan read names them", async () => {
@@ -174,7 +191,6 @@ describe("a self-signed-up tenant holds the free allowances (PL-27)", () => {
 
   it("two concurrent sends at the last email slot: exactly one wins", async () => {
     const tenantId = await signUp();
-    await b.h.service((tx) => tx.query("UPDATE tenant_plans SET free_tier=true WHERE tenant_id=$1", [tenantId]));
     for (let i = 0; i < FREE_PLAN_LIMITS.emailsPerMonth - 1; i += 1) await sendEmail(tenantId);
     const results = await Promise.allSettled([sendEmail(tenantId), sendEmail(tenantId)]);
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
@@ -237,6 +253,98 @@ describe("a self-signed-up tenant holds the free allowances (PL-27)", () => {
     await b.deliver(b.event("customer.subscription.deleted", { ...otherEnded }));
     await worker().runOnce();
     expect(await (await planSession(operatorMade)).getBillingPlan()).toMatchObject({ status: "canceled", readOnly: true });
+    // PL-8: a read-only tenant makes no model call either, not even a template suggestion's.
+    expect(await reserve(operatorMade, 1)).toMatchObject({ status: "cost_cap", capMicros: 0 });
+  });
+});
+
+describe("the edges of the allowances (PL-27)", () => {
+  it("a paid plan's email row is enforced at its own number", async () => {
+    const tenantId = await signUp();
+    await subscribe(tenantId, { plan: "studio", status: "active" });
+    const limit = PLAN_CATALOG.studio.limits.emailsPerMonth;
+    await seedEmails(tenantId, limit - 1);
+    await expect(sendEmail(tenantId)).resolves.toBeDefined();
+    await expect(sendEmail(tenantId)).rejects.toMatchObject({ details: { reason: "plan_limit", resource: "emailsPerMonth", limit, used: limit } });
+  });
+
+  it("a kind's own budget above the plan's cap is clamped to the plan's", async () => {
+    const tenantId = await signUp();
+    await subscribe(tenantId, { plan: "studio", status: "active" });
+    await setKindCap(tenantId, "appointment_reminder", 2_000_000);
+    const cap = planModelCapMicros(PLAN_CATALOG.studio.limits);
+    expect(await reserve(tenantId, cap + 1)).toMatchObject({ status: "cost_cap", capMicros: cap });
+    expect(await reserve(tenantId, cap)).toMatchObject({ status: "reserved", capMicros: cap });
+  });
+
+  it("a model-assisted kind gets no model call on a plan without model agents, and its drafts are refused", async () => {
+    const tenantId = await signUp();
+    expect(await reserve(tenantId, 1, "inquiry_followup")).toMatchObject({ status: "cost_cap", capMicros: 0 });
+    await expect(gate(tenantId, "agent.followup.draft", {})).rejects.toMatchObject(limitOf("modelAgents", 0));
+    // After an upgrade the same kind reserves under the plan's cap.
+    await subscribe(tenantId, { plan: "studio", status: "active" });
+    expect(await reserve(tenantId, 1, "inquiry_followup")).toMatchObject({ status: "reserved" });
+  });
+
+  it("a reservation waits for a plan change under way and reads the cap it leaves", async () => {
+    const tenantId = await signUp();
+    await subscribe(tenantId, { plan: "studio", status: "active" });
+    const free = planModelCapMicros(FREE_PLAN_LIMITS);
+    let locked!: () => void;
+    let release!: () => void;
+    const lockTaken = new Promise<void>((resolve) => { locked = resolve; });
+    const done = new Promise<void>((resolve) => { release = resolve; });
+    // A plan event: under the plan lock, the subscription lapses, so this free tenant drops to the free cap.
+    const change = b.h.service(async (tx) => {
+      await lockTenantPlan(tx, tenantId);
+      await tx.query("UPDATE tenant_plans SET read_only_after=$2 WHERE tenant_id=$1", [tenantId, new Date(b.h.clock.now().getTime() - 1)]);
+      locked();
+      await done;
+    });
+    await lockTaken;
+    let settled = false;
+    const reservation = reserve(tenantId, free + 1).finally(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(settled).toBe(false);
+    release();
+    await change;
+    expect(await reservation).toMatchObject({ status: "cost_cap", capMicros: free });
+  });
+
+  it("a free tenant whose first payment is still incomplete keeps the free allowances", async () => {
+    const tenantId = await signUp();
+    await subscribe(tenantId, { plan: "pro", status: "incomplete" });
+    expect(await (await planSession(tenantId)).getBillingPlan()).toMatchObject({ status: "incomplete", limits: FREE_PLAN_LIMITS });
+    await expect(invite(await planSession(tenantId))).rejects.toMatchObject(limitOf("seats", 1));
+  });
+
+  it("the native Shopify link is not a managed connection", async () => {
+    const tenantId = await signUp();
+    await b.h.service(async (tx) => {
+      const member = (await tx.query<{ id: string }>("SELECT id FROM tenant_members WHERE tenant_id=$1 AND role='owner' LIMIT 1", [tenantId])).rows[0]!;
+      await tx.query(
+        `INSERT INTO connections (tenant_id,id,tier,toolkit,external_account_id,account_domain,account_label,status,connected_by,last_checked_at,created_at,updated_at)
+         VALUES ($1,$2,'native','shopify',$3,$4,'Store','active',$5,$6,$6,$6)`,
+        [tenantId, randomUUID(), `gid://shopify/Shop/${Date.now()}${Math.floor(Math.random() * 1e6)}`, `s${randomUUID().slice(0, 8)}.myshopify.com`, member.id, b.h.clock.now()]);
+    });
+    await expect(gate(tenantId, "connection.connect")).resolves.toBeUndefined();
+  });
+
+  it("the plan read says a tenant is free, and the offers do not take the free cap's budget block", async () => {
+    const tenantId = await signUp();
+    // Switched on before a downgrade: the free cap (0 for this kind) blocks it, its own budget has room.
+    await setKindCap(tenantId, "inquiry_followup", 1_000_000, true);
+    // The follow-up runner is live, so the feature's first reason is its budget (PL-26).
+    await b.h.service((tx) => tx.query(
+      `INSERT INTO runner_heartbeats (runner, beat_at, fresh_for_seconds) VALUES ('followup',$1,3600)
+       ON CONFLICT (runner) DO UPDATE SET beat_at=$1, fresh_for_seconds=3600`, [b.h.clock.now()]));
+    const view = await (await planSession(tenantId)).getBillingPlan({ features: true });
+    expect(view.freeTier).toBe(true);
+    const studio = view.catalog.find((offer) => offer.plan === "studio")!;
+    expect(studio.features?.find((feature) => feature.kind === "inquiry_followup")?.offReason).not.toBe("no_budget");
+    expect((await (await planSession(await b.tenant())).getBillingPlan({ features: true })).freeTier).toBe(false);
+    // Without `features` the key is left out, as PL-26's are.
+    expect(await (await planSession(tenantId)).getBillingPlan()).not.toHaveProperty("freeTier");
   });
 });
 

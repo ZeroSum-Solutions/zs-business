@@ -27,6 +27,7 @@ import {
 } from "../agents/cost.js";
 import { abortable, type TextModel, type TextModelRequest } from "../agents/model.js";
 import { derivedId } from "../edge/ids.js";
+import { lockTenantPlanShared } from "../billing/plan-gate.js";
 
 /** G-18: the lane a suggestion goes to. */
 export const TEMPLATE_SUGGESTION_LANE = "no_personal_data" as const;
@@ -100,7 +101,9 @@ export async function suggestTemplate(
   const reservation = await read(async (tx) => {
     // G-15: the cost lock is the kind's settings row, so the row must exist before the lock is taken:
     // with no row, two suggestions would both read the default cap unlocked. A missing row is the
-    // kind's defaults with the kind off (G-14), which is what this writes.
+    // kind's defaults with the kind off (G-14), which is what this writes. The plan lock comes first (PL-27, as in
+    // `reserveModelCall`), before the row write takes the row.
+    await lockTenantPlanShared(tx, tenantId);
     await tx.query(
       `INSERT INTO agent_settings (tenant_id, agent_kind, config, updated_at) VALUES ($1,$2,$3,$4)
        ON CONFLICT (tenant_id, agent_kind) DO NOTHING`,
@@ -162,7 +165,7 @@ export async function suggestTemplate(
     const controls = await loadControls(tx, tenantId, false, kind);
     const at = now();
     const spent = await costSpent(tx, tenantId, kind, at);
-    return { spent, cap: await effectiveCostCap(tx, tenantId, controls.maxCostMicrosPerDay, at) };
+    return { spent, cap: await effectiveCostCap(tx, tenantId, kind, controls.maxCostMicrosPerDay, at) };
   });
   return {
     agentKind: kind, channel, subject: checked.subject, body: checked.body, variables: [...checked.variables],

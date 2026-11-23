@@ -322,6 +322,11 @@ export const billingPlanSchema = z.strictObject({
   limits: limitsSchema.nullable(),
   /** PL-26: what `limits` names, each feature on or off for this business. Optional like `offerSchema.features`. */
   features: z.array(planFeatureSchema).optional(),
+  /**
+   * PL-27: true for a self-signed-up business, which falls back to the free allowances (never read-only) when no paid
+   * plan or grant applies. Sent with `features` only, for the same reason: the dashboard's schema is strict.
+   */
+  freeTier: z.boolean().optional(),
   catalog: z.array(offerSchema),
   extraConnectionPrice: z.number().int(),
   currency: z.literal("usd"),

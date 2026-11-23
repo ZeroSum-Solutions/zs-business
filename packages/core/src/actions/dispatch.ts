@@ -19,7 +19,7 @@ import {
   type Target,
 } from "@zs/contracts";
 import { DatabaseUnavailable, type ScopedDatabase, type Transaction } from "@zs/db";
-import { emailAllowanceGate, planGate } from "../billing/plan-gate.js";
+import { emailAllowanceGate, lockForGates, planGate } from "../billing/plan-gate.js";
 
 export type DispatchConfig = Readonly<Record<string, unknown>>;
 export interface DispatchContext<Config = DispatchConfig> {
@@ -199,6 +199,9 @@ export function createDispatcher<Config = DispatchConfig>(
           throw new BindingMismatch();
         // Reads never go backward within one dispatch: a clock that steps back is held at the
         // latest instant seen, so an expiry an earlier read reached stays reached.
+        // PL-27: an action a gate decides under a lock waits for it before the clock is read, so the gates and the
+        // handler see the instant after the wait (a lock already held is taken again at no cost).
+        await lockForGates(tx, binding.tenantId, binding.actionType);
         let latest = -Infinity;
         const readClock = () => {
           const instant = ctx.clock.now().getTime();

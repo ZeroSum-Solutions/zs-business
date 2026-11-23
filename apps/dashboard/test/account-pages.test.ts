@@ -51,6 +51,22 @@ describe("plan", () => {
     expect(JSON.stringify(failed)).not.toMatch(/refund/i);
   });
 
+  // plans.md PL-27: a self-signed-up business is never told it turns read-only, and with no paid plan it sees its free allowances.
+  it("tells a free-tier business it moves to the free allowances and shows them (PL-27)", () => {
+    const failed = billingNotice(plan({ freeTier: true, status: "past_due", paymentFailedAt: "2026-11-14T00:00:00.000Z", readOnlyAfter: NEAR_MIDNIGHT_UTC }), "UTC");
+    expect(failed?.text).toContain("the business moves to the free allowances");
+    expect(failed?.text).not.toMatch(/read-only/);
+    const ending = plan({ freeTier: true, status: "canceled", readOnlyAfter: NEAR_MIDNIGHT_UTC });
+    expect(billingNotice(ending, "UTC", Date.parse(NEAR_MIDNIGHT_UTC) - 1)?.text).toContain("moves to the free allowances");
+    expect(billingNotice(ending, "UTC", Date.parse(NEAR_MIDNIGHT_UTC))).toBeNull();
+    const free = plan({ freeTier: true, status: "none", plan: null, interval: null,
+      limits: { ...base.catalog[0]!.limits, seats: 1, managedConnections: 1, automationTokens: 1, emailsPerMonth: 100 } });
+    const html = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, free));
+    expect(html).toContain("Free allowances");
+    expect(html).toContain("100 emails a month");
+    expect(html).toContain("Choose a plan");
+  });
+
   // plans.md PL-22: an operator-granted plan shows "Included plan: <name>" and its end, with no checkout prompt or billing notice.
   it("shows an operator-granted plan instead of checkout prompts and billing notices (PL-22)", () => {
     const unlimited = plan({ grant: { source: "grant", plan: "pro", grantedUntil: NEAR_MIDNIGHT_UTC }, status: "none", plan: null, interval: null, limits: { ...base.catalog[2]!.limits } });

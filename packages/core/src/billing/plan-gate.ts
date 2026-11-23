@@ -1,10 +1,10 @@
 // The PL-8 plan gate and the plan lock. Original code. The dispatcher calls `planGate` inside
 // every action's transaction; this module imports nothing from the action layer.
 import {
-  CANCEL_BOOKING_ACTION, CONFIRMATION_SEND_ACTION, Conflict, EMAIL_ALLOWANCE_WINDOW_DAYS, FREE_PLAN_LIMITS,
+  CANCEL_BOOKING_ACTION, CONFIRMATION_SEND_ACTION, Conflict, EMAIL_ALLOWANCE_WINDOW_DAYS, ENTITLED_PLAN_STATUSES, FREE_PLAN_LIMITS,
   FREE_SITE_PUBLISHES_PER_DAY, MESSAGE_SEND_REQUESTED, PLAN_CATALOG, PLAN_CHECKOUT_CREATE_ACTION, PLAN_SITE_PUBLISHES_PER_DAY,
-  planModelCapMicros, REMINDER_QUEUE_ACTION, REVIEW_QUEUE_ACTION, SELF_CANCEL_ACTION, SELF_RESCHEDULE_ACTION,
-  type HubPlan, type PlanLimits,
+  planModelCapMicros, REMINDER_QUEUE_ACTION, REVIEW_QUEUE_ACTION,
+  type HubPlan, type PlanLimits, type PlanStatus,
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 
@@ -12,6 +12,24 @@ import type { Transaction } from "@zs/db";
 export async function lockTenantPlan(tx: Transaction, tenantId: string): Promise<void> {
   // The key uses Postgres's own UUID spelling, so "ABC…" and "abc…" (one tenant) take one lock.
   await tx.query("SELECT pg_advisory_xact_lock(hashtextextended('plan:' || $1::uuid::text, 0))", [tenantId]);
+}
+
+/**
+ * PL-27: the plan lock in shared mode. A model-call reservation takes it before its settings lock, so a plan change
+ * (which takes the lock exclusively) cannot commit between the reservation's cap read and its insert. Reservations
+ * do not wait on each other.
+ */
+export async function lockTenantPlanShared(tx: Transaction, tenantId: string): Promise<void> {
+  await tx.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('plan:' || $1::uuid::text, 0))", [tenantId]);
+}
+
+/**
+ * PL-27: one tenant's refusable email sends count and queue one at a time. A lock of its own, not the plan lock: a
+ * plan event holds the plan lock across a Stripe read, and a send must not wait on the network. Taken after the plan
+ * lock when an action holds both, never before it.
+ */
+export async function lockTenantEmails(tx: Transaction, tenantId: string): Promise<void> {
+  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended('plan-email:' || $1::uuid::text, 0))", [tenantId]);
 }
 
 /** PL-21: the grant columns of `tenant_plans`, as the gate and the reads select them. */
@@ -27,11 +45,12 @@ export function activeGrant(row: PlanGrantColumns | null | undefined, now: Date)
 /** PL-1, PL-21, PL-27: the plan columns every reader of the limits and of read-only selects. */
 export interface PlanStandingRow extends PlanGrantColumns {
   readonly plan: HubPlan | null;
+  readonly status: PlanStatus;
   readonly extra_connections: number;
   readonly read_only_after: Date | null;
   readonly free_tier: boolean;
 }
-export const STANDING_COLUMNS = `plan, extra_connections, read_only_after, free_tier, ${GRANT_COLUMNS}`;
+export const STANDING_COLUMNS = `plan, status, extra_connections, read_only_after, free_tier, ${GRANT_COLUMNS}`;
 
 /** PL-27: where the limits in force come from. */
 export type PlanSource = "grant" | "plan" | "free" | "comped";
@@ -47,7 +66,9 @@ export interface PlanStanding {
 /**
  * PL-8, PL-21, PL-25, PL-27: the first that applies. An active grant; then a tenant past `read_only_after`, which is
  * read-only on its provider plan's limits, unless it is a self-signed-up (`free_tier`) tenant, which drops to the free
- * allowances instead and is never read-only; then the provider plan; then the free marker; otherwise comped.
+ * allowances instead and is never read-only; then the provider plan; then the free marker; otherwise comped. A free
+ * tenant holds its provider plan only while the subscription is entitled (trialing, active, past_due): an unpaid
+ * `incomplete` first payment gives it nothing above the free allowances.
  */
 export function planStanding(row: PlanStandingRow | null | undefined, now: Date): PlanStanding {
   const granted = activeGrant(row, now);
@@ -55,7 +76,7 @@ export function planStanding(row: PlanStandingRow | null | undefined, now: Date)
   if (!row) return { source: "comped", plan: null, limits: null, readOnly: false };
   const lapsed = row.read_only_after !== null && row.read_only_after.getTime() <= now.getTime();
   if (lapsed && row.free_tier) return { source: "free", plan: null, limits: { ...FREE_PLAN_LIMITS }, readOnly: false };
-  if (row.plan !== null) {
+  if (row.plan !== null && (!row.free_tier || (ENTITLED_PLAN_STATUSES as readonly string[]).includes(row.status))) {
     const base = PLAN_CATALOG[row.plan].limits;
     return {
       source: "plan", plan: row.plan, readOnly: lapsed,
@@ -86,15 +107,28 @@ export function sitePublishLimit(row: PlanStandingRow | null | undefined, now: D
   return standing.source === "free" ? FREE_SITE_PUBLISHES_PER_DAY : null;
 }
 
-/** PL-27: the plan's daily model cap per agent kind in micros, or null for a comped tenant (only the kind's own cap). */
-export async function planModelCap(tx: Transaction, tenantId: string, now: Date): Promise<number | null> {
-  const limits = planLimits(await readPlanRow(tx, tenantId), now);
-  return limits ? planModelCapMicros(limits) : null;
+/** PL-27: the model-assisted agent kinds, which a plan without `modelAgents` never runs. */
+export const MODEL_AGENT_KINDS: ReadonlySet<string> = new Set(["inquiry_followup"]);
+
+/**
+ * PL-27: the plan's daily model cap for one agent kind in micros, or null for a comped tenant (only the kind's own
+ * cap). A model-assisted kind on a plan without `modelAgents` gets 0, so a run that was open before a downgrade or a
+ * lapse reserves no further model call. A read-only tenant (PL-8) gets 0 for every kind: model calls that do not go
+ * through an action (template suggestions) stop with the rest of its work.
+ */
+export async function planModelCap(tx: Transaction, tenantId: string, kind: string, now: Date): Promise<number | null> {
+  const row = await readPlanRow(tx, tenantId);
+  if (!row) return null;
+  const standing = planStanding(row, now);
+  if (standing.readOnly) return 0;
+  const limits = standing.limits;
+  if (!limits) return null;
+  return !limits.modelAgents && MODEL_AGENT_KINDS.has(kind) ? 0 : planModelCapMicros(limits);
 }
 
-interface PlanGateRow extends PlanStandingRow { readonly status: string }
+type PlanGateRow = PlanStandingRow;
 const readPlanRow = async (tx: Transaction, tenantId: string): Promise<PlanGateRow | undefined> =>
-  (await tx.query<PlanGateRow>(`SELECT status, ${STANDING_COLUMNS} FROM tenant_plans WHERE tenant_id=$1`, [tenantId])).rows[0];
+  (await tx.query<PlanGateRow>(`SELECT ${STANDING_COLUMNS} FROM tenant_plans WHERE tenant_id=$1`, [tenantId])).rows[0];
 
 /** PL-25: refuse one more publish when the tenant has used its releases of the last 24 hours. */
 async function enforceSitePublishLimit(tx: Transaction, tenantId: string, row: PlanGateRow | undefined, now: Date): Promise<void> {
@@ -145,7 +179,8 @@ const COUNTED: Readonly<Record<string, { resource: keyof PlanLimits; count: stri
   "member.invite": { resource: "seats", count: "SELECT count(*)::int AS used FROM tenant_members WHERE tenant_id=$1" },
   "connection.connect": {
     resource: "managedConnections",
-    count: "SELECT count(*)::int AS used FROM connections WHERE tenant_id=$1 AND status <> 'disconnected'",
+    // PL-27: the native Shopify link is the hub's own store (connections.md C-21), not a managed connection.
+    count: "SELECT count(*)::int AS used FROM connections WHERE tenant_id=$1 AND status <> 'disconnected' AND tier <> 'native'",
   },
   "automation.token.create": {
     resource: "automationTokens",
@@ -155,12 +190,10 @@ const COUNTED: Readonly<Record<string, { resource: keyof PlanLimits; count: stri
   "tenant.template.apply": { resource: "bookableResources", count: "SELECT count(*)::int AS used FROM booking_resources WHERE tenant_id=$1" },
 };
 
-/** PL-27: the agent kinds that call a model to draft, held by the plan's `modelAgents`. */
-const MODEL_AGENT_KINDS: ReadonlySet<string> = new Set(["inquiry_followup"]);
 /** PL-27: true when the action would switch on or start a model-assisted agent. */
 function startsModelAgent(actionType: string, payload: unknown): boolean {
   const fields = typeof payload === "object" && payload !== null ? payload as Record<string, unknown> : {};
-  if (actionType === "agent.run.start") return true; // the follow-up agent's run (G-6)
+  if (actionType === "agent.run.start" || actionType === "agent.followup.draft") return true; // the follow-up agent's run and its drafts (G-6)
   if (actionType === "agent.settings.update") return fields.enabled === true;
   if (actionType === "agent.kind.settings.update")
     return fields.enabled === true && typeof fields.agentKind === "string" && MODEL_AGENT_KINDS.has(fields.agentKind);
@@ -168,17 +201,22 @@ function startsModelAgent(actionType: string, payload: unknown): boolean {
 }
 
 /**
- * PL-27: the actions that may queue an email. They take the plan lock before the handler, so the count after the
- * handler is the one that stays true until commit. Booking notices are counted but never refused: a customer's own
- * cancel or move, and the owner's cancel, must not fail for a notice.
+ * PL-27: the actions that may queue a refusable email. They take the email lock before the handler, so the count
+ * after the handler is the one that stays true until commit. Booking notices (the confirmation send, which also
+ * carries a customer's cancel or move notice, and the owner's cancel) are counted but never refused, so they take no lock.
  */
-const EMAIL_SENDING_ACTIONS: ReadonlySet<string> = new Set([
-  "inbox.reply.send", REMINDER_QUEUE_ACTION, REVIEW_QUEUE_ACTION,
-  CONFIRMATION_SEND_ACTION, SELF_CANCEL_ACTION, SELF_RESCHEDULE_ACTION, CANCEL_BOOKING_ACTION,
-]);
-const EMAIL_NOTICE_ACTIONS: ReadonlySet<string> = new Set([
-  CONFIRMATION_SEND_ACTION, SELF_CANCEL_ACTION, SELF_RESCHEDULE_ACTION, CANCEL_BOOKING_ACTION,
-]);
+const EMAIL_SENDING_ACTIONS: ReadonlySet<string> = new Set(["inbox.reply.send", REMINDER_QUEUE_ACTION, REVIEW_QUEUE_ACTION]);
+const EMAIL_NOTICE_ACTIONS: ReadonlySet<string> = new Set([CONFIRMATION_SEND_ACTION, CANCEL_BOOKING_ACTION]);
+
+/**
+ * PL-8, PL-25, PL-27: the locks the gates decide under. The dispatcher takes them before it reads the clock, so a
+ * wait on a lock cannot leave a gate deciding at an instant that has passed (a grant ending meanwhile). The plan lock
+ * first, then the email lock: one order everywhere.
+ */
+export async function lockForGates(tx: Transaction, tenantId: string, actionType: string): Promise<void> {
+  if (COUNTED[actionType] !== undefined || actionType === SITE_PUBLISH_ACTION) await lockTenantPlan(tx, tenantId);
+  if (EMAIL_SENDING_ACTIONS.has(actionType)) await lockTenantEmails(tx, tenantId);
+}
 
 const limitRefusal = (resource: keyof PlanLimits, limit: number, used: number) =>
   new Conflict("The plan's limit is reached; choose a bigger plan", { reason: "plan_limit", resource, limit, used });
@@ -193,8 +231,8 @@ export async function planGate(tx: Transaction, tenantId: string, actionType: st
   const publishes = actionType === SITE_PUBLISH_ACTION;
   // Lock before reading, so a plan change that commits meanwhile is the one enforced. A publish takes the
   // same lock: its count spans the tenant's sites, which the per-site lock does not serialize (PL-25). An action
-  // that may queue an email takes it too, for the count `emailAllowanceGate` makes after the handler (PL-27).
-  if (counted || publishes || EMAIL_SENDING_ACTIONS.has(actionType)) await lockTenantPlan(tx, tenantId);
+  // that may queue an email takes the email lock, for the count `emailAllowanceGate` makes after the handler (PL-27).
+  await lockForGates(tx, tenantId, actionType);
   const row = await readPlanRow(tx, tenantId);
   if (!row) return;
   const standing = planStanding(row, now);
@@ -230,7 +268,7 @@ export async function emailAllowanceGate(
   const channel = typeof event.payload === "object" && event.payload !== null ? (event.payload as Record<string, unknown>).channel : undefined;
   if (channel !== "email" || EMAIL_NOTICE_ACTIONS.has(actionType)) return;
   // Taken before the handler for the listed actions; an unlisted one takes it here (a held lock is taken again at no cost).
-  await lockTenantPlan(tx, tenantId);
+  await lockTenantEmails(tx, tenantId);
   const limits = planLimits(await readPlanRow(tx, tenantId), now);
   if (!limits) return;
   const used = await emailsQueued(tx, tenantId, now);

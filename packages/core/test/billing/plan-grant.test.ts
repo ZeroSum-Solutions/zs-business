@@ -122,7 +122,7 @@ describe("a grant wins over the provider subscription (PL-21)", () => {
 
   it("the extra-connection add-on does not add to a grant's limits", () => {
     const now = new Date();
-    const base = { plan: "studio" as const, extra_connections: 5, granted_plan: "pro" as const, granted_until: null, read_only_after: null, free_tier: false };
+    const base = { plan: "studio" as const, status: "active" as const, extra_connections: 5, granted_plan: "pro" as const, granted_until: null, read_only_after: null, free_tier: false };
     expect(planLimits(base, now)).toMatchObject({ managedConnections: 10, automationTokens: 10 });
     expect(planLimits({ ...base, granted_plan: null }, now)).toMatchObject({ managedConnections: 8, automationTokens: 2 });
     expect(planLimits({ ...base, granted_until: now }, now)).toMatchObject({ managedConnections: 8 });
