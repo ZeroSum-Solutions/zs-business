@@ -226,5 +226,5 @@ State on 2026-11-22 (ZSB-68). The earlier rows of this table are closed.
 | B25 (ZSB-13) | Done |
 | ZSB-17 (PDF retention sweep) | Done: Devin shipped document intake to production with the sweep on. Intake stays parked for new scope (ZSB-47, ZSB-48 wait) |
 | ZSB-69 (B26) | Open, blocks the Stage 0 gate: Free and Solo have no model agents (`packages/contracts/src/plans.ts`), so a fresh sign-up cannot approve an agent-drafted reply until the entitlement is agreed |
-| ZSB-70 to ZSB-81 | Filed from `docs/vision.md`. ZSB-81 (decisions D-1 to D-5) comes first |
+| ZSB-70 to ZSB-83 | Filed from `docs/vision.md`. ZSB-81 (decisions D-1 to D-8) comes first. ZSB-82 is the OS1 companion study; ZSB-83 the `companion.md` contract |
 | C-17 (Shopify measurement) | Record the scheduled measurement once, then close. It gates nothing |

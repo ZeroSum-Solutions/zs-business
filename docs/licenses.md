@@ -9,6 +9,7 @@
 | Cloudflare agents, vibesdk (MIT), web-bot-auth (Apache-2.0) | permissive | Study only until a measured need. |
 | SeldonFrame | AGPL-3.0 | **Dropped (Devin, 2026-10-17); we build these parts ourselves.** Behaviour study is allowed: use the local running instance at `http://localhost:3000` like a user (click through, screenshots, note what it does). Never open its source folder `~/projects/tools/third-party/seldonframe`, never read its JS bundles or scripts (no REA `analyze_web_bundle`, `export_web_scripts`, `recover_javascript_sources`, `observe_web_execution` script bodies), never copy its UI text, names or assets. Write what you learn as requirements in our own words. |
 | HighLevel | proprietary SaaS | Behaviour notes and help docs only. Never copy its code, bundles, text or assets. |
+| OS1 `github.com/nickvasilescu/os1-her` | MIT | Reference for the business companion (`docs/reverse/os1-her.md`, ZSB-82). May read. Port only with the MIT notice in `NOTICE` and a header in each ported file. Never use its cloned film voice or film assets. |
 
 Projects in [integrations.md](integrations.md) (added 2026-10-22):
 
