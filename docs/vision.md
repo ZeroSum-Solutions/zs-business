@@ -75,6 +75,82 @@ orders lead the brand and marketing; their first job is the order reply. Solo se
 take bookings are the second lane; their first job is the booking reply. Any stage is welcome, from
 an idea to a large seller.
 
+## 4. Idea catalog
+
+Verdicts: **Keep** (build it in its stage), **Reshape** (build a safer or cheaper form), **Defer**
+(good, waits for a named gate), **Drop**. "Today" names what exists on `main`. ZAB means the
+`zs-agent-business` repo (launch, canvas, marketing engine).
+
+### Onboarding and planning
+
+| ID | Idea | Verdict | Today | Next |
+|---|---|---|---|---|
+| V-01 | Voice-first intake after sign-up | Reshape | No public sign-up (B09). Voice serves only uploaded audio and voicemail (`packages/core/src/transcription`). No owner microphone path | One resumable interview with an editable transcript; voice and text feed the same record (B17, B24, ZSB-75). Whether launch is voice-first or text-first is D-6. Voice never approves a recipient, an amount or a term (`direction.md` rule 5) |
+| V-02 | Routing that picks the next questions | Keep | Setup applies one of four templates (`packages/core/src/setup/handlers.ts`, `industry-templates.md`) | ZSB-70: a typed, resumable question graph with two entry points |
+| V-03 | New business: idea to plan from zero | Keep | Nothing in ZSB. ZAB-58 builds a guided start flow for 2027-01-14 | ZSB-70 and ZSB-71. Who builds the flow is D-3; records stay in ZSB |
+| V-04 | Existing business: problems and goals | Keep | Nothing | ZSB-70: its own first questions; confirm current tools and data before suggesting change |
+| V-05 | GenUI cards in the chat | Reshape | Nothing | A fixed set of typed cards only (URL, cited finding, correction, plan step). Never free HTML |
+| V-06 | Live website research, owner verifies | Reshape | Company facts with who set each are built (`packages/core/src/business/facts.ts`). No research fetcher | A read-only public-page fetcher. Page text is data, never an instruction (`direction.md` rule 4). Unconfirmed findings never enter company facts or drive an action |
+| V-07 | The plan decides which tools each owner needs | Keep, new core | No plan record and no plan-to-tool map. Only Hub plan limits (`plans.md`) | ZSB-70: versioned plan, phases, a capability catalog keyed to scopes, plan limits and dependencies; replanning keeps data and approvals |
+
+### Mobile tool suite
+
+| ID | Idea | Verdict | Today | Next |
+|---|---|---|---|---|
+| V-08 | Run 80 to 90 percent of the business from the phone | Keep, as the measure | Installable PWA, six areas, tested at 390x844 (`apps/dashboard`) | ZSB-72: a recurring job list per cohort; count handoffs off the phone. Validate before it goes in sales copy |
+| V-09 | Calendar and reminders | Keep | Built: booking, Google Calendar, templated reminders (`packages/core/src/templates/send.ts`) | Close the recipient gaps first (ZSB-58, ZSB-59) |
+| V-10 | Shopify connection, batch edits, AI descriptions | Keep reads, defer writes | Native and managed tiers read orders only (`shopify/production/shopify.app.toml`, `read_orders`). Listing in review | ZSB-77: one drafted description as a reviewed diff on a test store before batch writes. Depends on D-1 |
+| V-11 | Social media management | Keep | Only a deferred Google Business Profile contract (`social-publishing.md`) | Export and human posting first; ZSB-76 for direct posting |
+| V-12 | Website from the phone | Keep | Built: edit, preview, versioned publish, roll back (`packages/core/src/sites`, `apps/site-worker`) | Site from the plan and the confirmed facts; ZAB canvas or Mish authors, ZSB publishes (ZSB-71) |
+| V-13 | SEO and AEO | Keep basics | Nothing in ZSB. ZAB has an AEO builder (`marketing-engine/03-pipelines/aeo`) and `tools/aeo` | Crawlable pages first. Where customer AEO runs is D-3 |
+
+### AI content and marketing
+
+| ID | Idea | Verdict | Today | Next |
+|---|---|---|---|---|
+| V-14 | Phone video, an agent edits it into clips | Keep, in ZAB | ZAB cut pipeline handles phone footage, revisions and exports (`marketing-engine/03-pipelines/cut`) | ZSB holds media records and publish approvals (ZSB-71, ZSB-74). Measure render cost; check footage, music and likeness rights |
+| V-15 | Publish to Instagram, TikTok and X | Defer direct posting | Nothing | ZSB-76. Instagram needs professional accounts and permission; TikTok keeps unaudited direct posts private; X charges for API use and has automation rules |
+| V-16 | Trend research and content calendar | Reshape | Nothing in ZSB. ZAB has an internal calendar pipeline | ZSB-74: sourced ideas, a film list, scripts and a calendar the owner approves |
+| V-17 | Teleprompter and filming notes | Keep, after a device test | Nothing | ZSB-75 proves recording and upload recovery on real phones, then ZSB-74 |
+| V-18 | "$20k-grade" website | Keep the workflow, drop the claim | Site publishing built | Use it as an internal quality bar only. A public dollar comparison needs proof |
+| V-19 | Brand identity, marketing copy, email templates | Keep, as drafts | `marketing-email.md` is a deferred contract; Resend sends text only (`resend.md` R-4) | Drafts from confirmed facts. Branded HTML email needs a `resend.md` revision |
+| V-20 | Entity setup | Reshape | `direction.md` stage 2: a checklist of human steps | A checklist with official links and a human handoff. No legal or tax advice, no stored tax IDs |
+| V-21 | Site telemetry and an agent that A/B tests to a threshold | Reshape telemetry, defer the agent | No analytics (`apps/site-worker` serves pages only) | ZSB-80: consent, a defined lead or purchase event, minimum traffic, stop rules and roll back. The owner approves each experiment (D-5) |
+
+### Pricing and accounts
+
+| ID | Idea | Verdict | Today | Next |
+|---|---|---|---|---|
+| V-22 | About $49 to start and try | Reshape | Three sources disagree. Code: Solo $49, Studio $99, Pro $199, a card-required 14-day trial (`packages/contracts/src/plans.ts`, `plans.md`). ZAB: Solo $49, Pro $99, Enterprise $499, no trial, 14-day money back. The recording: "try" for about $49 | One price source (D-2). Solo has no model agents today (ZSB-69) |
+| V-23 | Unlock fee per phase plus a small monthly price | Defer | Hub plans only | ZSB-78, after the first cohort shows which milestones carry value |
+| V-24 | Revenue share by phase (examples 8, 6, 4, 2 percent) | Defer | No read of the owner's own sales | ZSB-78: counsel and finance. One definition of revenue, refunds, chargebacks, offline sales, audit rights and exit. The example phase ranges overlap |
+| V-25 | Detect several accounts per person under contract | Drop phone-based enforcement; keep abuse controls | Sign-in rate limits, free-tier allowances (PL-27) | Phone numbers are shared and recycled, and one owner may run several real businesses. Cap free usage, allow one owner across tenants, review and appeal (ZSB-78) |
+
+### Integrations, security and agents
+
+| ID | Idea | Verdict | Today | Next |
+|---|---|---|---|---|
+| V-26 | QuickBooks, no tax | Defer the connector, keep the boundary | Nothing | Stage 3 money view, read only, operations enforced on the server (ZSB-73) |
+| V-27 | One vault, one login | Keep one login; drop password collection | OAuth through Composio's managed tier; credential fields never leave the adapter (`packages/core/src/connections/composio.ts`). Sealed Shopify and Calendar tokens | ZSB-73: one ZS login with passkey or MFA, OAuth grants, sealed tokens; never store an owner's third-party passwords |
+| V-28 | One MCP that holds every tool ("code mode") | Reshape | One scoped remote `/mcp` endpoint with about 40 tools (`apps/api/src/mcp`, `packages/mcp`, `hub-access.md`) | ZSB-79: benchmark deferred tool search, Composio Tool Router and composed calls before adding a gateway |
+| V-29 | Agent-driven texts and emails | Reshape | Email follow-up drafts with one approval each; templated sends; opted-in missed-call text-back; allowlisted outreach | Keep `direction.md` stages. Agent SMS stays stage 4: consent proof, carrier registration, quiet hours, a stop that reaches unsent work |
+| V-30 | Agents with their own computers; "Malspot" | Defer | "Malspot" is OpenMausBot. ZAB piloted it (`marketing-engine/02-stack/openmausbot/PILOT.md`); the approval route failed and the trial closed. Browser tasks parked (`browser-tasks.md`) | Out of the release path. A later pilot runs one isolated job with an expiry, a spend cap and a full receipt |
+| V-31 | A base that takes more tools later | Keep | Connections catalog, `/mcp` and the action path extend | Tools register in the capability catalog (ZSB-70) |
+
+### The business companion (added 2026-11-22, ZSB-82)
+
+From the OS1 study (`docs/reverse/os1-her.md`). Contract: ZSB-83 (`companion.md`).
+
+| ID | Idea | Verdict | Today | Next |
+|---|---|---|---|---|
+| V-32 | The companion is the home screen: a calm, voice-first presence, not a chat log | Keep | Dashboard home is a briefing page; no command entry (`direction.md` §4, gap 3) | ZSB-83. Talk is home. Voice-first or text-first at launch is D-6 |
+| V-33 | Generative UI: cards from a typed catalog, including form cards that ask for missing information | Keep | Nothing. V-05 already limits cards to a fixed typed set | ZSB-83: catalog with a schema per card (choice, draft preview, form, connect, plan step, read-back). The server validates each card. No free HTML |
+| V-34 | Every control can be said; a phrase match runs before any model | Keep | Nothing | ZSB-83. Navigation and simple commands resolve without a model call. A tap and a phrase take the same path |
+| V-35 | Swipe from talk to canvas and tools | Keep | Installable PWA with six areas at 390x844 | ZSB-83. Talk, canvas, schedule, customers, inbox, site, team |
+| V-36 | Employee agents the owner sees, assigns, pauses and stops from the phone | Keep | Agent runs, kill switches and cost exist (`packages/core/src/agents`) | ZSB-83 view over B11 and B12. Each agent shows its work, its next approval and a stop |
+| V-37 | The companion sets up the environment: accounts, connections, site, in the right order | Keep, inside the trust table | Setup templates, Composio OAuth, site publish | ZSB-70 orders the steps; ZSB-83 runs them by conversation. Each connection and each publish still takes one owner tap (`direction.md` trust table). No stored third-party passwords (V-27) |
+| V-38 | The companion's words match the records | Keep, a hard rule | The action path already commits before it reports | ZSB-83: the companion never says done, open, connected or booked until the record says so. OS1's first run broke this repeatedly |
+
 ## 5. Conflicts with the current plan
 
 All nine were resolved in the ZSB-81 grill on 2026-11-24; see §6, "Decisions taken".
