@@ -232,8 +232,8 @@ Etsy and Faire review app access by hand: apply in the first week so review runs
 - Solo includes AI drafting at $1 per day per agent kind, under the company ceiling (B11).
 - Testers redeem a single-use, email-bound invite code for a 14-day Solo grant with no card and no
   operator step. Devin authorises each batch up front. PL-21..24 are revised to fit.
-- The existing $10/month Stripe connection add-on stays. New bundles (stacks, single agents) wait
-  until after 2027-01-27.
+- The existing $10/month Stripe connection add-on stays. New bundles (stacks, single agents) are
+  priced after the revenue-share research (ZSB-78).
 - Tiers against a revenue share (about 2%, possibly falling by phase) is research again, raised in
   ZSB-78 (Plaud round 1). This replaces the earlier "defer until after Stage 3".
 
@@ -241,8 +241,8 @@ Etsy and Faire review app access by hand: apply in the first week so review runs
 entry points, the full question graph (ZSB-70, pulled from Stage 2), reading the owner's public
 site with confirmed findings, facts, plan, booking or store connection, first agent on. ZAB's site
 and AEO producers draft behind the companion through ZSB-71. One Go live tap publishes the bound
-release all or nothing (ADR 0003). Jan 14 stays the agency and canvas soft launch; self-serve
-launches whole to the cohort by Jan 27. ZAB-58 is re-scoped to the producers.
+release all or nothing (ADR 0003). On Jan 14 the agency and canvas soft launch and self-serve
+opens whole to both cohorts. ZAB-58 is re-scoped to the producers.
 
 **D-4 Client (Q12).** Keep the server core. Rebuild the owner client as one Expo native app for iOS
 and Android; retire `apps/dashboard` after parity (ADR 0001). ZSB-75 verifies the native build in
@@ -255,7 +255,7 @@ everything except approve.
 **D-5 Experiments (Q14).** One tap per experiment card binds the variants, split, event, sample,
 stop rules, deadline and a conditional promotion of the winner. Code checks the conditions and
 rolls back on harm. No new copy, prices or offers without a new card. Visitors opt in to tracking.
-Built after Jan 27 on ZSB-80. Once proven per task type, it becomes automatic (Stage 4). Sold
+Built and tested by Jan 14 on ZSB-80. Once proven per task type in real use, it becomes automatic (Stage 4). Sold
 standalone as a conversion optimiser.
 
 **Agents (Plaud round 1).** The companion is the CEO agent and delegates through durable tasks
@@ -265,16 +265,38 @@ in the same app; internal dev tooling (Grok Bot, T3, LazyGurl) stays outside ZSB
 **Business formation (Plaud round 2, 2026-11-24).** Sold as factual research only: name, domain,
 handle and federal trademark availability, each with its source and date, plus official links for
 the state the owner picks. It never recommends a state or calls a name legally clear. Counsel
-reviews the wording before it is sold. Filing for the owner waits until after Jan 27 (V-20).
+reviews the wording before it is sold. Built and tested by Jan 14. Filing for the owner comes later (V-20).
 
 **Visitor analytics (Plaud round 2, 2026-11-24).** A funnel check on first-party site analytics
-(ZSB-80) shows where visitors drop off between catalog, cart and checkout, and tracks only visitors
+(ZSB-80), built and tested by Jan 14, shows where visitors drop off between catalog, cart and checkout, and tracks only visitors
 who opt in. Session replay and third-party replay tools (Clarity and similar) wait. It feeds the
 experiment cards (D-5) and is sold standalone.
 
+**Dates (Devin, 2026-11-24).** Everything below is built and tested by 2027-01-14, and on that day
+self-serve opens to both cohorts alongside the agency soft launch:
+- the voice-first Expo app for iOS and Android, with typing and tap approvals;
+- the whole first run from both entry points, with ZAB site and AEO drafts and one Go live tap;
+- booking replies and requester-verified order replies, delegated through durable tasks;
+- Zero Sum as tenant zero;
+- verified email sign-up with no card, prices reconciled to `plans.ts`, Solo drafting, the 14-day
+  trial and single-use tester codes;
+- launch checks: native distribution, real inbound routing, tenant isolation, export and delete,
+  and exactly-once address-bound delivery under retries;
+- the opt-in funnel check and the experiment cards with stop rules and rollback;
+- the standalone services, sold in the same app, and the formation research (counsel reviews
+  wording before sale).
+
+Before that: Shopify, Etsy, Stripe, Shippo and Klaviyo built and tested by 2027-01-05; Etsy and
+Faire access applied for in the first week; the first external TestFlight build sent to Apple as
+soon as it can be reviewed. Outside the date: Apple, Etsy and Faire approval outcomes, automatic
+experiments (they need field proof) and the revenue-share research.
+
+2027-01-27 is the measurement date and the start of investor outreach: the success measure below is
+the proof investors see.
+
 ### Success measure
 
-By 2027-01-27, 10 outside owners (5 service, 5 e-commerce) use the app on their own phones, with no
+Checked on 2027-01-27: 10 outside owners (5 service, 5 e-commerce) use the app on their own phones, with no
 laptop and no operator, and:
 - median time from sign-up to setup done (booking page live or store connected) is under 15
   minutes, timed per cohort;

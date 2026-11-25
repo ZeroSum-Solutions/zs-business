@@ -181,12 +181,13 @@ order below; where they differ, they win. Summary:
   tap (ADR 0003). The entity checklist stays in Stage 2.
 - The owner client is rebuilt as one Expo native app (ADR 0001), voice-first (ADR 0002). Stage 1's
   "command box in text, then voice" becomes one conversation by voice or text from the start.
-- The companion delegates to agents through durable tasks (ADR 0004), limited before Jan 27 to
+- The companion delegates to agents through durable tasks (ADR 0004), limited before Jan 14 to
   what the two first jobs need.
 - Connections by 2027-01-05: Shopify, Etsy, Stripe, Shippo, Klaviyo. QuickBooks stays in Stage 3.
-- Launch gates for 2027-01-27: public sign-up (B09), the agreed drafting entitlement (ZSB-69),
+- Launch gates, built and tested by 2027-01-14 (self-serve opens that day): public sign-up (B09), the agreed drafting entitlement (ZSB-69),
   native distribution, real inbound routing, tenant isolation, export and delete, and one
-  address-bound delivery under retries. The success measure is in `docs/vision.md` §6.
+  address-bound delivery under retries. The success measure is checked on 2027-01-27, when
+  investor outreach starts; dates and scope are in `docs/vision.md` §6.
 
 A stage that misses its gate is repeated or changed, not skipped. Each gate result is recorded
 in `docs/gates/stage-<n>.md` with its proof.
