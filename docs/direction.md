@@ -195,9 +195,9 @@ order below; where they differ, they win. Summary:
   drafting entitlement (ZSB-69), the company spend cap (B11) and the queued-work stop (B12).
   Stage 1's voice-first companion and Stage 2's interview are on the launch path; the Stage 2
   checklist of human steps stays separate from the Jan 14 formation research.
-- Launch gates, built and tested by 2027-01-14 (self-serve opens that day): public sign-up (B09), the agreed drafting entitlement (ZSB-69),
+- Launch gates, built and tested by 2027-01-14 (self-serve opens by invitation that day; public launch 2027-01-27): public sign-up (B09), the agreed drafting entitlement (ZSB-69),
   native distribution, real inbound routing, tenant isolation, export and delete, and one
-  address-bound delivery under retries. The success measure is checked on 2027-01-27, when
+  address-bound delivery under retries. The success measure is checked on 2027-01-27, the public launch, when
   investor outreach starts; dates and scope are in `docs/vision.md` §6.
 
 A stage that misses its gate is repeated or changed, not skipped. Each gate result is recorded

@@ -261,7 +261,7 @@ entry points, the full question graph (ZSB-70, pulled from Stage 2), reading the
 site with confirmed findings, facts, plan, booking or store connection, first agent on. ZAB's site
 and AEO producers draft behind the companion through ZSB-71. One Go live tap publishes the bound
 release all or nothing (ADR 0003). On Jan 14 the agency and canvas soft launch and self-serve
-opens whole to both cohorts. ZAB-58 is re-scoped to the producers.
+opens whole, by invitation, to both cohorts; the public launch is Jan 27 (ZAB-45). ZAB-58 is re-scoped to the producers.
 
 **D-4 Client (Q12).** Keep the server core. Rebuild the owner client as one Expo native app for iOS
 and Android; retire `apps/dashboard` after parity (ADR 0001). ZSB-75 verifies the native build in
@@ -324,8 +324,12 @@ with a third-party AI (Apple), in-app reporting of AI output (Google Play), and 
 first-contact disclosure.
 
 **Dates (Devin, 2026-11-24).** These are Devin's dated targets, not estimates. Everything below is
-built and tested by 2027-01-14, and on that day
-self-serve opens to both cohorts alongside the agency soft launch:
+built and tested by 2027-01-14, including public sign-up. On that day self-serve opens by invitation
+to both cohorts, alongside the agency and canvas soft launch and ZAB's friends-and-family preview
+(Devin, 2026-11-25). ZSB testers redeem single-use codes for the 14-day Solo grant; ZAB's free
+testers get portal access only (ZAB-106). The 10 owners of the success measure (5 service, 5
+e-commerce, with real businesses and steady customer messages, plus spares) are recruited before
+Jan 14 and start that day:
 - the voice-first Expo app for iOS and Android, with typing and tap approvals;
 - the whole first run from both entry points, with ZAB site and AEO drafts and one Go live tap;
 - booking replies and requester-verified order replies, delegated through durable tasks. Drafts
@@ -348,8 +352,8 @@ Faire access applied for in the first week, Faire built and tested by 2027-01-14
 soon as it can be reviewed. Outside the date: Apple, Etsy and Faire approval outcomes, automatic
 experiments (they need field proof) and the revenue-share research.
 
-2027-01-27 is the measurement date and the start of investor outreach: the success measure below is
-the proof investors see.
+2027-01-27 is the public launch (ZAB-45 and the video countdown stay), the measurement date and the
+start of investor outreach: the success measure below is the proof investors see.
 
 ### Success measure
 
