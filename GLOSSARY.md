@@ -46,6 +46,10 @@ _Avoid_: Confirm, OK, voice approval
 The companion's guided start for a new tenant, from sign-up to the first agent switched on.
 _Avoid_: Onboarding wizard, guided setup, setup flow
 
+**Undo**:
+The owner's reversal of a private change the companion made at once, offered on the card for 60 seconds and then in the activity log.
+_Avoid_: Rollback, revert (for outward actions, which need a tap instead)
+
 **Go live**:
 The one card and tap that publishes a tenant's bound release (booking page, site and AEO files) all at once.
 _Avoid_: Publish button, launch

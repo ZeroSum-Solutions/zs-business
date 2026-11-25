@@ -59,6 +59,9 @@ outreach sequencer. They stay as built for the tenants that use them. They are n
 the new team until their own gates open: standing-template sends at stage 4, batch email at
 stage 3 with a card that lists every recipient and every rendered message.
 
+**Owner requests with Undo (ZSB-81 D-7, 2026-11-24).** Private changes the owner asks for, by voice
+or text, run at once with an Undo; anything outward stays one tap. Detail in `docs/vision.md` §6.
+
 Fixed rules:
 1. An approval binds one exact action: the recipient's address, the text, the amount, the time.
    A change voids it, and the server checks again right before it acts (`approvals.md` A-10).

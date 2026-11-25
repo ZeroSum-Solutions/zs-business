@@ -274,6 +274,20 @@ reviews the wording before it is sold. Built and tested by Jan 14. Filing for th
 who opt in. Session replay and third-party replay tools (Clarity and similar) wait. It feeds the
 experiment cards (D-5) and is sold standalone.
 
+**D-7 Undo (2026-11-24).** An owner request runs at once with an Undo when it changes only private
+things: labelling or reordering the queue, editing a draft (which makes a new draft; sending still
+needs a fresh tap), adding a company fact that feeds only drafts, and a rename, calendar block or
+quiet-hours change only when it leaves public availability, published content, outside accounts
+and send eligibility alone. The owner may ask by voice; the companion asks back when the target is
+unclear. The card shows "Done · Undo" for 60 seconds, then Undo stays in the activity log. Undo is
+its own idempotent action: under lock it restores the prior state only if nothing dependent has
+committed, voids affected pending drafts, and says why when it cannot. Both actions are logged.
+One tap on the exact card stays required for anything a customer sees (including moving or
+cancelling a booking), outside-sourced customer data, publishing, outside accounts and permanent
+deletion. Voice can stop queued work at once. Money stays read-only. Stage 4 moves a task type to
+"runs inside limits" only after release tests, measured results, owner opt-in and rollback on
+incident.
+
 **Dates (Devin, 2026-11-24).** Everything below is built and tested by 2027-01-14, and on that day
 self-serve opens to both cohorts alongside the agency soft launch:
 - the voice-first Expo app for iOS and Android, with typing and tap approvals;
