@@ -9,7 +9,8 @@ written when the stage before them nears its gate.
 
 The end goal and the verdict on every idea from the 2026-11-22 product recording (one phone
 interface, hundreds of agents, one password) are in `docs/vision.md`. Read it first. Where it
-names an open decision (D-1 to D-5), this file stays as written until Devin decides.
+named decisions D-1 to D-8; all were decided on 2026-11-24 (ZSB-81). The launch path at the top of
+section 6 records what changed here.
 
 ## 1. North star
 
@@ -59,13 +60,16 @@ outreach sequencer. They stay as built for the tenants that use them. They are n
 the new team until their own gates open: standing-template sends at stage 4, batch email at
 stage 3 with a card that lists every recipient and every rendered message.
 
+**Owner requests with Undo (ZSB-81 D-7, 2026-11-24).** Only the private changes on D-7's list, asked
+for by the authenticated owner by voice or text, run at once with an Undo; everything else stays one
+tap. Detail in `docs/vision.md` §6.
+
 Fixed rules:
 1. An approval binds one exact action: the recipient's address, the text, the amount, the time.
    A change voids it, and the server checks again right before it acts (`approvals.md` A-10).
-   **Gap today:** a send approval binds the contact ID and the wording, not the address. The
-   worker sends to the contact's current address (`packages/core/src/delivery/policy.ts`,
-   `deliveryContentDigest`; `packages/core/src/delivery/worker.ts`, `recheck`). Ticket B03
-   closes this before any new agent ships.
+   Closed by B03 (ZSB-41): the send approval binds the destination address in its digest, and
+   the worker voids the send if the contact's address changes
+   (`packages/core/src/delivery/worker.ts`, `recheck`).
 2. Money is read-only. An agent may show a balance and prepare a note. The owner releases money
    in the provider's own screen.
 3. Caps, quiet hours, suppression lists and kill switches are code outside the model
@@ -84,12 +88,12 @@ Fixed rules:
 
 ## 3. The AI team: first real version
 
-Six seats. The owner talks to one of them (the Chief of Staff); the others receive typed tasks.
+Six seats. The owner talks to one of them (the Chief of Staff, now the companion: ZSB-81, ADR 0004); the others receive typed tasks.
 
 | Seat | Job | Repo modules it uses | State today |
 |---|---|---|---|
 | **Chief of Staff** | Takes the owner's request, turns it into tasks, writes the briefing, runs the approvals queue | `packages/core/src/home`, `packages/core/src/approvals`, `packages/core/src/agents` (runs, switches, cost) | No orchestrator, no task record, no command entry. `agents.md` rules out "an agent org chart or agent-to-agent delegation" |
-| **Assistant** | Sorts the inbox, drafts replies, proposes times, chases open loops | `packages/core/src/inbox`, `packages/core/src/intake`, `packages/core/src/booking`, `packages/core/src/calendar` | One narrow agent drafts follow-ups to unanswered website requests (`agents.md` G-1 to G-13). Inbound email is a contract only (`docs/requirements/inbound-email.md`) |
+| **Assistant** | Sorts the inbox, drafts replies, proposes times, chases open loops | `packages/core/src/inbox`, `packages/core/src/intake`, `packages/core/src/booking`, `packages/core/src/calendar` | One narrow agent drafts follow-ups to unanswered website requests (`agents.md` G-1 to G-13). Inbound email: the signed webhook shipped dark in B19 (ZSB-46); triage and threading are B20, B21 |
 | **Sales and follow-up** | Moves leads through the pipeline, follows up, prepares proposals | `packages/core/src/crm`, `packages/core/src/deals`, `packages/core/src/outreach`, `packages/core/src/enrichment` | CRM and pipeline built. The outreach sequencer exists only for tenants on an allowlist with operator-connected mailboxes (`docs/requirements/outreach-sequencer.md` OS-1, OS-2) |
 | **Front desk** | Booking page, reminders, review requests, missed calls | `packages/core/src/booking`, `packages/core/src/templates`, `packages/core/src/voice`, `packages/core/src/delivery` | Booking, self-service links and templated reminders exist. Missed-call text-back has a first slice. The voice receptionist is not built |
 | **Marketer** | Site, newsletter, posts | `packages/core/src/sites`, `apps/site-worker`, `packages/core/src/images` | Site publishing built. Marketing email and social publishing are contracts only |
@@ -107,7 +111,7 @@ waits for a named gate. "Park" means stop adding to it until a stage calls for i
 |---|---|---|
 | Action path, idempotency, outbox (`README.md`) | Foundation | It is the trust layer. Every agent acts through it |
 | Tenancy, RLS, members (`AGENTS.md` hard rules) | Foundation | Built and tested. Missing only the public door |
-| `approvals.md` | Foundation | Approvals bind the action and wording. They do not bind the address, and there is no single queue screen |
+| `approvals.md` | Foundation | Approvals bind the action, the wording and, since B03 (ZSB-41), the address. There is no single queue screen yet |
 | `agents.md` | Foundation, needs a revision | Good controls. Scope is one agent kind family; the goal needs seats and tasks |
 | `inbox-home.md` | Foundation | Inbox is where triage lands; Home becomes Today |
 | `business-profile.md` | Foundation, needs a revision | Holds name, description and services. Hours, tone, policies and provenance are missing |
@@ -118,7 +122,7 @@ waits for a named gate. "Park" means stop adding to it until a stage calls for i
 | `apps/dashboard` (phone-first PWA, six areas) | Foundation | The mobile shell exists and is tested at 390x844 (`apps/dashboard/README.md`) |
 | `inbound-email.md` | Foundation, not built | The Assistant cannot triage mail it cannot see |
 | `transcription.md` | Later, re-scope | Built for voicemail on a local worker. Owner voice needs a hosted path |
-| `plans.md`, `stripe.md` | Later | Billing works. A tenant with no plan is comped and several PL-1 limits are not enforced (`plans.md`, Known limits); allowances come before public sign-up (B08). Reset the catalog after cost per active account is measured |
+| `plans.md`, `stripe.md` | Foundation for launch (ZSB-81) | Billing works. A tenant with no plan is comped and several PL-1 limits are not enforced (`plans.md`, Known limits); allowances come before public sign-up (B08). Reset the catalog after cost per active account is measured |
 | `hub-access.md`, `activepieces.md`, `packages/mcp` | Later | A way for outside agents to plug in. The built-in team comes first |
 | `twilio.md`, `voice-receptionist.md` | Later | Gate: inbound email and triage work, consent flow reviewed, a hosted media host exists |
 | `marketing-email.md`, `social-publishing.md` | Later | Marketer seat, after the first three seats pass their gate |
@@ -128,7 +132,7 @@ waits for a named gate. "Park" means stop adding to it until a stage calls for i
 | `document-intake.md` | Park | Serves catalog businesses only. Finish the open bug, add nothing |
 | `image-port.md` | Park | Product photo variants. Not on the path to the first team |
 | `browser-tasks.md`, `services/browser-runner` | Park | Runs on one pilot machine; cannot serve every tenant |
-| Shopify native tier and embedded page (`connections.md` C-18 to C-30) | Park after the listing review | One business type. Keep it working; add nothing |
+| Shopify native tier and embedded page (`connections.md` C-18 to C-30) | Keep (ZSB-81, 2026-11-24) | The e-commerce cohort's first job: read-only order replies, with lookup by the order number a customer quotes and a check that the requester placed the order. Writes stay in ZSB-77 |
 | `docs/future/discovery.md` | Park | A second product for stores with a catalog |
 | `docs/build-vs-buy.md` | Revise | "Self-build as much as we can" pulls work away from the base. Keep what is built; build new commodity parts only when a stage needs them; always integrate regulated parts |
 
@@ -137,13 +141,13 @@ waits for a named gate. "Park" means stop adding to it until a stage calls for i
 1. **No public door.** Supabase sign-ups are off (`apps/api/README.md`, "Hosted deploy" notes)
    and an operator script creates each tenant (`industry-templates.md`, scope). A person
    starting a business today cannot get in. The only self-serve path is a Shopify install.
-2. **No team.** There is one drafting agent, and hosted deploys run it with no model provider
-   (`README.md`, "Off until their settings exist"). The contract excludes an org chart.
+2. **No team.** There is one drafting agent. A scheduled preview run drafted through Cerebras on
+   2026-11-22 (`agents.md`, hosted notes). The contract excludes an org chart.
 3. **No voice and no command entry.** The dashboard has no microphone input and no place to
    type a request. The specced voice work answers callers; it does not listen to the owner.
 4. **Approvals are scattered and do not bind the address.** The API lists approvals
    (`approvals.md` A-11) but the dashboard shows them inside Inbox, Agents, Customers and Site,
-   and a send goes to the contact's current address, not the one approved.
+   B03 (ZSB-41) now binds the address and rechecks it before the send.
 5. **No setup for a new business.** Setup today is "pick one of four templates". Nothing
    interviews the owner, and nothing tracks the human steps (registration, bank, payments).
 6. **Pilot-machine workers.** Transcription, browser tasks and the receptionist are designed
@@ -173,6 +177,28 @@ Everything else depends on these. Each has a check and its tickets.
 | F9 | **One front door on the phone** | Home shows the briefing, the approvals count and one box to type or speak. An alert tells the owner when something waits | B17, B18, B22, B24 |
 
 ## 6. Ordered stages and exit gates
+
+**Launch path, decided in ZSB-81 (2026-11-24).** The decisions in `docs/vision.md` §6 change the
+order below; where they differ, they win. Summary:
+- Both cohorts launch at once: service sellers (booking replies) and makers and e-commerce
+  sellers (order replies). Makers lead the marketing.
+- The first run (Stage 2's interview, ZSB-70) moves onto the launch path. It ends in one Go live
+  tap (ADR 0003). The entity checklist stays in Stage 2.
+- The owner client is rebuilt as one Expo native app (ADR 0001), voice-first (ADR 0002). Stage 1's
+  "command box in text, then voice" becomes one conversation by voice or text from the start.
+- The companion delegates to agents through durable tasks (ADR 0004), limited before Jan 14 to
+  what the two first jobs need.
+- Connections built and tested by 2027-01-05: Shopify, Etsy, Stripe, Shippo, Klaviyo; Faire by
+  2027-01-14. Etsy and Faire go live when the provider approves access. QuickBooks stays in Stage 3.
+- Order replies verify the requester independently and disclose nothing on failure (ZSB-73).
+- The Stage 0 gate passes before production activation on Jan 14: release checks (B15, B16), the
+  drafting entitlement (ZSB-69), the company spend cap (B11) and the queued-work stop (B12).
+  Stage 1's voice-first companion and Stage 2's interview are on the launch path; the Stage 2
+  checklist of human steps stays separate from the Jan 14 formation research.
+- Launch gates, built and tested by 2027-01-14 (self-serve opens by invitation that day; public launch 2027-01-27): public sign-up (B09), the agreed drafting entitlement (ZSB-69),
+  native distribution, real inbound routing, tenant isolation, export and delete, and one
+  address-bound delivery under retries. The success measure is checked on 2027-01-27, the public launch, when
+  investor outreach starts; dates and scope are in `docs/vision.md` §6.
 
 A stage that misses its gate is repeated or changed, not skipped. Each gate result is recorded
 in `docs/gates/stage-<n>.md` with its proof.
@@ -225,6 +251,7 @@ State on 2026-11-22 (ZSB-68). The earlier rows of this table are closed.
 | B03, B05, B06, B08, B10, B19 (ZSB-41 to ZSB-46) | Done. Follow-ups are ZSB-53 to ZSB-66 |
 | B25 (ZSB-13) | Done |
 | ZSB-17 (PDF retention sweep) | Done: Devin shipped document intake to production with the sweep on. Intake stays parked for new scope (ZSB-47, ZSB-48 wait) |
-| ZSB-69 (B26) | Open, blocks the Stage 0 gate: Free and Solo have no model agents (`packages/contracts/src/plans.ts`), so a fresh sign-up cannot approve an agent-drafted reply until the entitlement is agreed |
-| ZSB-70 to ZSB-83 | Filed from `docs/vision.md`. ZSB-81 (decisions D-1 to D-8) comes first. ZSB-82 is the OS1 companion study; ZSB-83 the `companion.md` contract |
+| ZSB-69 (B26) | Entitlement agreed in ZSB-81 (2026-11-24): Free has no AI drafting; Solo drafts under a model-cost cap of $1 per day per agent kind and B11; testers get a 14-day Solo grant by single-use, email-bound invite code. Open until `plans.ts`, `plans.md` and the preview tests match: drafting on a trial and a grant, denial on Free, expiry back to Free |
+| ZSB-81 | Done: D-1 to D-8 decided 2026-11-24 |
+| ZSB-70 to ZSB-83 | Filed from `docs/vision.md`. ZSB-82 is the OS1 companion study; ZSB-83 the `companion.md` contract |
 | C-17 (Shopify measurement) | Record the scheduled measurement once, then close. It gates nothing |
