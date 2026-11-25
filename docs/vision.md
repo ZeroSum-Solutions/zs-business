@@ -262,6 +262,11 @@ standalone as a conversion optimiser.
 (ADR 0004). A stack is a sold bundle of task types. Zero Sum runs its own business as tenant zero
 in the same app; internal dev tooling (Grok Bot, T3, LazyGurl) stays outside ZSB.
 
+**Business formation (Plaud round 2, 2026-11-24).** Sold as factual research only: name, domain,
+handle and federal trademark availability, each with its source and date, plus official links for
+the state the owner picks. It never recommends a state or calls a name legally clear. Counsel
+reviews the wording before it is sold. Filing for the owner waits until after Jan 27 (V-20).
+
 ### Success measure
 
 By 2027-01-27, 10 outside owners (5 service, 5 e-commerce) use the app on their own phones, with no
