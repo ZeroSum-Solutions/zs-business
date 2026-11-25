@@ -267,6 +267,11 @@ handle and federal trademark availability, each with its source and date, plus o
 the state the owner picks. It never recommends a state or calls a name legally clear. Counsel
 reviews the wording before it is sold. Filing for the owner waits until after Jan 27 (V-20).
 
+**Visitor analytics (Plaud round 2, 2026-11-24).** A funnel check on first-party site analytics
+(ZSB-80) shows where visitors drop off between catalog, cart and checkout, and tracks only visitors
+who opt in. Session replay and third-party replay tools (Clarity and similar) wait. It feeds the
+experiment cards (D-5) and is sold standalone.
+
 ### Success measure
 
 By 2027-01-27, 10 outside owners (5 service, 5 e-commerce) use the app on their own phones, with no
