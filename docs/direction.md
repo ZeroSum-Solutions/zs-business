@@ -62,10 +62,9 @@ stage 3 with a card that lists every recipient and every rendered message.
 Fixed rules:
 1. An approval binds one exact action: the recipient's address, the text, the amount, the time.
    A change voids it, and the server checks again right before it acts (`approvals.md` A-10).
-   **Gap today:** a send approval binds the contact ID and the wording, not the address. The
-   worker sends to the contact's current address (`packages/core/src/delivery/policy.ts`,
-   `deliveryContentDigest`; `packages/core/src/delivery/worker.ts`, `recheck`). Ticket B03
-   closes this before any new agent ships.
+   Closed by B03 (ZSB-41): the send approval binds the destination address in its digest, and
+   the worker voids the send if the contact's address changes
+   (`packages/core/src/delivery/worker.ts`, `recheck`).
 2. Money is read-only. An agent may show a balance and prepare a note. The owner releases money
    in the provider's own screen.
 3. Caps, quiet hours, suppression lists and kill switches are code outside the model
@@ -128,7 +127,7 @@ waits for a named gate. "Park" means stop adding to it until a stage calls for i
 | `document-intake.md` | Park | Serves catalog businesses only. Finish the open bug, add nothing |
 | `image-port.md` | Park | Product photo variants. Not on the path to the first team |
 | `browser-tasks.md`, `services/browser-runner` | Park | Runs on one pilot machine; cannot serve every tenant |
-| Shopify native tier and embedded page (`connections.md` C-18 to C-30) | Park after the listing review | One business type. Keep it working; add nothing |
+| Shopify native tier and embedded page (`connections.md` C-18 to C-30) | Keep (ZSB-81, 2026-11-24) | The e-commerce cohort's first job: read-only order replies, with lookup by the order number a customer quotes and a check that the requester placed the order. Writes stay in ZSB-77 |
 | `docs/future/discovery.md` | Park | A second product for stores with a catalog |
 | `docs/build-vs-buy.md` | Revise | "Self-build as much as we can" pulls work away from the base. Keep what is built; build new commodity parts only when a stage needs them; always integrate regulated parts |
 
@@ -173,6 +172,21 @@ Everything else depends on these. Each has a check and its tickets.
 | F9 | **One front door on the phone** | Home shows the briefing, the approvals count and one box to type or speak. An alert tells the owner when something waits | B17, B18, B22, B24 |
 
 ## 6. Ordered stages and exit gates
+
+**Launch path, decided in ZSB-81 (2026-11-24).** The decisions in `docs/vision.md` §6 change the
+order below; where they differ, they win. Summary:
+- Both cohorts launch at once: service sellers (booking replies) and makers and e-commerce
+  sellers (order replies). Makers lead the marketing.
+- The first run (Stage 2's interview, ZSB-70) moves onto the launch path. It ends in one Go live
+  tap (ADR 0003). The entity checklist stays in Stage 2.
+- The owner client is rebuilt as one Expo native app (ADR 0001), voice-first (ADR 0002). Stage 1's
+  "command box in text, then voice" becomes one conversation by voice or text from the start.
+- The companion delegates to agents through durable tasks (ADR 0004), limited before Jan 27 to
+  what the two first jobs need.
+- Connections by 2027-01-05: Shopify, Etsy, Stripe, Shippo, Klaviyo. QuickBooks stays in Stage 3.
+- Launch gates for 2027-01-27: public sign-up (B09), the agreed drafting entitlement (ZSB-69),
+  native distribution, real inbound routing, tenant isolation, export and delete, and one
+  address-bound delivery under retries. The success measure is in `docs/vision.md` §6.
 
 A stage that misses its gate is repeated or changed, not skipped. Each gate result is recorded
 in `docs/gates/stage-<n>.md` with its proof.
@@ -225,6 +239,6 @@ State on 2026-11-22 (ZSB-68). The earlier rows of this table are closed.
 | B03, B05, B06, B08, B10, B19 (ZSB-41 to ZSB-46) | Done. Follow-ups are ZSB-53 to ZSB-66 |
 | B25 (ZSB-13) | Done |
 | ZSB-17 (PDF retention sweep) | Done: Devin shipped document intake to production with the sweep on. Intake stays parked for new scope (ZSB-47, ZSB-48 wait) |
-| ZSB-69 (B26) | Open, blocks the Stage 0 gate: Free and Solo have no model agents (`packages/contracts/src/plans.ts`), so a fresh sign-up cannot approve an agent-drafted reply until the entitlement is agreed |
+| ZSB-69 (B26) | Entitlement agreed in ZSB-81 (2026-11-24): Free has no AI drafting; Solo drafts at $1 per day per agent kind under B11; testers get a 14-day Solo grant by single-use, email-bound invite code. Open until `plans.ts`, `plans.md` and the preview test match |
 | ZSB-70 to ZSB-83 | Filed from `docs/vision.md`. ZSB-81 (decisions D-1 to D-8) comes first. ZSB-82 is the OS1 companion study; ZSB-83 the `companion.md` contract |
 | C-17 (Shopify measurement) | Record the scheduled measurement once, then close. It gates nothing |
