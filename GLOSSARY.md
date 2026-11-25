@@ -87,5 +87,5 @@ The 14-day card-required start of a paid plan, once per tenant (once per shop fo
 _Avoid_: Tester grant, free plan
 
 **Standalone service**:
-One finished feature sold on its own (such as the site audit) through the same app, login and records.
+One finished feature sold on its own (such as the site audit) through the same app, login and records. Its price lives in `plans.ts`.
 _Avoid_: Side product, one-off

@@ -251,6 +251,12 @@ Etsy and Faire review app access by hand: apply in the first week so review runs
   fall back to Free when a trial or grant ends without a subscription.
 - Testers redeem a single-use, email-bound invite code for a 14-day Solo grant with no card and no
   operator step. Devin authorises each batch up front. PL-21..24 are revised to fit.
+- Standalone-service prices (site and AEO audit, AEO fix, funnel check, experiment cards, formation
+  research) live in `plans.ts` next to the plans, once Devin approves them from self-serve buyer
+  evidence and delivery cost; Dec 14 is the review date. Agency packages and quotes stay in ZAB's
+  offer brief; the $500 audit credit and fix-sprint figures are pilot guesses (ZAB-112), and a payment
+  or deposit decides whether that pilot continues. All five services are built and tested by Jan 14
+  whatever the pilot shows (Q2, Devin, 2026-11-25).
 - The existing $10/month Stripe connection add-on stays. New bundles (stacks, single agents) are
   priced after the revenue-share research (ZSB-78).
 - Tiers against a revenue share (about 2%, possibly falling by phase) is research again, raised in
