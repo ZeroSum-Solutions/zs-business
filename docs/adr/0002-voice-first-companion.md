@@ -1,0 +1,3 @@
+# The companion is voice-first, and voice can never approve
+
+The companion launches voice-first, with typing in the same conversation. The speech stack is chosen by the ZSB-75 benchmark (speech-to-speech models against separate transcription and voice vendors), with a target of under 800 ms median to the first meaningful word. The model holds no action or approval credentials: a transcript gate matches phrases before inference, the server writes all status words, and every outward action still needs a tap on its card. Raw audio is discarded by default. This supersedes the no-speech-vendor line in `docs/requirements/transcription.md` for the owner app. Decided 2026-11-24 in ZSB-81 (Q13). If voice fails its tests, the typed companion ships complete.

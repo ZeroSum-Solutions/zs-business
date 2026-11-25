@@ -198,6 +198,80 @@ Run as one grill session (ZSB-81). D-6 to D-8 were added from the OS1 study (ZSB
 D-3 now carries more weight: the guided start is the companion's first run, so whoever builds it
 builds the front door.
 
+### Decisions taken (ZSB-81 grill, 2026-11-24)
+
+Terms are defined in `GLOSSARY.md`; hard-to-reverse choices have ADRs in `docs/adr/`.
+
+**Principles (Devin)**
+- **P-1** Build each part whole, once. Friction is a defect. Security is folded into the flow,
+  not added as gates. A full rebuild is allowed where the base is wrong.
+- **P-2** Each feature is also a standalone service, marketed while it is built to earn income and
+  recruit testers, and sold through the same app, login and records.
+
+**D-1 Cohort.** Both cohorts at once: solo service sellers who take bookings, and makers and
+e-commerce sellers who take orders. Makers lead the brand and marketing (Plaud 2026-11-24). Any
+stage is welcome, from an idea to a large seller; the success measure counts only owners with a
+real business.
+
+**Q2 First e-commerce job.** Read-only order replies: the customer quotes an order number, an agent
+reads it, checks that the requester placed it, takes tracking from the store's fulfillment
+records and drafts a reply for one tap. Store writes stay in ZSB-77.
+
+**Connections before 2027-01-05 (Plaud round 1).** Shopify, Etsy, Stripe, Shippo and Klaviyo, each
+built whole. Faire is a candidate. Pirate Ship is out (no API). QuickBooks stays at Stage 3.
+Etsy and Faire review app access by hand: apply in the first week so review runs during the build.
+
+**D-2 Price (Q4–Q10).**
+- `plans.ts` is the one price source: Solo $49, Studio $99, Pro $199, annual and founding prices as
+  they are. Stripe and Shopify prices are reconciled to it. Enterprise is an agency quote. The ZAB
+  brief is fixed through a ZAB ticket. Meagan's "$37 or less" is a recorded dissent.
+- Sign-up needs a verified email and no card. Free has no AI drafting. Paid features start with the
+  14-day card-required trial, once per tenant (Shopify: per shop, verified before it is
+  advertised). The app discloses the conversion date, the charge and how to cancel. No money-back
+  at launch; refunds stay human-run and never delete data (rule 10). ADR 0005.
+- Solo includes AI drafting at $1 per day per agent kind, under the company ceiling (B11).
+- Testers redeem a single-use, email-bound invite code for a 14-day Solo grant with no card and no
+  operator step. Devin authorises each batch up front. PL-21..24 are revised to fit.
+- The existing $10/month Stripe connection add-on stays. New bundles (stacks, single agents) wait
+  until after 2027-01-27.
+- Tiers against a revenue share (about 2%, possibly falling by phase) is research again, raised in
+  ZSB-78 (Plaud round 1). This replaces the earlier "defer until after Stage 3".
+
+**D-3 First run (Q11).** One app, one login, one conversation. ZSB builds the whole first run: both
+entry points, the full question graph (ZSB-70, pulled from Stage 2), reading the owner's public
+site with confirmed findings, facts, plan, booking or store connection, first agent on. ZAB's site
+and AEO producers draft behind the companion through ZSB-71. One Go live tap publishes the bound
+release all or nothing (ADR 0003). Jan 14 stays the agency and canvas soft launch; self-serve
+launches whole to the cohort by Jan 27. ZAB-58 is re-scoped to the producers.
+
+**D-4 Client (Q12).** Keep the server core. Rebuild the owner client as one Expo native app for iOS
+and Android; retire `apps/dashboard` after parity (ADR 0001). ZSB-75 verifies the native build in
+parallel. If Apple in-app purchase rules are unresolved, the public store release slips and the
+cohort stays on TestFlight.
+
+**D-6 Voice (Q13).** Voice-first at launch, typing in the same conversation (ADR 0002). Voice can do
+everything except approve.
+
+**D-5 Experiments (Q14).** One tap per experiment card binds the variants, split, event, sample,
+stop rules, deadline and a conditional promotion of the winner. Code checks the conditions and
+rolls back on harm. No new copy, prices or offers without a new card. Visitors opt in to tracking.
+Built after Jan 27 on ZSB-80. Once proven per task type, it becomes automatic (Stage 4). Sold
+standalone as a conversion optimiser.
+
+**Agents (Plaud round 1).** The companion is the CEO agent and delegates through durable tasks
+(ADR 0004). A stack is a sold bundle of task types. Zero Sum runs its own business as tenant zero
+in the same app; internal dev tooling (Grok Bot, T3, LazyGurl) stays outside ZSB.
+
+### Success measure
+
+By 2027-01-27, 10 outside owners (5 service, 5 e-commerce) use the app on their own phones, with no
+laptop and no operator, and:
+- median time from sign-up to setup done (booking page live or store connected) is under 15
+  minutes, timed per cohort;
+- the first agent draft is ready within 2 hours of the tenant's first real customer message
+  outside quiet hours (new tenants start with `waitHours` = 1);
+- at least one approved reply per owner is delivered once, to the bound address.
+
 ## 7. Gaps neither plan covered
 
 - **Activation and retention** (ZSB-72): first value event, time to first approved action, return
