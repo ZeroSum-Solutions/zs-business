@@ -218,7 +218,9 @@ reads it, checks that the requester placed it, takes tracking from the store's f
 records and drafts a reply for one tap. Store writes stay in ZSB-77.
 
 **Connections before 2027-01-05 (Plaud round 1).** Shopify, Etsy, Stripe, Shippo and Klaviyo, each
-built whole. Faire is a candidate. Pirate Ship is out (no API). QuickBooks stays at Stage 3.
+built whole. Faire is the sixth connection (Devin, 2026-11-24): read-only wholesale orders into
+the same order-reply job, built and tested by 2027-01-14 against Faire's test setup, live when Faire
+approves access. Pirate Ship is out (no API). QuickBooks stays at Stage 3.
 Etsy and Faire review app access by hand: apply in the first week so review runs during the build.
 
 **D-2 Price (Q4–Q10).**
@@ -287,7 +289,7 @@ self-serve opens to both cohorts alongside the agency soft launch:
   wording before sale).
 
 Before that: Shopify, Etsy, Stripe, Shippo and Klaviyo built and tested by 2027-01-05; Etsy and
-Faire access applied for in the first week; the first external TestFlight build sent to Apple as
+Faire access applied for in the first week, Faire built and tested by 2027-01-14; the first external TestFlight build sent to Apple as
 soon as it can be reviewed. Outside the date: Apple, Etsy and Faire approval outcomes, automatic
 experiments (they need field proof) and the revenue-share research.
 
