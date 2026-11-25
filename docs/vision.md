@@ -283,19 +283,20 @@ laptop and no operator, and:
 | ZSB-69 | B26: first-agent entitlement so the Stage 0 gate can pass | high |
 | ZSB-70 | Contract: `business-planning.md` | high |
 | ZSB-71 | Contract: `portal-integration.md` (ZAB to ZSB) | high |
-| ZSB-72 | Contract: `mobile-activation.md` | medium |
-| ZSB-73 | Connections revision: one login, no passwords, QuickBooks boundary | medium |
+| ZSB-72 | Contract: `mobile-activation.md` | high |
+| ZSB-73 | Connections revision: one login, no passwords; Shopify, Etsy, Stripe, Shippo, Klaviyo by 2027-01-05, Faire by 2027-01-14; QuickBooks boundary | urgent |
 | ZSB-74 | Content studio: ideas, calendar, film list, scripts, teleprompter | medium |
-| ZSB-75 | Research: phone device and speech spike | medium |
+| ZSB-75 | Research: verify the Expo native build and benchmark the voice stack (ADR 0001, 0002) | high |
 | ZSB-76 | Research: direct publishing to Instagram, TikTok and X | medium |
-| ZSB-77 | Research: Shopify catalog write tier | medium |
-| ZSB-78 | Research: phased pricing and revenue share | low |
+| ZSB-77 | Research: Shopify catalog write tier (read-only order replies ship first, under ZSB-81 Q2) | medium |
+| ZSB-78 | Research: tiers against a revenue share of about 2% | medium |
 | ZSB-79 | Research: one MCP for every tool | medium |
-| ZSB-80 | Research: site analytics and approved A/B tests | low |
-| ZSB-81 | Grill: D-1 to D-8 | urgent |
+| ZSB-80 | Site analytics, opt-in funnel check and experiment cards, built by 2027-01-14 | high |
+| ZSB-81 | Grill: D-1 to D-8, decided 2026-11-24 | done |
 | ZSB-82 | Reference study: OS1 voice companion and generative UI (`docs/reverse/os1-her.md`) | high |
 | ZSB-83 | Contract: `companion.md` (talk home, card catalog, phrase match, swipe, team view) | high |
 
-Order: ZSB-81 first (it unblocks ZSB-69, ZSB-71 and ZSB-77), then the Stage 0 base as
+Order: ZSB-81 is decided (2026-11-24). Everything on the launch path is built and tested by
+2027-01-14 (§6, "Dates"). Then the Stage 0 base as
 `direction.md` orders it, with ZSB-69 and ZSB-71 alongside because the Jan 14 launch depends on
 them.
