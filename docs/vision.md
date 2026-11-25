@@ -288,6 +288,18 @@ deletion. Voice can stop queued work at once. Money stays read-only. Stage 4 mov
 "runs inside limits" only after release tests, measured results, owner opt-in and rollback on
 incident.
 
+**D-8 Companion identity (2026-11-24).** One companion design for every tenant, with one calm,
+professional persona across speech and text. It starts with one default voice and the label "AI
+companion"; the brand-derived default name is set once the brand is final and cleared. It says it is
+an AI at the first spoken and written contact and keeps an AI label visible. After the first run the
+owner can say "Call yourself Juno" and pick from a small set of vetted voices; both are private
+tenant settings with Undo, and staff inherit them. Customer messages use the business's name and
+tone and need the owner's tap. ZSB-75 picks original or licensed voices with performer permission
+and commercial terms across tenants; no imitation of real people or characters and no voice cloning
+by Jan 14. Launch checks: recording consent and indicator, consent before sharing personal data
+with a third-party AI (Apple), in-app reporting of AI output (Google Play), and EU AI Act
+first-contact disclosure.
+
 **Dates (Devin, 2026-11-24).** Everything below is built and tested by 2027-01-14, and on that day
 self-serve opens to both cohorts alongside the agency soft launch:
 - the voice-first Expo app for iOS and Android, with typing and tap approvals;
