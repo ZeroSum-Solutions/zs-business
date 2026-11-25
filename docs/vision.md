@@ -273,7 +273,8 @@ clears. If voice fails its tests, the typed companion
 ships complete (ADR 0002).
 
 **D-6 Voice (Q13).** Voice-first at launch, typing in the same conversation (ADR 0002). Voice can do
-everything except approve.
+everything except approve. The companion talks only to the owner; outbound AI calls to customers stay
+out of the first version (trust table).
 
 **D-5 Experiments (Q14).** One tap per experiment card binds the variants, split, event, sample,
 stop rules, deadline and a conditional promotion of the winner. Code checks the conditions and
@@ -322,7 +323,8 @@ by Jan 14. Launch checks: recording consent and indicator, consent before sharin
 with a third-party AI (Apple), in-app reporting of AI output (Google Play), and EU AI Act
 first-contact disclosure.
 
-**Dates (Devin, 2026-11-24).** Everything below is built and tested by 2027-01-14, and on that day
+**Dates (Devin, 2026-11-24).** These are Devin's dated targets, not estimates. Everything below is
+built and tested by 2027-01-14, and on that day
 self-serve opens to both cohorts alongside the agency soft launch:
 - the voice-first Expo app for iOS and Android, with typing and tap approvals;
 - the whole first run from both entry points, with ZAB site and AEO drafts and one Go live tap;
