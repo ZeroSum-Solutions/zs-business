@@ -83,7 +83,7 @@ A 14-day Solo plan given by a single-use invite code bound to one email, with no
 _Avoid_: Comp, free trial
 
 **Trial**:
-The 14-day card-required start of a paid plan, once per tenant.
+The 14-day card-required start of a paid plan, once per tenant (once per shop for Shopify installs).
 _Avoid_: Tester grant, free plan
 
 **Standalone service**:

@@ -8,7 +8,7 @@ independently, by GPT-6.2 Sol. Every code claim below was checked in the code.
 This file holds the end goal and the verdict on each idea. It does not replace
 `docs/direction.md`: that file still sets the order of work and the trust rules, and a numbered
 rule still lives in `docs/requirements/`. An idea here becomes scope only when it has a contract
-or a ticket. Items marked **D-n** wait on a decision only Devin can make (section 6).
+or a ticket. Items marked **D-n** were decisions for Devin; all eight were decided on 2026-11-24 (ZSB-81, section 6).
 
 **New to the repo? Read this file first, then `docs/direction.md`, then the contract for your
 ticket.**
@@ -48,8 +48,8 @@ price that grows with the business (V-22 to V-25).
 
 ## 2. The journey
 
-1. **Sign up** on the phone (B09, ZSB-27). Today sign-in cannot create a user
-   (`apps/dashboard/src/lib/server/sign-in.ts`, `shouldCreateUser: false`).
+1. **Sign up** on the phone with a verified email and no card (B09, ZSB-27, ADR 0005). Today
+   sign-in cannot create a user (`apps/dashboard/src/lib/server/sign-in.ts`, `shouldCreateUser: false`).
 2. **Talk.** The companion wakes and asks: "Tell me about yourself, your idea, your
    business." Voice or text; form cards collect the exact facts it needs (V-01, V-32, V-33, D-6)
 3. **Route.** The intake picks the next questions. Two starting points: a new idea from zero
@@ -60,7 +60,11 @@ price that grows with the business (V-22 to V-25).
 5. **Plan.** The conversation ends in a written plan in phases, with a clear next action (V-07).
 6. **Tools follow the plan.** The plan says which tools and agents this owner needs and in what
    order. It also says why each tool is available, blocked or optional (V-07).
-7. **Run.** Calendar, store, social, site, search visibility, inbox and follow-up work from the
+7. **Connect and switch on.** The owner connects the booking page or the store (each connection
+   one tap), and the first agent is switched on for that cohort's job.
+8. **Go live.** One tap publishes the bound release (site, AEO, booking page) all or nothing. The
+   release binds only the assets that apply to this owner's cohort (ADR 0003).
+9. **Run** (roadmap; Jan 14 ships the parts listed in §6, "Dates"). Calendar, store, social, site, search visibility, inbox and follow-up work from the
    phone. Agents do the work; the owner approves it (V-08 to V-31).
 
 ## 3. Who it is for first
@@ -143,17 +147,17 @@ From the OS1 study (`docs/reverse/os1-her.md`). Contract: ZSB-83 (`companion.md`
 
 | ID | Idea | Verdict | Today | Next |
 |---|---|---|---|---|
-| V-32 | The companion is the home screen: a calm, voice-first presence, not a chat log | Keep | Dashboard home is a briefing page; no command entry (`direction.md` §4, gap 3) | ZSB-83. Talk is home. Voice-first or text-first at launch is D-6 |
+| V-32 | The companion is the home screen: a calm, voice-first presence, not a chat log | Keep | Dashboard home is a briefing page; no command entry (`direction.md` §4, gap 3) | ZSB-83. Talk is home. Voice-first, decided in D-6 (ADR 0002) |
 | V-33 | Generative UI: cards from a typed catalog, including form cards that ask for missing information | Keep | Nothing. V-05 already limits cards to a fixed typed set | ZSB-83: catalog with a schema per card (choice, draft preview, form, connect, plan step, read-back). The server validates each card. No free HTML |
-| V-34 | Every control can be said; a phrase match runs before any model | Keep | Nothing | ZSB-83. Navigation and simple commands resolve without a model call. A tap and a phrase take the same path |
+| V-34 | Every control can be said; a phrase match runs before any model | Keep | Nothing | ZSB-83. Navigation and simple commands of the authenticated owner resolve without a model call. A tap and a phrase take the same path. A phrase never approves, and it writes at once only inside the D-7 Undo list |
 | V-35 | Swipe from talk to canvas and tools | Keep | Installable PWA with six areas at 390x844 | ZSB-83. Talk, canvas, schedule, customers, inbox, site, team |
 | V-36 | Employee agents the owner sees, assigns, pauses and stops from the phone | Keep | Agent runs, kill switches and cost exist (`packages/core/src/agents`) | ZSB-83 view over B11 and B12. Each agent shows its work, its next approval and a stop |
 | V-37 | The companion sets up the environment: accounts, connections, site, in the right order | Keep, inside the trust table | Setup templates, Composio OAuth, site publish | ZSB-70 orders the steps; ZSB-83 runs them by conversation. Each connection and each publish still takes one owner tap (`direction.md` trust table). No stored third-party passwords (V-27) |
 | V-38 | The companion's words match the records | Keep, a hard rule | The action path already commits before it reports | ZSB-83: the companion never says done, open, connected or booked until the record says so. OS1's first run broke this repeatedly |
 
-## 5. Conflicts with the current plan
+## 5. Conflicts with the current plan (pre-grill)
 
-All nine were resolved in the ZSB-81 grill on 2026-11-24; see §6, "Decisions taken".
+Kept as written before the grill. All nine were resolved in the ZSB-81 grill on 2026-11-24; see §6, "Decisions taken".
 
 1. **First cohort.** Recording: e-commerce and SaaS. `direction.md`: neutral base, parks Shopify
    and catalog work. ZAB: solo online sellers. D-1.
@@ -221,9 +225,15 @@ real business.
 **Q2 First e-commerce job.** Read-only order replies: the customer quotes an order number, an agent
 reads it, checks that the requester placed it, takes tracking from the store's fulfillment
 records and drafts a reply for one tap. Store writes stay in ZSB-77.
+*Launch gate (ZSB-73):* reads go only through the provider's authorised, tenant-scoped API. The
+requester is verified independently of what they quote (the sender address must match the order's
+buyer email, or the buyer confirms a one-time code sent to that email). If verification fails, the
+reply discloses no order details. Today's Shopify query has neither buyer identity nor tracking
+(`packages/core/src/shopify/orders.ts`); ZSB-73 adds both, and the same check applies to Etsy and
+Faire.
 
-**Connections before 2027-01-05 (Plaud round 1).** Shopify, Etsy, Stripe, Shippo and Klaviyo, each
-built whole. Faire is the sixth connection (Devin, 2026-11-24): read-only wholesale orders into
+**Connections (Plaud round 1).** Shopify, Etsy, Stripe, Shippo and Klaviyo, each built whole and
+built and tested by 2027-01-05. Etsy and Faire go live only when the provider approves access. Faire is the sixth connection (Devin, 2026-11-24): read-only wholesale orders into
 the same order-reply job, built and tested by 2027-01-14 against Faire's test setup, live when Faire
 approves access. Pirate Ship is out (no API). QuickBooks stays at Stage 3.
 Etsy and Faire review app access by hand: apply in the first week so review runs during the build.
@@ -236,7 +246,9 @@ Etsy and Faire review app access by hand: apply in the first week so review runs
   14-day card-required trial, once per tenant (Shopify: per shop, verified before it is
   advertised). The app discloses the conversion date, the charge and how to cancel. No money-back
   at launch; refunds stay human-run and never delete data (rule 10). ADR 0005.
-- Solo includes AI drafting at $1 per day per agent kind, under the company ceiling (B11).
+- Solo includes AI drafting with a model-cost cap of $1 per day per agent kind, under the company
+  ceiling (B11). Tests cover drafting on a Solo trial and on a tester grant, denial on Free, and the
+  fall back to Free when a trial or grant ends without a subscription.
 - Testers redeem a single-use, email-bound invite code for a 14-day Solo grant with no card and no
   operator step. Devin authorises each batch up front. PL-21..24 are revised to fit.
 - The existing $10/month Stripe connection add-on stays. New bundles (stacks, single agents) are
@@ -254,7 +266,11 @@ opens whole to both cohorts. ZAB-58 is re-scoped to the producers.
 **D-4 Client (Q12).** Keep the server core. Rebuild the owner client as one Expo native app for iOS
 and Android; retire `apps/dashboard` after parity (ADR 0001). ZSB-75 verifies the native build in
 parallel. If Apple in-app purchase rules are unresolved, the public store release slips and the
-cohort stays on TestFlight.
+cohort stays on TestFlight. On Jan 14 Android ships through Google Play testing tracks or the
+store, iOS through external TestFlight; if Apple's review is still pending, iOS owners use the
+same account in the current phone web app (`apps/dashboard`, retired only after parity) until it
+clears. If voice fails its tests, the typed companion
+ships complete (ADR 0002).
 
 **D-6 Voice (Q13).** Voice-first at launch, typing in the same conversation (ADR 0002). Voice can do
 everything except approve.
@@ -262,8 +278,9 @@ everything except approve.
 **D-5 Experiments (Q14).** One tap per experiment card binds the variants, split, event, sample,
 stop rules, deadline and a conditional promotion of the winner. Code checks the conditions and
 rolls back on harm. No new copy, prices or offers without a new card. Visitors opt in to tracking.
-Built and tested by Jan 14 on ZSB-80. Once proven per task type in real use, it becomes automatic (Stage 4). Sold
-standalone as a conversion optimiser.
+Built and tested by Jan 14 on ZSB-80. Automatic running (Stage 4) needs, per task type, release
+tests, measured field results, the owner's opt-in and rollback on incident. Sold standalone as a
+conversion optimiser.
 
 **Agents (Plaud round 1).** The companion is the CEO agent and delegates through durable tasks
 (ADR 0004). A stack is a sold bundle of task types. Zero Sum runs its own business as tenant zero
@@ -309,15 +326,20 @@ first-contact disclosure.
 self-serve opens to both cohorts alongside the agency soft launch:
 - the voice-first Expo app for iOS and Android, with typing and tap approvals;
 - the whole first run from both entry points, with ZAB site and AEO drafts and one Go live tap;
-- booking replies and requester-verified order replies, delegated through durable tasks;
+- booking replies and requester-verified order replies, delegated through durable tasks. Drafts
+  start from website inquiries and, once B20 and B21 land, inbound email; new tenants get
+  `waitHours` = 1 (an explicit change from today's default of 24);
 - Zero Sum as tenant zero;
 - verified email sign-up with no card, prices reconciled to `plans.ts`, Solo drafting, the 14-day
   trial and single-use tester codes;
 - launch checks: native distribution, real inbound routing, tenant isolation, export and delete,
-  and exactly-once address-bound delivery under retries;
+  and exactly-once address-bound delivery under bounded retries, with unknown provider outcomes
+  parked for a person;
+- the Stage 0 gate passed before production activation: release checks (B15, B16), the drafting
+  entitlement (ZSB-69), the company spend cap (B11) and the stop for queued work (B12);
 - the opt-in funnel check and the experiment cards with stop rules and rollback;
-- the standalone services, sold in the same app, and the formation research (counsel reviews
-  wording before sale).
+- the standalone services, sold in the same app: the site audit and AEO fix, the funnel check,
+  experiment cards and formation research (counsel reviews wording before sale).
 
 Before that: Shopify, Etsy, Stripe, Shippo and Klaviyo built and tested by 2027-01-05; Etsy and
 Faire access applied for in the first week, Faire built and tested by 2027-01-14; the first external TestFlight build sent to Apple as
@@ -334,7 +356,7 @@ laptop and no operator, and:
 - median time from sign-up to setup done (booking page live or store connected) is under 15
   minutes, timed per cohort;
 - the first agent draft is ready within 2 hours of the tenant's first real customer message
-  outside quiet hours (new tenants start with `waitHours` = 1);
+  outside quiet hours;
 - at least one approved reply per owner is delivered once, to the bound address.
 
 ## 7. Gaps neither plan covered
@@ -346,7 +368,7 @@ laptop and no operator, and:
 - **One account across portal, canvas and hub** (ZSB-71): identity, tenant choice, roles,
   ownership transfer, refunds, export and deletion across both repos.
 - **Phone reliability** (ZSB-75): draft persistence, microphone denial, interruption, background
-  upload, push only after a Home Screen install on iOS.
+  upload, native push tested on both platforms.
 - **Abuse, recovery and support**: sign-up quotas, account recovery, connection revoke, incident
   ownership. Free-tier gaps are ZSB-50 to ZSB-52.
 - **Cost per active account** (ZSB-72): model, speech, render, storage, email, SMS, workers and
@@ -373,6 +395,5 @@ laptop and no operator, and:
 | ZSB-83 | Contract: `companion.md` (talk home, card catalog, phrase match, swipe, team view) | high |
 
 Order: ZSB-81 is decided (2026-11-24). Everything on the launch path is built and tested by
-2027-01-14 (§6, "Dates"). Then the Stage 0 base as
-`direction.md` orders it, with ZSB-69 and ZSB-71 alongside because the Jan 14 launch depends on
-them.
+2027-01-14 (§6, "Dates"). The Stage 0 gate passes before production activation on Jan 14, with
+ZSB-69 and ZSB-71 alongside because the launch depends on them.
