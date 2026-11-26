@@ -15,7 +15,7 @@ Worker (`apps/site-worker`), and first slices of transcription, document intake 
 tasks (`services/browser-runner`). Not built: the voice receptionist, marketing email, social
 publishing and inbound email contracts. Each file in `docs/requirements/` states its own build
 status in its first lines (a file with built and unbuilt parts says which); that is the source of truth for a feature.
-Plan: `~/Inbox/plans/_unassigned/2026-10/2026-10-17-complete-product-assembly.md`.
+Plan: `~/Inbox/plans/_unassigned/2026-10/2026-10-17-complete-product-assembly.md` (on the MacBook Pro; not on the Studio).
 
 ## Hosting (M6, 2026-10-20)
 
