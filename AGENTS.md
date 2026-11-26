@@ -40,8 +40,8 @@ Layout (pnpm workspaces are `packages/*` and `apps/*`):
   over hand-written SQL. Dry-run it, take a `db:hosted-backup` first, apply, verify the result,
   and keep the receipt in `~/Backups/zs-business/receipts/`. Cloud sessions still never touch
   hosted systems (below).
-- Never edit `/Users/zero-suminc./projects/mish` or `/Users/zero-suminc./projects/rise-scheduler`
-  from this repo's work. Read them only.
+- Never edit the `mish` or `rise-scheduler` repositories from this repo's work, in any checkout
+  on any machine (for example `~/projects/mish` and `~/projects/rise-scheduler`). Read them only.
 - Conventional commits on feature branches. No AI attribution lines in commits, PR bodies or
   PR comments (no "Generated with", no Co-Authored-By, no session links).
 - Push only to your own feature branch, never to `main`; `main` takes changes only through a
