@@ -65,6 +65,23 @@ const metadata = (object: Record<string, unknown>) => {
 const createdAt = (value: unknown): Date | null =>
   Number.isSafeInteger(value) && (value as number) > 0 ? new Date((value as number) * 1000) : null;
 
+/**
+ * The agency-session lookup (D8). The payment-intent expression is bounded (a string `pi_...` of at most
+ * 254 characters, else null) so an oversized value can never break the B-tree, and it matches the index in
+ * 20261128100000_stripe_events_agency_intent.sql: keep the two in step.
+ */
+export const AGENCY_SESSION_SQL = `SELECT 1 FROM stripe_events
+  WHERE type='checkout.session.completed' AND processed_at IS NOT NULL AND outcome='not_ours'
+    AND payload->'data'->'object'->>'mode'='payment'
+    AND payload->'data'->'object'->'metadata'->'zs_agency' = '"1"'::jsonb
+    AND NOT (payload->'data'->'object'->'metadata' ?| array['zs_tenant','zs_topup','zs_checkout'])
+    AND (CASE WHEN coalesce(CASE jsonb_typeof(payload->'data'->'object'->'payment_intent') WHEN 'string' THEN payload->'data'->'object'->>'payment_intent' END,
+                            payload->'data'->'object'->'payment_intent'->>'id') ~ '^pi_[A-Za-z0-9_]{1,250}$'
+              THEN coalesce(CASE jsonb_typeof(payload->'data'->'object'->'payment_intent') WHEN 'string' THEN payload->'data'->'object'->>'payment_intent' END,
+                            payload->'data'->'object'->'payment_intent'->>'id') END) = $1
+    AND payload->'livemode' = to_jsonb($2::boolean)
+  LIMIT 1`;
+
 export function createBillingWorker(deps: BillingWorkerDeps) {
   const config = billingWorkerConfigSchema.parse(deps.config ?? {});
   const now = () => new Date(deps.clock.now().getTime());
@@ -81,6 +98,19 @@ export function createBillingWorker(deps: BillingWorkerDeps) {
   const byIntent = async (tx: Transaction, intent: string | null): Promise<TopUpRow | null> =>
     intent === null ? null : (await tx.query<TopUpRow>(
       `SELECT ${COLUMNS} FROM wallet_topups WHERE stripe_payment_intent_id=$1 FOR UPDATE`, [intent])).rows[0] ?? null;
+
+  /** D8 (stripe.md revision 6): agency payments share this Stripe account; their links carry zs_agency=1. */
+  const ZSB_TAGS = ["zs_tenant", "zs_topup", "zs_checkout"] as const;
+  const hasZsbTag = (meta: Record<string, unknown>) => ZSB_TAGS.some((key) => key in meta);
+  /** Agency only when tagged "1" and carrying no ZSB tag: ZSB tags always win. */
+  const isAgency = (meta: Record<string, unknown>) => meta.zs_agency === "1" && !hasZsbTag(meta);
+  /**
+   * The checkout session of this payment already ended not_ours as an agency session (same mode, payment
+   * mode, tag "1", no ZSB tag). `livemode` null fails closed. The expression is indexed in
+   * 20261128100000_stripe_events_agency_intent.sql: keep the two in step.
+   */
+  const agencySession = async (tx: Transaction, intent: string | null, livemode: boolean | null): Promise<boolean> =>
+    intent !== null && livemode !== null && (await tx.query(AGENCY_SESSION_SQL, [intent, livemode])).rowCount === 1;
 
   /** Credits `amount`, then repays anything owed from it (S-6). */
   async function credit(tx: Transaction, row: TopUpRow, amount: number, key: string, note: string, at: Date) {
@@ -138,10 +168,18 @@ export function createBillingWorker(deps: BillingWorkerDeps) {
     return updated.rowCount === 1 ? status : "ignored";
   }
 
-  async function refunded(tx: Transaction, object: Record<string, unknown>, at: Date): Promise<BillingOutcome> {
-    const row = await byIntent(tx, idOf(object.payment_intent));
-    // The payment may not be recorded yet: wait for checkout.session.completed.
-    if (!row) return "wait";
+  async function refunded(tx: Transaction, object: Record<string, unknown>, livemode: boolean | null, at: Date): Promise<BillingOutcome> {
+    const intent = idOf(object.payment_intent);
+    const row = await byIntent(tx, intent);
+    if (!row) {
+      // D8: an agency payment is not a top-up and never will be. Never decide on an intent we could not read,
+      // and any ZSB tag keeps the event waiting for its top-up.
+      const meta = metadata(object);
+      const unreadable = object.payment_intent != null && intent === null;
+      if (!unreadable && !hasZsbTag(meta) && (isAgency(meta) || (!("zs_agency" in meta) && await agencySession(tx, intent, livemode)))) return "not_ours";
+      // The payment may not be recorded yet: wait for checkout.session.completed.
+      return "wait";
+    }
     // Nothing was credited for a mismatched payment, so there is nothing to take back.
     if (row.status !== "paid") return "ignored";
     const total = amountOf(object.amount_refunded);
@@ -161,9 +199,14 @@ export function createBillingWorker(deps: BillingWorkerDeps) {
     return "refund_debited";
   }
 
-  async function dispute(tx: Transaction, object: Record<string, unknown>, direction: "withdrawn" | "reinstated", at: Date): Promise<BillingOutcome> {
-    const row = await byIntent(tx, idOf(object.payment_intent));
-    if (!row) return "wait";
+  async function dispute(tx: Transaction, object: Record<string, unknown>, direction: "withdrawn" | "reinstated", livemode: boolean | null, at: Date): Promise<BillingOutcome> {
+    const intent = idOf(object.payment_intent);
+    const row = await byIntent(tx, intent);
+    if (!row) {
+      // A dispute carries no metadata: look for the stored agency checkout session of the same payment.
+      if (await agencySession(tx, intent, livemode)) return "not_ours";
+      return "wait";
+    }
     if (row.status !== "paid") return "ignored";
     const disputeId = idOf(object.id);
     const amount = amountOf(object.amount);
@@ -185,7 +228,7 @@ export function createBillingWorker(deps: BillingWorkerDeps) {
     return "dispute_reinstated";
   }
 
-  async function apply(tx: Transaction, type: string, object: Record<string, unknown>, created: Date | null, at: Date): Promise<BillingOutcome> {
+  async function apply(tx: Transaction, type: string, object: Record<string, unknown>, created: Date | null, livemode: boolean | null, at: Date): Promise<BillingOutcome> {
     const plan = await plans.apply(tx, type, object, created, at);
     if (plan !== null) return plan;
     switch (type) {
@@ -197,11 +240,11 @@ export function createBillingWorker(deps: BillingWorkerDeps) {
       case "checkout.session.expired":
         return closed(tx, object, "expired", at);
       case "charge.refunded":
-        return refunded(tx, object, at);
+        return refunded(tx, object, livemode, at);
       case "charge.dispute.funds_withdrawn":
-        return dispute(tx, object, "withdrawn", at);
+        return dispute(tx, object, "withdrawn", livemode, at);
       case "charge.dispute.funds_reinstated":
-        return dispute(tx, object, "reinstated", at);
+        return dispute(tx, object, "reinstated", livemode, at);
       default:
         return "ignored";
     }
@@ -210,7 +253,7 @@ export function createBillingWorker(deps: BillingWorkerDeps) {
   /** One event: claims the oldest due one with SKIP LOCKED and applies it in a savepoint. */
   async function applyNext(at: Date): Promise<{ type: string; id: string; outcome: BillingOutcome } | null> {
     return deps.service(async (tx) => {
-      const event = (await tx.query<{ id: string; type: string; payload: { created?: unknown; data?: { object?: unknown } }; attempts: number }>(
+      const event = (await tx.query<{ id: string; type: string; payload: { created?: unknown; livemode?: unknown; data?: { object?: unknown } }; attempts: number }>(
         `SELECT id, type, payload, attempts FROM stripe_events WHERE processed_at IS NULL AND next_attempt_at <= $1
           ORDER BY received_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`, [at])).rows[0];
       if (!event) return null;
@@ -218,7 +261,8 @@ export function createBillingWorker(deps: BillingWorkerDeps) {
       let outcome: BillingOutcome;
       await tx.query("SAVEPOINT billing_event");
       try {
-        outcome = object && typeof object === "object" ? await apply(tx, event.type, object as Record<string, unknown>, createdAt(event.payload?.created), at) : "ignored";
+        outcome = object && typeof object === "object" ? await apply(tx, event.type, object as Record<string, unknown>, createdAt(event.payload?.created),
+          typeof event.payload?.livemode === "boolean" ? event.payload.livemode : null, at) : "ignored";
         // A plan event that waits or is not ours writes nothing: a retry starts from the same rows. The one exception
         // (PL-17) is the close of a pending plan checkout of a tenant another provider bills: that write stays.
         const keepWrite = outcome === "not_ours_closed";

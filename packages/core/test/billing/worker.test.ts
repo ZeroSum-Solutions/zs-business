@@ -3,7 +3,8 @@
 // every scenario ends with the wallet balance equal to its ledger.
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { createBillingWorker, releaseReservation, reserveFunds } from "../../src/index.js";
+import { createBillingWorker, recordStripeEvent, releaseReservation, reserveFunds } from "../../src/index.js";
+import { AGENCY_SESSION_SQL } from "../../src/billing/processor.js";
 import { createBillingHarness, stripeId, type BillingHarness, type PaidTopUp } from "./helpers.js";
 
 let b: BillingHarness;
@@ -255,6 +256,193 @@ describe("out of order (S-4)", () => {
     for (const id of [refund, dispute]) expect(await b.eventRow(id)).toMatchObject({ attempts: 3, outcome: "orphaned", processed_at: b.h.clock.now() });
     b.h.clock.advance(60 * 60_000);
     expect((await b.worker(config).runOnce()).claimed).toBe(0);
+  });
+});
+
+describe("agency payments share the account (D8, SS-020)", () => {
+  const ghost = () => ({ tenantId: randomUUID(), id: randomUUID(), amount: 50_000, sessionId: stripeId("cs"), paymentIntent: stripeId("pi"), chargeId: stripeId("ch") });
+  type Ghost = ReturnType<typeof ghost>;
+  /** A Payment Link session of the agency: no ZSB tenant or top-up, tagged zs_agency=1. */
+  const agencySession = (g: Ghost, extra: Record<string, unknown> = {}, metadata: Record<string, string> = { zs_agency: "1" }) =>
+    b.event("checkout.session.completed", { ...b.checkoutSession({ ...g, topupId: g.id }), client_reference_id: null, metadata, ...extra });
+  const disputeOf = (g: Ghost, type = "charge.dispute.funds_withdrawn") =>
+    b.event(type, b.dispute(g, stripeId("dp"), g.amount, type.endsWith("withdrawn") ? "needs_response" : "won"));
+  const waiting = async (id: string) => expect(await b.eventRow(id), id).toMatchObject({ attempts: 1, processed_at: null, outcome: null });
+  const config = { backoffBaseMs: 30_000, backoffMaxMs: 3_600_000, maxAttempts: 12 };
+
+  it("agency refund ends not_ours", async () => {
+    const tenantId = await tenant();
+    await b.paidTopUp(tenantId, 1_000);
+    const g = ghost();
+    const refund = await send(b.event("charge.refunded", { ...b.charge(g, 50_000), metadata: { zs_agency: "1" } }));
+    await b.worker().runOnce();
+    expect(await b.eventRow(refund)).toMatchObject({ attempts: 1, outcome: "not_ours" });
+    expect((await b.eventRow(refund)).processed_at).not.toBeNull();
+    b.h.clock.advance(60 * 60_000);
+    expect((await b.worker().runOnce()).claimed).toBe(0);
+    expect(await b.wallet(tenantId)).toEqual({ balance: 1_000, reserved: 0, owed: 0 });
+  });
+
+  it("agency refund whose charge has no tags ends not_ours through the stored agency session", async () => {
+    const g = ghost();
+    const session = await send(agencySession(g));
+    await b.worker().runOnce();
+    expect(await outcome(session)).toBe("not_ours");
+    const refund = await send(b.event("charge.refunded", b.charge(g, 50_000)));
+    await b.worker().runOnce();
+    expect(await outcome(refund)).toBe("not_ours");
+  });
+
+  it("agency dispute ends not_ours", async () => {
+    const tenantId = await tenant();
+    await b.paidTopUp(tenantId, 1_000);
+    const g = ghost();
+    // The session settles first, so the lookup finds it already resolved as agency.
+    const session = await send(agencySession(g));
+    await b.worker().runOnce();
+    expect(await outcome(session)).toBe("not_ours");
+    b.h.clock.advance(1_000);
+    const withdrawn = await send(disputeOf(g));
+    const reinstated = await send(disputeOf(g, "charge.dispute.funds_reinstated"));
+    await b.worker().runOnce();
+    for (const id of [withdrawn, reinstated]) expect(await b.eventRow(id)).toMatchObject({ attempts: 1, outcome: "not_ours" });
+    expect(await b.wallet(tenantId)).toEqual({ balance: 1_000, reserved: 0, owed: 0 });
+  });
+
+  it("unknown refund with no agency tag still waits", async () => {
+    const g = ghost();
+    const refund = await send(b.event("charge.refunded", b.charge(g, 50_000)));
+    const zero = await send(b.event("charge.refunded", { ...b.charge(ghost(), 50_000), metadata: { zs_agency: "0" } }));
+    const number = await send(b.event("charge.refunded", { ...b.charge(ghost(), 50_000), metadata: { zs_agency: 1 } }));
+    // A tag on a charge whose payment intent cannot be read never ends not_ours.
+    // An explicit zs_agency key that is not "1" never falls back to the stored session, even when one exists.
+    const stored = ghost();
+    await send(agencySession(stored));
+    await b.worker().runOnce();
+    b.h.clock.advance(1_000);
+    const explicitZero = await send(b.event("charge.refunded", { ...b.charge(stored, 50_000), metadata: { zs_agency: "0" } }));
+    const explicitNumber = await send(b.event("charge.refunded", { ...b.charge(stored, 50_000), metadata: { zs_agency: 1 } }));
+    const unreadable = await send(b.event("charge.refunded", { ...b.charge(ghost(), 50_000), payment_intent: "pi bad id", metadata: { zs_agency: "1" } }));
+    // A dispute whose stored session is untagged still waits.
+    const plain = ghost();
+    await send(agencySession(plain, {}, { note: "x" }));
+    await b.worker().runOnce();
+    b.h.clock.advance(1_000);
+    const dispute = await send(disputeOf(g));
+    const untagged = await send(disputeOf(plain));
+    await b.worker().runOnce();
+    for (const id of [refund, zero, number, explicitZero, explicitNumber, unreadable, dispute, untagged]) await waiting(id);
+  });
+
+  it("a real top-up whose charge also carries zs_agency=1 waits for its payment, then the refund debits", async () => {
+    const tenantId = await tenant();
+    const t = await pending(tenantId, 2_000);
+    const charge = { ...b.charge(t, 500), metadata: { zs_agency: "1", zs_tenant: tenantId, zs_topup: t.id } };
+    const refund = await send(b.event("charge.refunded", charge));
+    await b.worker(config).runOnce();
+    await waiting(refund);
+    b.h.clock.advance(1_000);
+    const paid = await send(sessionEvent("checkout.session.completed", t));
+    await b.worker(config).runOnce();
+    expect(await outcome(paid)).toBe("credited");
+    b.h.clock.advance(30_000);
+    await b.worker(config).runOnce();
+    expect(await b.eventRow(refund)).toMatchObject({ attempts: 2, outcome: "refund_debited" });
+    expect(await b.wallet(tenantId)).toEqual({ balance: 1_500, reserved: 0, owed: 0 });
+  });
+
+  it("a real top-up whose session also carries zs_agency=1 waits for its payment on a dispute, then debits", async () => {
+    const tenantId = await tenant();
+    const t = await pending(tenantId, 2_000);
+    const dispute = await send(b.event("charge.dispute.funds_withdrawn", b.dispute(t, stripeId("dp"), 700, "needs_response")));
+    await b.worker(config).runOnce();
+    await waiting(dispute);
+    b.h.clock.advance(1_000);
+    const paid = await send(b.event("checkout.session.completed", {
+      ...b.checkoutSession({ tenantId, topupId: t.id, sessionId: t.sessionId, amount: t.amount, paymentIntent: t.paymentIntent }),
+      metadata: { zs_tenant: tenantId, zs_topup: t.id, zs_agency: "1" },
+    }));
+    await b.worker(config).runOnce();
+    expect(await outcome(paid)).toBe("credited");
+    b.h.clock.advance(30_000);
+    await b.worker(config).runOnce();
+    expect(await b.eventRow(dispute)).toMatchObject({ attempts: 2, outcome: "dispute_debited" });
+    expect(await b.wallet(tenantId)).toEqual({ balance: 1_300, reserved: 0, owed: 0 });
+  });
+
+  it("an agency session that arrives after the dispute resolves it not_ours on retry", async () => {
+    const g = ghost();
+    const dispute = await send(disputeOf(g));
+    await b.worker(config).runOnce();
+    await waiting(dispute);
+    b.h.clock.advance(1_000);
+    const session = await send(agencySession(g));
+    await b.worker(config).runOnce();
+    expect(await outcome(session)).toBe("not_ours");
+    await waiting(dispute);
+    b.h.clock.advance(30_000);
+    await b.worker(config).runOnce();
+    expect(await b.eventRow(dispute)).toMatchObject({ attempts: 2, outcome: "not_ours" });
+  });
+
+  it("a dual-tagged session that ended not_ours is rejected by the dispute lookup", async () => {
+    // Names a top-up that does not exist, so it ends not_ours without linking any row: only the ZSB-tag
+    // exclusion keeps the lookup from accepting it.
+    const g = ghost();
+    const session = await send(agencySession(g, {}, { zs_agency: "1", zs_tenant: randomUUID(), zs_topup: randomUUID() }));
+    await b.worker(config).runOnce();
+    expect(await outcome(session)).toBe("not_ours");
+    b.h.clock.advance(1_000);
+    const dispute = await send(disputeOf(g));
+    await b.worker(config).runOnce();
+    await waiting(dispute);
+  });
+
+  it("the agency lookup uses the partial index and bounds the payment intent", async () => {
+    const g = ghost();
+    await send(agencySession(g));
+    await b.worker().runOnce();
+    // An oversized intent stored on an agency session neither breaks the index nor matches.
+    const huge = { ...ghost(), paymentIntent: `pi_${"a".repeat(20_000)}` };
+    await send(agencySession(huge));
+    await b.worker().runOnce();
+    const plan = await b.h.service(async (tx) => {
+      await tx.query("SET LOCAL enable_seqscan=off");
+      return (await tx.query<Record<string, string>>(`EXPLAIN ${AGENCY_SESSION_SQL}`, [g.paymentIntent, false])).rows.map((row) => row["QUERY PLAN"]).join("\n");
+    });
+    expect(plan).toContain("stripe_events_agency_intent");
+    const found = async (intent: string) => b.h.service(async (tx) => (await tx.query(AGENCY_SESSION_SQL, [intent, false])).rowCount);
+    expect(await found(g.paymentIntent)).toBe(1);
+    expect(await found(huge.paymentIntent)).toBe(0);
+  });
+
+  it("an expanded payment_intent on the stored session matches", async () => {
+    const g = ghost();
+    await send(agencySession(g, { payment_intent: { id: g.paymentIntent, object: "payment_intent" } }));
+    await b.worker().runOnce();
+    b.h.clock.advance(1_000);
+    const dispute = await send(disputeOf(g));
+    await b.worker().runOnce();
+    expect(await b.eventRow(dispute)).toMatchObject({ attempts: 1, outcome: "not_ours" });
+  });
+
+  it("a session of another livemode, or of subscription mode, does not match", async () => {
+    const live = ghost();
+    const sub = ghost();
+    const nolive = ghost();
+    await send({ ...agencySession(live), livemode: true });
+    await send(agencySession(sub, { mode: "subscription" }));
+    await send(agencySession(nolive));
+    await b.worker().runOnce();
+    b.h.clock.advance(1_000);
+    const noFlag = disputeOf(nolive);
+    const disputes = [await send(disputeOf(live)), await send(disputeOf(sub))];
+    // Fail closed: a dispute event without a livemode flag matches nothing (stored as the webhook would, bypassing the schema).
+    const { livemode: _flag, ...payload } = noFlag;
+    expect(await recordStripeEvent(b.h.database.db, { event: noFlag, payload, now: b.h.clock.now() })).toEqual({ stored: true });
+    disputes.push(noFlag.id);
+    await b.worker().runOnce();
+    for (const id of disputes) await waiting(id);
   });
 });
 
