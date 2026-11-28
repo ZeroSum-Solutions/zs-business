@@ -78,8 +78,8 @@ A job claim is how ZSB hands one unit of work to one producer for one tenant.
   confirmed facts the kind may read, the input digest, an expiry and the object-key prefix for
   uploads. The tenant is held server-side and is not echoed for the producer to send back.
 - PI-5. A claim is exclusive and expires. A producer that does not post a result before expiry
-  loses the claim; the job returns to the queue and a later result for the stale claim is
-  stored nothing and answered with an error receipt (`claim_expired`).
+  loses the claim; the job returns to the queue and a later result for the stale claim
+  stores nothing and gets an error receipt (`claim_expired`).
 - PI-6. `job_id` is the id from the claim. A producer never invents one for tenant work.
 - PI-7. Every result is an envelope of contract `zs.aeo` v1 with these fields (the full schema
   and fixtures live in ZAB under `tools/aeo/contract/v1/` and are mirrored in
