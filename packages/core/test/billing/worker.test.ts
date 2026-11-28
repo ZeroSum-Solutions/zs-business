@@ -4,6 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createBillingWorker, recordStripeEvent, releaseReservation, reserveFunds } from "../../src/index.js";
+import { AGENCY_SESSION_SQL } from "../../src/billing/processor.js";
 import { createBillingHarness, stripeId, type BillingHarness, type PaidTopUp } from "./helpers.js";
 
 let b: BillingHarness;
@@ -314,14 +315,23 @@ describe("agency payments share the account (D8, SS-020)", () => {
     const zero = await send(b.event("charge.refunded", { ...b.charge(ghost(), 50_000), metadata: { zs_agency: "0" } }));
     const number = await send(b.event("charge.refunded", { ...b.charge(ghost(), 50_000), metadata: { zs_agency: 1 } }));
     // A tag on a charge whose payment intent cannot be read never ends not_ours.
+    // An explicit zs_agency key that is not "1" never falls back to the stored session, even when one exists.
+    const stored = ghost();
+    await send(agencySession(stored));
+    await b.worker().runOnce();
+    b.h.clock.advance(1_000);
+    const explicitZero = await send(b.event("charge.refunded", { ...b.charge(stored, 50_000), metadata: { zs_agency: "0" } }));
+    const explicitNumber = await send(b.event("charge.refunded", { ...b.charge(stored, 50_000), metadata: { zs_agency: 1 } }));
     const unreadable = await send(b.event("charge.refunded", { ...b.charge(ghost(), 50_000), payment_intent: "pi bad id", metadata: { zs_agency: "1" } }));
     // A dispute whose stored session is untagged still waits.
     const plain = ghost();
     await send(agencySession(plain, {}, { note: "x" }));
+    await b.worker().runOnce();
+    b.h.clock.advance(1_000);
     const dispute = await send(disputeOf(g));
     const untagged = await send(disputeOf(plain));
     await b.worker().runOnce();
-    for (const id of [refund, zero, number, unreadable, dispute, untagged]) await waiting(id);
+    for (const id of [refund, zero, number, explicitZero, explicitNumber, unreadable, dispute, untagged]) await waiting(id);
   });
 
   it("a real top-up whose charge also carries zs_agency=1 waits for its payment, then the refund debits", async () => {
@@ -373,6 +383,37 @@ describe("agency payments share the account (D8, SS-020)", () => {
     b.h.clock.advance(30_000);
     await b.worker(config).runOnce();
     expect(await b.eventRow(dispute)).toMatchObject({ attempts: 2, outcome: "not_ours" });
+  });
+
+  it("a dual-tagged session that ended not_ours is rejected by the dispute lookup", async () => {
+    // Names a top-up that does not exist, so it ends not_ours without linking any row: only the ZSB-tag
+    // exclusion keeps the lookup from accepting it.
+    const g = ghost();
+    const session = await send(agencySession(g, {}, { zs_agency: "1", zs_tenant: randomUUID(), zs_topup: randomUUID() }));
+    await b.worker(config).runOnce();
+    expect(await outcome(session)).toBe("not_ours");
+    b.h.clock.advance(1_000);
+    const dispute = await send(disputeOf(g));
+    await b.worker(config).runOnce();
+    await waiting(dispute);
+  });
+
+  it("the agency lookup uses the partial index and bounds the payment intent", async () => {
+    const g = ghost();
+    await send(agencySession(g));
+    await b.worker().runOnce();
+    // An oversized intent stored on an agency session neither breaks the index nor matches.
+    const huge = { ...ghost(), paymentIntent: `pi_${"a".repeat(20_000)}` };
+    await send(agencySession(huge));
+    await b.worker().runOnce();
+    const plan = await b.h.service(async (tx) => {
+      await tx.query("SET LOCAL enable_seqscan=off");
+      return (await tx.query<Record<string, string>>(`EXPLAIN ${AGENCY_SESSION_SQL}`, [g.paymentIntent, false])).rows.map((row) => row["QUERY PLAN"]).join("\n");
+    });
+    expect(plan).toContain("stripe_events_agency_intent");
+    const found = async (intent: string) => b.h.service(async (tx) => (await tx.query(AGENCY_SESSION_SQL, [intent, false])).rowCount);
+    expect(await found(g.paymentIntent)).toBe(1);
+    expect(await found(huge.paymentIntent)).toBe(0);
   });
 
   it("an expanded payment_intent on the stored session matches", async () => {

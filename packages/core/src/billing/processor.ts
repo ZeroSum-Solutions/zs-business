@@ -65,6 +65,23 @@ const metadata = (object: Record<string, unknown>) => {
 const createdAt = (value: unknown): Date | null =>
   Number.isSafeInteger(value) && (value as number) > 0 ? new Date((value as number) * 1000) : null;
 
+/**
+ * The agency-session lookup (D8). The payment-intent expression is bounded (a string `pi_...` of at most
+ * 254 characters, else null) so an oversized value can never break the B-tree, and it matches the index in
+ * 20261128100000_stripe_events_agency_intent.sql: keep the two in step.
+ */
+export const AGENCY_SESSION_SQL = `SELECT 1 FROM stripe_events
+  WHERE type='checkout.session.completed' AND processed_at IS NOT NULL AND outcome='not_ours'
+    AND payload->'data'->'object'->>'mode'='payment'
+    AND payload->'data'->'object'->'metadata'->'zs_agency' = '"1"'::jsonb
+    AND NOT (payload->'data'->'object'->'metadata' ?| array['zs_tenant','zs_topup','zs_checkout'])
+    AND (CASE WHEN coalesce(CASE jsonb_typeof(payload->'data'->'object'->'payment_intent') WHEN 'string' THEN payload->'data'->'object'->>'payment_intent' END,
+                            payload->'data'->'object'->'payment_intent'->>'id') ~ '^pi_[A-Za-z0-9_]{1,250}$'
+              THEN coalesce(CASE jsonb_typeof(payload->'data'->'object'->'payment_intent') WHEN 'string' THEN payload->'data'->'object'->>'payment_intent' END,
+                            payload->'data'->'object'->'payment_intent'->>'id') END) = $1
+    AND payload->'livemode' = to_jsonb($2::boolean)
+  LIMIT 1`;
+
 export function createBillingWorker(deps: BillingWorkerDeps) {
   const config = billingWorkerConfigSchema.parse(deps.config ?? {});
   const now = () => new Date(deps.clock.now().getTime());
@@ -93,16 +110,7 @@ export function createBillingWorker(deps: BillingWorkerDeps) {
    * 20261128100000_stripe_events_agency_intent.sql: keep the two in step.
    */
   const agencySession = async (tx: Transaction, intent: string | null, livemode: boolean | null): Promise<boolean> =>
-    intent !== null && livemode !== null && (await tx.query(
-      `SELECT 1 FROM stripe_events
-        WHERE type='checkout.session.completed' AND processed_at IS NOT NULL AND outcome='not_ours'
-          AND payload->'data'->'object'->>'mode'='payment'
-          AND payload->'data'->'object'->'metadata'->'zs_agency' = '"1"'::jsonb
-          AND NOT (payload->'data'->'object'->'metadata' ?| array['zs_tenant','zs_topup','zs_checkout'])
-          AND coalesce(CASE jsonb_typeof(payload->'data'->'object'->'payment_intent') WHEN 'string' THEN payload->'data'->'object'->>'payment_intent' END,
-                       payload->'data'->'object'->'payment_intent'->>'id') = $1
-          AND payload->'livemode' = to_jsonb($2::boolean)
-        LIMIT 1`, [intent, livemode])).rowCount === 1;
+    intent !== null && livemode !== null && (await tx.query(AGENCY_SESSION_SQL, [intent, livemode])).rowCount === 1;
 
   /** Credits `amount`, then repays anything owed from it (S-6). */
   async function credit(tx: Transaction, row: TopUpRow, amount: number, key: string, note: string, at: Date) {
@@ -168,7 +176,7 @@ export function createBillingWorker(deps: BillingWorkerDeps) {
       // and any ZSB tag keeps the event waiting for its top-up.
       const meta = metadata(object);
       const unreadable = object.payment_intent != null && intent === null;
-      if (!unreadable && !hasZsbTag(meta) && (isAgency(meta) || await agencySession(tx, intent, livemode))) return "not_ours";
+      if (!unreadable && !hasZsbTag(meta) && (isAgency(meta) || (!("zs_agency" in meta) && await agencySession(tx, intent, livemode)))) return "not_ours";
       // The payment may not be recorded yet: wait for checkout.session.completed.
       return "wait";
     }
