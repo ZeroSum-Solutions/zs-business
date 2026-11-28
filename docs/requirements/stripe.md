@@ -1,8 +1,24 @@
 # M5: Stripe wallet top-ups
 
-Status: draft contract for M5, provider 2 of 5 (2026-10-20), revision 5 (2026-11-07: S-4 and S-9
+Status: draft contract for M5, provider 2 of 5 (2026-10-20), revision 6 (2026-11-28: D8 agency
+exception to S-4 and S-6). Revision 5 (2026-11-07: S-4 and S-9
 carry Hub plan subscriptions, `plans.md`). Revision 4: audit B3-02, S-2, S-7. Code follows this
 file; a change to a numbered rule needs a new revision of this file first.
+
+Revision 6 (D8, SS-020): agency payments (audit and Launch Kit links) land in this Stripe account.
+Their Payment Links set `metadata[zs_agency]=1` and `payment_intent_data[metadata][zs_agency]=1`;
+the second reaches the Charge in `charge.refunded` (checked in Stripe test mode), and the two
+metadata sets are independent, so both must be set. Exception to S-4 and S-6, only when no top-up
+matches the payment intent: (1) ZSB tags win: metadata with `zs_tenant`, `zs_topup` or `zs_checkout`
+never counts as agency, and such an event still waits. (2) A `charge.refunded` ends `not_ours` when
+its charge metadata is `zs_agency` = `"1"` with no ZSB tag, or when no ZSB or agency tag is on the
+charge and the payment's stored session is an agency session (3). An unreadable `payment_intent`
+never ends `not_ours`. (3) A dispute carries no metadata, so `charge.dispute.funds_*` ends
+`not_ours` when `stripe_events` holds a `checkout.session.completed` of the same payment intent
+(a string or an expanded object), in `payment` mode, of the same `livemode` as the dispute event (a
+missing `livemode` fails closed), with `metadata.zs_agency` the string `"1"`, no ZSB tag, and that
+already ended `not_ours`. A dispute that arrives first waits and resolves on a retry. Everything
+else, including the `wait` and `orphaned` path, is unchanged. Agency events never move a wallet.
 
 Revision 5: paid Hub plans (`plans.md` PL-1..PL-13) use this file's Stripe account, webhook
 endpoint, event inbox and billing worker. S-4 now hands plan events to PL-10, and a
