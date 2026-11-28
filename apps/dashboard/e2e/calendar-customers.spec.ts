@@ -3,6 +3,17 @@ import { expect, test, type Page } from "@playwright/test";
 // UI audit U2: what only a browser shows on Calendar and Customers. Focus after an action
 // removed the focused control, layout at 390px, and the offline note.
 
+/**
+ * The calendar opens on Day when today has a booking and on Week when it has none (openingView), so what the
+ * first screen shows depends on the weekday the suite runs on. Run every calendar test on both, with the
+ * browser clock pinned (noon in the demo business's zone), so a run on any date proves both paths and a
+ * test that assumes one of them fails on every run, not only on the weekday that exposes it.
+ */
+const CALENDAR_DAYS = [
+  { label: "a day with bookings", now: "2026-11-28T20:00:00Z", opensOn: "Day" },
+  { label: "a day with none", now: "2026-11-22T20:00:00Z", opensOn: "Week" },
+] as const;
+
 /** The Day view. The calendar opens on Week when today has no bookings (calendar-view.tsx openingView), so the
  * day buttons these tests use exist only after the owner picks Day; that depends on the date the suite runs. */
 async function openDayView(page: Page) {
@@ -12,7 +23,14 @@ async function openDayView(page: Page) {
   await expect(day).toHaveAttribute("aria-pressed", "true");
 }
 
-test.describe("calendar", () => {
+for (const { label, now, opensOn } of CALENDAR_DAYS) test.describe(`calendar, on ${label}`, () => {
+  test.beforeEach(async ({ page }) => { await page.clock.install({ time: new Date(now) }); });
+
+  test(`opens on the ${opensOn} view`, async ({ page }) => {
+    await page.goto("/calendar");
+    await expect(page.getByRole("group", { name: "View" }).getByRole("button", { name: opensOn })).toHaveAttribute("aria-pressed", "true");
+  });
+
   test("after booking an open time, focus lands on the Booked heading, not the page (U2-3)", async ({ page }) => {
     await openDayView(page);
     await expect(page.getByRole("heading", { level: 1, name: "Calendar" })).toBeVisible();
